@@ -88,10 +88,24 @@ interface SealedWrap {
   signer: PrivateKeySigner;
 }
 
-/** NIP-59 randomises timestamps up to two days back, to blur when mail moves. */
+/**
+ * How far back a wrap's timestamp may be randomised.
+ *
+ * NIP-59 permits up to two days, and two days is wrong in practice: a client
+ * subscribes to its inbox with a `since` floor, and a wrap dated yesterday falls
+ * below it and is never fetched. That is exactly how a delivered, correctly
+ * sealed reply stayed invisible in a real client — the relays had it and nobody
+ * asked for it.
+ *
+ * One hour is what applesauce's own wrapper uses: enough to blur when mail
+ * moves, inside the window clients actually query.
+ */
+const MAX_TIMESTAMP_SKEW_SECS = 60 * 60;
+
 function randomPast(): number {
   return (
-    Math.floor(Date.now() / 1000) - Math.floor(Math.random() * 2 * 24 * 60 * 60)
+    Math.floor(Date.now() / 1000) -
+    Math.floor(Math.random() * MAX_TIMESTAMP_SKEW_SECS)
   );
 }
 

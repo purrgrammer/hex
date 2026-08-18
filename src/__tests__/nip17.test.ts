@@ -210,6 +210,40 @@ describe("Nip17Transport.reply", () => {
     expect(rumor.pubkey).toBe(hexPubkey);
   });
 
+  it("dates the wrap inside the window a client will ask for", async () => {
+    // Randomising two days back is legal and useless: a client subscribes to its
+    // inbox with a `since` floor, so a wrap dated yesterday is never fetched. A
+    // correctly sealed, successfully delivered reply stayed invisible that way.
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const bus = build(relay.url);
+
+    const list = finalizeEvent(
+      {
+        kind: KIND_DM_RELAYS,
+        content: "",
+        created_at: 2000,
+        tags: [["relay", relay.url]],
+      },
+      peerKey,
+    );
+    const { publishTo } = await import("../relays.js");
+    await publishTo(relays, [relay.url], list);
+    const before = relay.received.length;
+
+    const sentAt = Math.floor(Date.now() / 1000);
+    await bus.reply(inboundFrom(), "an answer");
+
+    const wraps = relay.received
+      .slice(before)
+      .filter((event) => event.kind === KIND_GIFT_WRAP);
+    for (const wrap of wraps) {
+      expect(wrap.created_at).toBeLessThanOrEqual(sentAt + 1);
+      // Within the hour, not within two days.
+      expect(wrap.created_at).toBeGreaterThan(sentAt - 60 * 60 - 1);
+    }
+  });
+
   it("refuses to send when the peer publishes no inbox", async () => {
     // Delivering to a relay they do not read is a message that was never sent.
     relay = await startMockRelay({ kind: "normal" });

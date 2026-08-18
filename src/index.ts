@@ -120,6 +120,13 @@ export {
 } from "./agent.js";
 export { RoomContext, type ContextOptions } from "./context.js";
 export {
+  Nip17Transport,
+  KIND_GIFT_WRAP,
+  KIND_PRIVATE_MESSAGE,
+  KIND_DM_RELAYS,
+  type Nip17TransportOptions,
+} from "./transports/nip17.js";
+export {
   Nip29Transport,
   KIND_GROUP_MESSAGE,
   type Nip29TransportOptions,
