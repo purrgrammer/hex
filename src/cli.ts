@@ -14,6 +14,7 @@ import { loadConfig } from "./config-file.js";
 import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
 import { resolveSigner } from "./signer.js";
 import { announceIdentity } from "./identity.js";
+import { joinConfiguredGroups } from "./transports/nip29-join.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -21,6 +22,7 @@ Usage:
   hex whoami   [config]            print the pubkey the configured signer holds
   hex check    [config]            validate config and dial every relay
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
+  hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
   hex run      [config]            (next phase)
 
 Config defaults to ./hex.config.json.
@@ -51,6 +53,7 @@ async function main(): Promise<void> {
     allowPositionals: true,
     options: {
       "dry-run": { type: "boolean", default: false },
+      auto: { type: "boolean", default: false },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -158,6 +161,41 @@ async function main(): Promise<void> {
           );
         await resolved.close();
         if (results.some((result) => result.action === "failed"))
+          process.exitCode = 1;
+        return;
+      }
+
+      case "join": {
+        // Every configured group, or only the ones marked autoJoin with --auto.
+        const groups = config.transports.flatMap((transport) =>
+          values.auto && !transport.autoJoin ? [] : transport.groups,
+        );
+        if (groups.length === 0)
+          fail(
+            values.auto
+              ? "no configured group has autoJoin set"
+              : "no NIP-29 groups are configured",
+          );
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const outcomes = await joinConfiguredGroups(
+          relays,
+          resolved.signer,
+          resolved.pubkey,
+          groups,
+          { dryRun: values["dry-run"] },
+        );
+        for (const outcome of outcomes)
+          console.log(
+            `${outcome.group}  ${outcome.action}${
+              outcome.action === "failed" ? ` — ${outcome.detail}` : ""
+            }`,
+          );
+        await resolved.close();
+        if (outcomes.some((outcome) => outcome.action === "failed"))
           process.exitCode = 1;
         return;
       }

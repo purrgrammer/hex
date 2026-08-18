@@ -48,6 +48,10 @@ restart does not re-pair.
   SILENT, which is not the same as having no events.
 - `hex announce [--dry-run]` — publish kind 0, 10002 and 10050 from config,
   skipping any whose published copy already matches. Idempotent.
+- `hex join [--auto] [--dry-run]` — request to join the configured NIP-29 groups
+  (kind 9021, sent only to each group's own relay). `--auto` limits it to groups
+  marked `autoJoin`, which is what `hex run` will do at startup. A group whose
+  member or admin list already names Hex is skipped, so this is safe to repeat.
 - `hex run` — next phase.
 
 ## Status

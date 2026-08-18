@@ -67,3 +67,11 @@ export type {
   ToolSpec,
 } from "./brain/types.js";
 export { EchoBrain } from "./brain/echo.js";
+export {
+  joinGroup,
+  joinConfiguredGroups,
+  isGroupMember,
+  KIND_JOIN_REQUEST,
+  type JoinOutcome,
+  type JoinOptions,
+} from "./transports/nip29-join.js";
