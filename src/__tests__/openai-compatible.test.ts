@@ -9,7 +9,7 @@ import {
 import { createBrain } from "../brain/create.js";
 import { parseConfig } from "../config.js";
 import { ConsoleTools } from "../tools/console-tools.js";
-import { RESPOND_TOOL } from "../tools/types.js";
+import { RESPOND_TOOL, wireName } from "../tools/types.js";
 import type { BrainRequest } from "../brain/types.js";
 import type { Room } from "../transports/types.js";
 
@@ -174,11 +174,11 @@ describe("buildMessages", () => {
       SELF,
     );
 
-    // The persona comes first; the runtime's tool contract is a system message of
-    // its own, so assert on the conversation rather than on indices.
-    expect(messages[0]).toEqual({ role: "system", content: "You are Hex." });
-    expect(messages[1]!.role).toBe("system");
-    expect(messages[1]!.content).toContain(RESPOND_TOOL);
+    // One system message: the operator's instructions, then the runtime's rules
+    // and the tool paragraph. Assert on the conversation, not on indices.
+    expect(messages[0]!.role).toBe("system");
+    expect(messages[0]!.content).toContain("You are Hex.");
+    expect(messages[0]!.content).toContain(RESPOND_TOOL);
     const conversation = messages.filter(
       (message) => message.role !== "system",
     );
@@ -229,7 +229,11 @@ describe("OpenAICompatibleBrain", () => {
     const wireTools = captured!.body.tools as {
       function: { name: string };
     }[];
-    expect(wireTools.map((tool) => tool.function.name)).toEqual([RESPOND_TOOL]);
+    // A dot is not a portable function name, so the wire carries an underscore
+    // while the prompt and the registry keep the canonical id.
+    expect(wireTools.map((tool) => tool.function.name)).toEqual([
+      wireName(RESPOND_TOOL),
+    ]);
   });
 
   it("feeds the tool's result back and keeps going", async () => {

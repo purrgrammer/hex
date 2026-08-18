@@ -67,11 +67,26 @@ export { EchoBrain } from "./brain/echo.js";
 export {
   RESPOND_TOOL,
   REACT_TOOL,
+  HELP_TOOL,
+  REQ_TOOL,
+  RESOLVE_TOOL,
+  wireName,
+  canonicalId,
+  describeTools,
   type ToolHost,
   type ToolSpec,
   type ToolCall,
   type ToolResult,
+  type ToolNamespace,
 } from "./tools/types.js";
+export {
+  KnowledgeTools,
+  parseKindTable,
+  normalizeNipId,
+  MAX_QUERY_LIMIT,
+  type KnowledgeOptions,
+} from "./tools/knowledge.js";
+export { buildSystemPrompt } from "./prompt.js";
 export { RoomTools, type RoomToolsOptions } from "./tools/room-tools.js";
 export { ConsoleTools } from "./tools/console-tools.js";
 export { createBrain, type CreateBrainOptions } from "./brain/create.js";

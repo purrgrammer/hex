@@ -18,7 +18,8 @@ import type {
   ContextMessage,
   TurnOutcome,
 } from "./types.js";
-import { RESPOND_TOOL, type ToolSpec } from "../tools/types.js";
+import { RESPOND_TOOL, wireName, type ToolSpec } from "../tools/types.js";
+import { buildSystemPrompt } from "../prompt.js";
 
 export interface OpenAICompatibleOptions {
   /** e.g. `https://api.openai.com/v1` — with or without a trailing slash. */
@@ -93,7 +94,8 @@ export function toWireTools(specs: ToolSpec[]) {
   return specs.map((spec) => ({
     type: "function" as const,
     function: {
-      name: spec.name,
+      // A dot is not a portable function name; the id keeps it, the wire does not.
+      name: wireName(spec.name),
       description: spec.description,
       parameters: spec.parameters,
     },
@@ -121,24 +123,13 @@ export function buildMessages(
       : { role: "user", content: `${label(message)}: ${message.text}` },
   );
 
-  // The tool contract, stated where the model reads it. `instructions` is the
-  // persona and stays the operator's; how to be heard is the runtime's, and a
-  // model that is not told will simply answer in prose — which is why the
-  // fallback exists and why this line makes it rare.
-  const speaking = request.tools
-    .list()
-    .some((spec) => spec.name === RESPOND_TOOL)
-    ? [
-        {
-          role: "system" as const,
-          content: `You are in a chat room. Nothing you write is heard unless you call the ${RESPOND_TOOL} tool — text outside a tool call is private thinking. Call it exactly once, with what you want to say. If a message needs no answer from you, call no tool and write nothing.`,
-        },
-      ]
-    : [];
-
+  // One system message, built from the operator's instructions plus the
+  // runtime's rules and the tool paragraph the registry generates.
   return [
-    { role: "system", content: request.instructions },
-    ...speaking,
+    {
+      role: "system",
+      content: buildSystemPrompt(request.instructions, request.tools.list()),
+    },
     ...history,
     {
       role: "user",
@@ -229,6 +220,12 @@ export class OpenAICompatibleBrain implements Brain {
         const result = error
           ? { ok: false, output: error }
           : await request.tools.call({ name, arguments: args });
+
+        // One line per call, so "did it look anything up?" is answerable from the
+        // log rather than by inference from the answer's quality.
+        log(
+          `[hex] tool ${name} ${result.ok ? "ok" : "refused"} — ${result.output.slice(0, 120)}`,
+        );
 
         messages.push({
           role: "tool",

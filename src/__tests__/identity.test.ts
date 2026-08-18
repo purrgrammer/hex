@@ -24,15 +24,28 @@ const config = parseConfig({
 });
 
 describe("buildProfileContent", () => {
-  it("writes only the fields the config set", () => {
+  it("writes only the fields the config set, plus the bot flag", () => {
     expect(JSON.parse(buildProfileContent(config.profile))).toEqual({
+      bot: true,
       name: "Hex",
       about: "grimoire assistant",
     });
   });
 
-  it("is an empty object when nothing but publish was set", () => {
-    expect(buildProfileContent({ publish: true })).toBe("{}");
+  it("declares itself a bot by default (NIP-24)", () => {
+    // A client that dims or filters automated replies can only do so if the flag
+    // is there, and a bot that must be configured into declaring itself is one
+    // that ships undeclared.
+    expect(JSON.parse(buildProfileContent({ publish: true }))).toEqual({
+      bot: true,
+    });
+  });
+
+  it("honours an explicit bot: false", () => {
+    // A claim its operator is making, not a default anyone falls into.
+    expect(
+      JSON.parse(buildProfileContent({ publish: true, bot: false })),
+    ).toEqual({ bot: false });
   });
 });
 

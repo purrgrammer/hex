@@ -7,7 +7,9 @@
  * the point of the command: to find out before a room does.
  */
 
+import type { KnowledgeTools } from "./knowledge.js";
 import {
+  canonicalId,
   RESPOND_TOOL,
   type ToolCall,
   type ToolHost,
@@ -24,6 +26,8 @@ export class ConsoleTools implements ToolHost {
     readonly requestedBy: string,
     private readonly write: (text: string) => void = (text) =>
       console.log(text),
+    /** The same read tools a room turn gets, so `hex ask` exercises them too. */
+    private readonly knowledge?: KnowledgeTools,
   ) {}
 
   get delivered() {
@@ -44,12 +48,20 @@ export class ConsoleTools implements ToolHost {
           required: ["text"],
           additionalProperties: false,
         },
+        prompt:
+          "`chat.respond` is how you speak: call it once with what you want to" +
+          " say, and nothing else you write is heard.",
       },
+      ...(this.knowledge?.list() ?? []),
     ];
   }
 
   async call(call: ToolCall): Promise<ToolResult> {
-    if (call.name !== RESPOND_TOOL)
+    const name = canonicalId(call.name, this.list());
+    if (this.knowledge?.handles(name))
+      return this.knowledge.call(name, call.arguments);
+
+    if (name !== RESPOND_TOOL)
       return {
         ok: false,
         output: `there is no tool called "${call.name}" here; only ${RESPOND_TOOL}`,

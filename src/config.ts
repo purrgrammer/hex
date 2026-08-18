@@ -40,6 +40,14 @@ export interface RelayRoles {
 
 export interface ProfileConfig {
   publish: boolean;
+  /**
+   * NIP-24 `bot`: the content is the result of automation.
+   *
+   * Defaults to TRUE, because that is what this package builds. Someone reading a
+   * room deserves to know a reply came from a machine, and a bot that has to be
+   * configured into declaring itself is one that will ship undeclared.
+   */
+  bot?: boolean;
   name?: string;
   display_name?: string;
   about?: string;
@@ -282,6 +290,7 @@ function parseProfile(value: unknown): ProfileConfig {
     profile,
     [
       "publish",
+      "bot",
       "name",
       "display_name",
       "about",
@@ -305,8 +314,12 @@ function parseProfile(value: unknown): ProfileConfig {
       "profile.publish is true but no profile fields are set — that would replace Hex's kind 0 with an empty one",
     );
 
+  if (profile.bot !== undefined && typeof profile.bot !== "boolean")
+    throw new ConfigError("profile.bot must be a boolean");
+
   return {
     publish: profile.publish,
+    bot: profile.bot,
     name: optionalString(profile.name, "profile.name"),
     display_name: optionalString(profile.display_name, "profile.display_name"),
     about: optionalString(profile.about, "profile.about"),

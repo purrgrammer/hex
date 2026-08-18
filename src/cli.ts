@@ -22,6 +22,7 @@ import { RoomContext } from "./context.js";
 import { ReplyGate } from "./policy.js";
 import { runAgent } from "./agent.js";
 import { ConsoleTools } from "./tools/console-tools.js";
+import { KnowledgeTools } from "./tools/knowledge.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -205,8 +206,14 @@ async function main(): Promise<void> {
           id: "local",
           label: "hex ask",
         };
-        // The same tool the room turn uses, pointed at stdout.
-        const tools = new ConsoleTools(room, "0".repeat(64));
+        // The same tools a room turn gets: speaking, pointed at stdout, plus the
+        // read tools — so `hex ask` verifies the whole surface, not a subset.
+        const tools = new ConsoleTools(
+          room,
+          "0".repeat(64),
+          (text) => console.log(text),
+          new KnowledgeTools({ relays, readRelays: config.relays.read }),
+        );
 
         const outcome = await brain.turn({
           instructions: loaded.instructions,
@@ -352,6 +359,10 @@ async function main(): Promise<void> {
           }),
           instructions: loaded.instructions,
           dryRun: values["dry-run"],
+          knowledge: new KnowledgeTools({
+            relays,
+            readRelays: config.relays.read,
+          }),
         });
 
         for (const group of config.transports.flatMap(

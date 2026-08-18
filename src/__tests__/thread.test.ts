@@ -203,7 +203,7 @@ describe("RoomContext threading", () => {
       message("m3", HUMAN, "three", 3, "m2"),
     );
     // Bounded, and each message appears once.
-    expect(history.map((entry) => entry.id ?? entry.text)).toHaveLength(2);
+    expect(history.map((entry) => entry.text)).toHaveLength(2);
     relays.close();
   });
 

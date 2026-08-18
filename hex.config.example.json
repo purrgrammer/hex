@@ -15,6 +15,7 @@
   },
   "profile": {
     "publish": true,
+    "bot": true,
     "name": "Hex",
     "about": "The grimoire assistant. Ask me about NIPs, kinds, and how relays actually behave.",
     "picture": "https://i.nostr.build/6BK9LpTI5oFAvlyy.png",

@@ -11,7 +11,9 @@
  */
 
 import type { Inbound, Transport } from "../transports/types.js";
+import type { KnowledgeTools } from "./knowledge.js";
 import {
+  canonicalId,
   REACT_TOOL,
   RESPOND_TOOL,
   type ToolCall,
@@ -28,6 +30,13 @@ export interface RoomToolsOptions {
   log?: (line: string) => void;
   /** Cap on deliveries in one turn, so a confused model cannot flood a room. */
   maxResponses?: number;
+  /**
+   * The read tools — NIPs, kinds, REQs, bech32.
+   *
+   * Composed in rather than built here: they belong to no room, and the same set
+   * serves `hex ask`. Optional, so a room can be served without them.
+   */
+  knowledge?: KnowledgeTools;
 }
 
 /**
@@ -76,6 +85,9 @@ export class RoomTools implements ToolHost {
           required: ["text"],
           additionalProperties: false,
         },
+        prompt:
+          "`chat.respond` is how you speak: call it once with what you want to" +
+          " say, and nothing else you write is heard.",
       },
     ];
 
@@ -93,13 +105,26 @@ export class RoomTools implements ToolHost {
           required: ["emoji"],
           additionalProperties: false,
         },
+        prompt:
+          "`chat.react` puts a single emoji on the message — an acknowledgement," +
+          " not an answer.",
       });
+
+    // Whatever else the runtime can do, offered alongside speaking.
+    if (this.options.knowledge) specs.push(...this.options.knowledge.list());
 
     return specs;
   }
 
   async call(call: ToolCall): Promise<ToolResult> {
-    switch (call.name) {
+    // A model may call by wire name (`chat_respond`) or by canonical id; the
+    // prompt says the id, and losing a round trip to punctuation is silly.
+    const name = canonicalId(call.name, this.list());
+
+    if (this.options.knowledge?.handles(name))
+      return this.options.knowledge.call(name, call.arguments);
+
+    switch (name) {
       case RESPOND_TOOL:
         return this.respond(call.arguments);
       case REACT_TOOL:

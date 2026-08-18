@@ -161,6 +161,16 @@ describe("parseConfig", () => {
     ).toEqual({ publish: false });
   });
 
+  it("takes bot as a boolean and refuses anything else", () => {
+    expect(
+      parseConfig({ ...minimal, profile: { publish: true, bot: false } })
+        .profile.bot,
+    ).toBe(false);
+    expect(() =>
+      parseConfig({ ...minimal, profile: { publish: true, bot: "yes" } }),
+    ).toThrow(/profile\.bot/);
+  });
+
   it("refuses an empty publish role outright", () => {
     // There is nowhere to announce, and nowhere to send anything else either.
     expect(() =>

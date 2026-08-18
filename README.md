@@ -36,6 +36,9 @@ Nothing has a relay default. There is no default brain either — a config with 
 exactly like a working one. `"brain": {"type": "echo"}` is the deliberate
 exception, for smoke tests.
 
+Hex declares itself a bot: kind 0 carries NIP-24's `bot: true` unless the config
+says otherwise. A reader deserves to know a reply came from a machine.
+
 The secret key is never inline: `identity.signer` names an env var or a file, or
 points at a NIP-46 bunker whose client keypair is persisted under `stateDir` so a
 restart does not re-pair.
@@ -55,6 +58,26 @@ restart does not re-pair.
 - `hex run [--dry-run] [--brain echo]` — announce, join every `autoJoin` group,
   then listen. A message that addresses Hex gets a 👀 reaction while the model
   thinks and a threaded kind 9 when it answers. Runs until interrupted.
+
+## Tools
+
+Named `<namespace>.<action>`, the same registry convention the in-app assistant
+uses, because it is the same Hex:
+
+| Tool | What it does |
+| --- | --- |
+| `chat.respond` | Say something in the room. The only way to be heard. |
+| `chat.react` | One emoji on the message. Offered only if the transport has reactions. |
+| `grimoire.help` | A NIP's text or a kind's definition, from the NIPs repository. |
+| `nostr.req` | A NIP-01 filter against relays. Read-only, capped. |
+| `nostr.resolve` | A bech32 entity turned into the person or event it names. |
+
+The ids carry the dot; the wire carries an underscore, since OpenAI-shaped
+function names cannot contain one. Nothing here signs, publishes, spends or
+follows except `chat.*`, which publishes exactly one chat message.
+
+`grimoire.help` earns its place: asked from memory, the model called kind 9 an
+MLS event. Asked with the tool, it reads the spec and cites the NIP.
 
 ## How a turn works
 

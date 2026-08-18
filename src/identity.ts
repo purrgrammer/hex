@@ -23,9 +23,16 @@ export interface EventTemplate {
   created_at: number;
 }
 
-/** kind 0. Only the fields the config actually set. */
+/**
+ * kind 0. Only the fields the config actually set — plus `bot`.
+ *
+ * NIP-24's `bot` is always written, and defaults to true: Hex IS automation, and
+ * a client that dims or filters bot replies can only do so if the flag is there.
+ * A config may set it false, which is a claim its operator is making, not a
+ * default anyone falls into.
+ */
 export function buildProfileContent(profile: ProfileConfig): string {
-  const fields: Record<string, string> = {};
+  const fields: Record<string, string | boolean> = { bot: profile.bot ?? true };
   const keys = [
     "name",
     "display_name",

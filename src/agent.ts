@@ -14,6 +14,7 @@ import type { RoomContext } from "./context.js";
 import { ReplyGate } from "./policy.js";
 import { roomKey, type Inbound, type Transport } from "./transports/types.js";
 import { RoomTools } from "./tools/room-tools.js";
+import type { KnowledgeTools } from "./tools/knowledge.js";
 
 /** What Hex reacts with while it is working on an answer. */
 export const ACK_EMOJI = "👀";
@@ -28,6 +29,8 @@ export interface AgentOptions {
   dryRun?: boolean;
   /** Cap on deliveries in one turn. */
   maxResponsesPerTurn?: number;
+  /** The read tools — NIPs, kinds, REQs. Offered alongside speaking. */
+  knowledge?: KnowledgeTools;
   /** Emoji for the "working on it" reaction. Empty string disables the ack. */
   ackEmoji?: string;
   log?: (line: string) => void;
@@ -92,6 +95,7 @@ export function runAgent(options: AgentOptions): RunningAgent {
         dryRun: options.dryRun,
         log,
         maxResponses: options.maxResponsesPerTurn,
+        knowledge: options.knowledge,
       });
 
       const outcome = await options.brain.turn({
