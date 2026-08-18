@@ -29,6 +29,23 @@ import type { Inbound, Room, Transport } from "./types.js";
 /** A group chat message. */
 export const KIND_GROUP_MESSAGE = 9;
 
+/**
+ * Which message an event replies to.
+ *
+ * `["e", id, relay, "reply"]` is explicit and wins; otherwise the first `e` tag is
+ * the parent. A `root` marker is deliberately NOT treated as the parent: threading
+ * to the root would flatten a long exchange into one turn.
+ */
+export function replyTarget(event: NostrEvent): string | undefined {
+  const tags = event.tags.filter((tag) => tag[0] === "e" && tag[1]);
+  const marked = tags.find((tag) => tag[3] === "reply");
+  if (marked) return marked[1];
+  const unmarked = tags.find(
+    (tag) => tag[3] !== "root" && tag[3] !== "mention",
+  );
+  return (unmarked ?? tags[0])?.[1];
+}
+
 export interface Nip29TransportOptions {
   relays: HexRelays;
   signer: ISigner;
@@ -41,10 +58,30 @@ export interface Nip29TransportOptions {
   publishTimeoutMs?: number;
 }
 
+/**
+ * How many of Hex's own message ids to remember.
+ *
+ * Only needed to recognise a reply to one of them, and a conversation is answered
+ * within minutes or not at all.
+ */
+const MAX_OWN_IDS = 500;
+
 export class Nip29Transport implements Transport {
   readonly name = "nip-29" as const;
 
   private stopped = false;
+  /**
+   * What Hex has said in these rooms, this run.
+   *
+   * A reply to one of these addresses Hex whether or not it repeats the name —
+   * which is what makes a conversation a conversation. Nobody says "hex" again in
+   * their second sentence, and requiring it means every exchange dies after one
+   * turn.
+   *
+   * Session-scoped: after a restart Hex no longer recognises its own older
+   * messages, so a follow-up then has to name it or p-tag it again.
+   */
+  private readonly ownMessageIds = new Set<string>();
 
   constructor(private readonly options: Nip29TransportOptions) {}
 
@@ -81,17 +118,36 @@ export class Nip29Transport implements Transport {
       createdAt: event.created_at,
       room,
       addressesSelf: false,
+      // A NIP-29 reply is an `e` tag. A `reply` marker wins when present, since a
+      // client may also carry a `root` — otherwise the first `e` is the parent.
+      replyToId: replyTarget(event),
       event,
     };
-    // The transport decides this: it is the layer that knows the tag shape.
+    // The transport decides this: it is the layer that knows the tag shape, and
+    // the only one that knows which messages are Hex's own.
+    const continuesConversation =
+      inbound.replyToId !== undefined &&
+      this.ownMessageIds.has(inbound.replyToId);
+
     return {
       ...inbound,
-      addressesSelf: addressesSelfInGroup(
-        inbound,
-        this.options.pubkey,
-        this.options.mentions,
-      ),
+      addressesSelf:
+        continuesConversation ||
+        addressesSelfInGroup(
+          inbound,
+          this.options.pubkey,
+          this.options.mentions,
+        ),
     };
+  }
+
+  /** Remember something Hex said, so a reply to it counts as addressed. */
+  private rememberOwn(id: string): void {
+    this.ownMessageIds.add(id);
+    if (this.ownMessageIds.size > MAX_OWN_IDS) {
+      const oldest = this.ownMessageIds.values().next();
+      if (!oldest.done) this.ownMessageIds.delete(oldest.value);
+    }
   }
 
   /**
@@ -135,6 +191,18 @@ export class Nip29Transport implements Transport {
       .sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  /** One message by id, for walking a thread back past what is in memory. */
+  async fetchById(room: Room, id: string): Promise<Inbound | null> {
+    if (!room.relay) throw new Error("a NIP-29 room needs its relay");
+    const events = await requestEvents(
+      this.options.relays,
+      [room.relay],
+      [{ ids: [id] }],
+    );
+    const event = events.find((candidate) => candidate.id === id);
+    return event ? this.toInbound(room.relay, event) : null;
+  }
+
   /**
    * Reply in the room, threaded under what was said.
    *
@@ -164,6 +232,7 @@ export class Nip29Transport implements Transport {
           .map((outcome) => outcome.message ?? "rejected")
           .join("; ")}`,
       );
+    this.rememberOwn(event.id);
     return event.id;
   }
 

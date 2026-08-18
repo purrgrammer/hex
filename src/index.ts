@@ -61,12 +61,19 @@ export type {
   Brain,
   BrainRequest,
   ContextMessage,
-  ToolHost,
-  ToolCall,
-  ToolResult,
-  ToolSpec,
+  TurnOutcome,
 } from "./brain/types.js";
 export { EchoBrain } from "./brain/echo.js";
+export {
+  RESPOND_TOOL,
+  REACT_TOOL,
+  type ToolHost,
+  type ToolSpec,
+  type ToolCall,
+  type ToolResult,
+} from "./tools/types.js";
+export { RoomTools, type RoomToolsOptions } from "./tools/room-tools.js";
+export { ConsoleTools } from "./tools/console-tools.js";
 export { createBrain, type CreateBrainOptions } from "./brain/create.js";
 export {
   OpenAICompatibleBrain,

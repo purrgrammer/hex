@@ -1,17 +1,24 @@
 /**
  * Any chat-completions endpoint: OpenAI, a local llama.cpp, OpenRouter, Routstr.
  *
- * Deliberately the smallest possible client — one POST, no streaming, no tool
- * calls yet. What matters here is that a misconfigured provider says so out
- * loud: a bot whose key is wrong must not look like a bot that had nothing to
- * add, so an HTTP failure throws rather than returning `null` (which means
- * "stay silent" and is a legitimate answer).
+ * The turn is a tool-calling loop. The model may think, may call tools, and
+ * speaks by calling `respond` — so a "thought" and an "answer" are different acts
+ * rather than the same string interpreted differently. The loop runs until the
+ * model stops calling tools or `maxSteps` is reached, whichever comes first.
  *
- * The API key is read from the environment by name. It is never logged, never
- * put in an error message, and never written into the config file.
+ * What matters here is that a misconfigured provider says so out loud: a bot whose
+ * key is wrong must not look like a bot that had nothing to add, so an HTTP
+ * failure throws. The API key is read from the environment by name, never logged,
+ * never in an error message, never in the config file.
  */
 
-import type { Brain, BrainRequest, ContextMessage } from "./types.js";
+import type {
+  Brain,
+  BrainRequest,
+  ContextMessage,
+  TurnOutcome,
+} from "./types.js";
+import { RESPOND_TOOL, type ToolSpec } from "../tools/types.js";
 
 export interface OpenAICompatibleOptions {
   /** e.g. `https://api.openai.com/v1` — with or without a trailing slash. */
@@ -24,12 +31,36 @@ export interface OpenAICompatibleOptions {
   maxTokens?: number;
   temperature?: number;
   timeoutMs?: number;
+  /** Round trips per turn, including the one that answers. */
+  maxSteps?: number;
+  /**
+   * `auto` lets the model choose between a tool call and prose; `required` makes
+   * it call one.
+   *
+   * Not every endpoint accepts `required`, so `auto` is the compatible default —
+   * but with `auto` a model that has not internalised the contract answers in
+   * prose and lands in the fallback. `required` is what makes the tool path
+   * actually happen, at the cost of a turn that can no longer say nothing.
+   */
+  toolChoice?: "auto" | "required";
+  /**
+   * Deliver a plain-text answer that never called `respond`.
+   *
+   * On by default and logged when it fires: a model that forgot the tool has
+   * still produced an answer, and dropping it means silence in the room, which is
+   * the worse failure. Turn it off to make the tool contract strict.
+   */
+  deliverPlainText?: boolean;
   /** Injected in tests. */
   fetchImpl?: typeof fetch;
+  log?: (line: string) => void;
 }
 
 /** A reply is a chat message, so a slow provider must not hold a room open. */
 export const BRAIN_TIMEOUT_MS = 60_000;
+
+/** Round trips per turn. Enough to think, act, and read the result. */
+export const DEFAULT_MAX_STEPS = 4;
 
 /** How much of a failed response body to quote back. */
 const ERROR_BODY_LIMIT = 400;
@@ -44,9 +75,29 @@ export function completionsUrl(baseUrl: string): string {
   return new URL("chat/completions", base).toString();
 }
 
+interface ToolCallWire {
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
 interface ChatMessage {
-  role: "system" | "assistant" | "user";
-  content: string;
+  role: "system" | "assistant" | "user" | "tool";
+  content: string | null;
+  tool_calls?: ToolCallWire[];
+  tool_call_id?: string;
+}
+
+/** Tool specs in the wire's shape. */
+export function toWireTools(specs: ToolSpec[]) {
+  return specs.map((spec) => ({
+    type: "function" as const,
+    function: {
+      name: spec.name,
+      description: spec.description,
+      parameters: spec.parameters,
+    },
+  }));
 }
 
 /**
@@ -70,15 +121,51 @@ export function buildMessages(
       : { role: "user", content: `${label(message)}: ${message.text}` },
   );
 
-  const incoming = request.incoming;
+  // The tool contract, stated where the model reads it. `instructions` is the
+  // persona and stays the operator's; how to be heard is the runtime's, and a
+  // model that is not told will simply answer in prose — which is why the
+  // fallback exists and why this line makes it rare.
+  const speaking = request.tools
+    .list()
+    .some((spec) => spec.name === RESPOND_TOOL)
+    ? [
+        {
+          role: "system" as const,
+          content: `You are in a chat room. Nothing you write is heard unless you call the ${RESPOND_TOOL} tool — text outside a tool call is private thinking. Call it exactly once, with what you want to say. If a message needs no answer from you, call no tool and write nothing.`,
+        },
+      ]
+    : [];
+
   return [
     { role: "system", content: request.instructions },
+    ...speaking,
     ...history,
     {
       role: "user",
-      content: `${incoming.author.slice(0, 8)}…: ${incoming.text}`,
+      content: `${request.incoming.author.slice(0, 8)}…: ${request.incoming.text}`,
     },
   ];
+}
+
+/** Arguments arrive as a JSON string, and a model can get that wrong. */
+function parseArguments(raw: string | undefined): {
+  args: Record<string, unknown>;
+  error?: string;
+} {
+  if (!raw || raw.trim() === "") return { args: {} };
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      return { args: {}, error: "arguments must be a JSON object" };
+    return { args: parsed as Record<string, unknown> };
+  } catch (error) {
+    return {
+      args: {},
+      error: `arguments were not valid JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
 }
 
 export class OpenAICompatibleBrain implements Brain {
@@ -89,7 +176,87 @@ export class OpenAICompatibleBrain implements Brain {
     private readonly selfPubkey?: string,
   ) {}
 
-  async respond(request: BrainRequest): Promise<string | null> {
+  async turn(request: BrainRequest): Promise<TurnOutcome> {
+    const log = this.options.log ?? (() => {});
+    const messages = buildMessages(request, this.selfPubkey);
+    const tools = toWireTools(request.tools.list());
+    const maxSteps = this.options.maxSteps ?? DEFAULT_MAX_STEPS;
+
+    for (let step = 0; step < maxSteps; step += 1) {
+      const choice = await this.complete(messages, tools);
+      const calls = choice.tool_calls ?? [];
+
+      if (calls.length === 0) {
+        const text = (choice.content ?? "").trim();
+        if (!text)
+          // Nothing said and nothing done: the model stayed out of it.
+          return { delivered: request.tools.delivered, note: "stayed quiet" };
+
+        if (request.tools.delivered)
+          // It already spoke through the tool; trailing prose is thinking.
+          return { delivered: true, note: "answered, then thought aloud" };
+
+        if (this.options.deliverPlainText === false)
+          return {
+            delivered: false,
+            note: "produced text but never called respond",
+          };
+
+        log(
+          "[hex] the model answered without calling respond — delivering its text anyway",
+        );
+        const result = await request.tools.call({
+          name: RESPOND_TOOL,
+          arguments: { text },
+        });
+        return {
+          delivered: request.tools.delivered,
+          note: `plain-text fallback: ${result.output}`,
+        };
+      }
+
+      // Record the assistant's own turn before its results, or the next request
+      // is a conversation where tool results answer nothing.
+      messages.push({
+        role: "assistant",
+        content: choice.content ?? null,
+        tool_calls: calls,
+      });
+
+      for (const call of calls) {
+        const name = call.function?.name ?? "";
+        const { args, error } = parseArguments(call.function?.arguments);
+        const result = error
+          ? { ok: false, output: error }
+          : await request.tools.call({ name, arguments: args });
+
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id ?? name,
+          content: result.output,
+        });
+      }
+
+      // Answering is terminal. Continuing after a delivered reply spends round
+      // trips to produce, at best, prose nobody will read — and at worst a second
+      // message in the room.
+      if (request.tools.delivered)
+        return { delivered: true, note: `answered in ${step + 1} step(s)` };
+    }
+
+    return {
+      delivered: request.tools.delivered,
+      note: request.tools.delivered
+        ? `stopped after ${maxSteps} steps`
+        : `gave up after ${maxSteps} steps without answering`,
+    };
+  }
+
+  /** One round trip. Returns the assistant's message. */
+  private async complete(
+    messages: ChatMessage[],
+    tools: ReturnType<typeof toWireTools>,
+  ): Promise<ChatMessage> {
     const fetchImpl = this.options.fetchImpl ?? fetch;
     const url = completionsUrl(this.options.baseUrl);
 
@@ -107,7 +274,10 @@ export class OpenAICompatibleBrain implements Brain {
         headers,
         body: JSON.stringify({
           model: this.options.model,
-          messages: buildMessages(request, this.selfPubkey),
+          messages,
+          ...(tools.length > 0
+            ? { tools, tool_choice: this.options.toolChoice ?? "auto" }
+            : {}),
           ...(this.options.maxTokens !== undefined
             ? { max_tokens: this.options.maxTokens }
             : {}),
@@ -140,12 +310,9 @@ export class OpenAICompatibleBrain implements Brain {
     }
 
     const payload = (await response.json()) as {
-      choices?: { message?: { content?: unknown } }[];
+      choices?: { message?: ChatMessage }[];
     };
-    const content = payload.choices?.[0]?.message?.content;
-    if (typeof content !== "string") return null;
-    const trimmed = content.trim();
-    // An empty completion is silence, not an empty chat message.
-    return trimmed === "" ? null : trimmed;
+    const message = payload.choices?.[0]?.message;
+    return message ?? { role: "assistant", content: null };
   }
 }

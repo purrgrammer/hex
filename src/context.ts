@@ -23,6 +23,15 @@ import {
 /** Upper bound on cached display names. */
 const MAX_NAMES = 500;
 
+/**
+ * How many messages the by-id index holds, as a multiple of a room's window.
+ *
+ * Generous because a thread walk reaches past the window by design, and a kind 9
+ * has no local mirror to fall back on — but bounded, because a long-running agent
+ * in a busy room would otherwise keep every message it ever saw.
+ */
+const ID_INDEX_MULTIPLE = 20;
+
 export interface ContextOptions {
   relays: HexRelays;
   /** Where to look up kind 0. Never a group relay: that is not its job. */
@@ -35,6 +44,13 @@ export interface ContextOptions {
 export class RoomContext {
   /** Room key -> messages, oldest first, capped at `messages`. */
   private readonly windows = new Map<string, Inbound[]>();
+  /**
+   * Every message seen or fetched, by id, so a thread can be walked.
+   *
+   * Wider than the windows on purpose: a parent that has aged out of a room's
+   * recent window is still the turn a reply is answering.
+   */
+  private readonly messages = new Map<string, Inbound>();
   /** Rooms already seeded from the relay. */
   private readonly seeded = new Set<string>();
   /** pubkey -> display name, or null for "asked, and there is none". */
@@ -46,6 +62,15 @@ export class RoomContext {
   record(inbound: Inbound): void {
     const key = roomKey(inbound.room);
     const window = this.windows.get(key) ?? [];
+
+    // The by-id index is kept even for a message already in the window, and
+    // bounded separately: it is what a thread walk reads.
+    this.messages.set(inbound.id, inbound);
+    if (this.messages.size > this.maxMessages()) {
+      const oldest = this.messages.keys().next();
+      if (!oldest.done) this.messages.delete(oldest.value);
+    }
+
     // Streams can deliver the same event twice; a duplicate in the window would
     // reach the model as a repeated turn.
     if (window.some((existing) => existing.id === inbound.id)) return;
@@ -58,14 +83,27 @@ export class RoomContext {
   /**
    * The conversation leading up to `incoming`, excluding it.
    *
-   * Seeds from the relay the first time a room is asked about, because a bot that
-   * just started has seen only the message that woke it.
+   * A THREAD when there is one: a mention opens a conversation, Hex's answer
+   * continues it, and a reply to that answer is the next turn of the same
+   * exchange. Walking the `replyToId` chain is what keeps those turns together —
+   * without it, an answer to Hex's answer arrives as an unrelated line in a room
+   * and the model has to guess what it is about.
+   *
+   * The room's recent window is the fallback, for a message that starts a
+   * conversation rather than continuing one. It is deliberately not both: mixing
+   * a thread with whatever else the room said puts unrelated turns between a
+   * question and its answer.
    */
   async history(
     transport: Transport,
     incoming: Inbound,
   ): Promise<ContextMessage[]> {
     const key = roomKey(incoming.room);
+
+    if (incoming.replyToId) {
+      const thread = await this.thread(transport, incoming);
+      if (thread.length > 0) return this.withNames(thread);
+    }
 
     if (!this.seeded.has(key)) {
       this.seeded.add(key);
@@ -89,11 +127,57 @@ export class RoomContext {
     const window = (this.windows.get(key) ?? []).filter(
       (message) => message.id !== incoming.id,
     );
-    const names = await this.resolveNames([
-      ...new Set(window.map((message) => message.author)),
-    ]);
+    return this.withNames(window);
+  }
 
-    return window.map((message) => ({
+  /**
+   * Walk `replyToId` back from `incoming`, oldest first.
+   *
+   * Bounded by `messages`, and by a `seen` set: a malformed chain that points at
+   * itself, or a cycle between two events, would otherwise loop forever. Missing
+   * parents are fetched once from the transport and then remembered, so a long
+   * exchange costs one lookup per turn rather than one per message.
+   */
+  private async thread(
+    transport: Transport,
+    incoming: Inbound,
+  ): Promise<Inbound[]> {
+    const chain: Inbound[] = [];
+    const seen = new Set<string>([incoming.id]);
+    let cursor = incoming.replyToId;
+
+    while (cursor && chain.length < this.options.messages) {
+      if (seen.has(cursor)) break;
+      seen.add(cursor);
+
+      let parent = this.messages.get(cursor);
+      if (!parent && transport.fetchById) {
+        try {
+          parent =
+            (await transport.fetchById(incoming.room, cursor)) ?? undefined;
+          if (parent) this.record(parent);
+        } catch {
+          // A parent that cannot be fetched ends the chain; a shorter
+          // conversation beats no answer.
+        }
+      }
+      if (!parent) break;
+
+      // A thread stays inside its room: an `e` tag can point anywhere.
+      if (roomKey(parent.room) !== roomKey(incoming.room)) break;
+
+      chain.push(parent);
+      cursor = parent.replyToId;
+    }
+
+    return chain.reverse();
+  }
+
+  private async withNames(messages: Inbound[]): Promise<ContextMessage[]> {
+    const names = await this.resolveNames([
+      ...new Set(messages.map((message) => message.author)),
+    ]);
+    return messages.map((message) => ({
       author: message.author,
       name: names.get(message.author) ?? undefined,
       text: message.text,
@@ -163,6 +247,10 @@ export class RoomContext {
       const oldest = this.names.keys().next();
       if (!oldest.done) this.names.delete(oldest.value);
     }
+  }
+
+  private maxMessages(): number {
+    return this.options.messages * ID_INDEX_MULTIPLE;
   }
 
   /** How many messages are held for a room. For tests and logs. */

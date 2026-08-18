@@ -21,6 +21,7 @@ import { Nip29Transport } from "./transports/nip29.js";
 import { RoomContext } from "./context.js";
 import { ReplyGate } from "./policy.js";
 import { runAgent } from "./agent.js";
+import { ConsoleTools } from "./tools/console-tools.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -195,18 +196,28 @@ async function main(): Promise<void> {
 
         const brain = createBrain(config.brain, {
           override: values.brain === "echo" ? "echo" : undefined,
+          log: (line) => console.log(line),
         });
         console.log(`brain   ${brain.name}`);
 
-        const reply = await brain.respond({
+        const room = {
+          transport: "nip-29" as const,
+          id: "local",
+          label: "hex ask",
+        };
+        // The same tool the room turn uses, pointed at stdout.
+        const tools = new ConsoleTools(room, "0".repeat(64));
+
+        const outcome = await brain.turn({
           instructions: loaded.instructions,
           history: [],
+          tools,
           incoming: {
             id: "local",
             author: "0".repeat(64),
             text: question,
             createdAt: Math.floor(Date.now() / 1000),
-            room: { transport: "nip-29", id: "local", label: "hex ask" },
+            room,
             addressesSelf: true,
             event: {
               id: "local",
@@ -220,8 +231,9 @@ async function main(): Promise<void> {
           },
         });
 
-        // `null` is a real answer from a brain: it means stay quiet.
-        console.log(reply === null ? "(silence)" : `\n${reply}`);
+        // Silence is a real outcome: the brain chose to stay out of it.
+        if (!outcome.delivered)
+          console.log(`(silence)${outcome.note ? ` — ${outcome.note}` : ""}`);
         return;
       }
 
@@ -268,6 +280,7 @@ async function main(): Promise<void> {
         const brain = createBrain(config.brain, {
           selfPubkey: resolved.pubkey,
           override: values.brain === "echo" ? "echo" : undefined,
+          log: (line) => console.log(line),
         });
 
         console.log(`npub    ${nip19.npubEncode(resolved.pubkey)}`);

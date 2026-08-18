@@ -13,6 +13,7 @@ import type { Brain } from "./brain/types.js";
 import type { RoomContext } from "./context.js";
 import { ReplyGate } from "./policy.js";
 import { roomKey, type Inbound, type Transport } from "./transports/types.js";
+import { RoomTools } from "./tools/room-tools.js";
 
 /** What Hex reacts with while it is working on an answer. */
 export const ACK_EMOJI = "👀";
@@ -25,6 +26,8 @@ export interface AgentOptions {
   instructions: string;
   /** Log the answer instead of publishing it. The ack is skipped too. */
   dryRun?: boolean;
+  /** Cap on deliveries in one turn. */
+  maxResponsesPerTurn?: number;
   /** Emoji for the "working on it" reaction. Empty string disables the ack. */
   ackEmoji?: string;
   log?: (line: string) => void;
@@ -78,28 +81,36 @@ export function runAgent(options: AgentOptions): RunningAgent {
       }
 
       const history = await options.context.history(transport, inbound);
-      const answer = await options.brain.respond({
+
+      // The brain's only way to be heard. Bound to this message, in this room,
+      // on the transport that delivered it — so nothing the model returns is
+      // published, and what IS published is a fact about the transport rather
+      // than a claim by the model.
+      const tools = new RoomTools({
+        transport,
+        incoming: inbound,
+        dryRun: options.dryRun,
+        log,
+        maxResponses: options.maxResponsesPerTurn,
+      });
+
+      const outcome = await options.brain.turn({
         instructions: options.instructions,
         history,
         incoming: inbound,
+        tools,
       });
 
-      if (answer === null) {
-        // A real answer: the brain chose to stay out of it.
-        log(`[hex] ${where}: stayed quiet`);
-        return;
-      }
+      published = tools.delivered;
+      for (const id of tools.deliveredIds)
+        // Hex's own message comes straight back through the same subscription.
+        options.gate.remember(id);
 
-      if (options.dryRun) {
-        log(`[hex] ${where}: would reply — ${answer}`);
-        return;
-      }
-
-      const id = await transport.reply(inbound, answer);
-      // Hex's own message comes straight back through the same subscription.
-      options.gate.remember(id);
-      published = true;
-      log(`[hex] ${where}: replied ${id.slice(0, 8)}…`);
+      log(
+        published
+          ? `[hex] ${where}: answered${outcome.note ? ` — ${outcome.note}` : ""}`
+          : `[hex] ${where}: said nothing${outcome.note ? ` — ${outcome.note}` : ""}`,
+      );
     } catch (error) {
       // Loud, and specifically not silence: a broken key or a refusing relay
       // must not look like a bot with nothing to add.

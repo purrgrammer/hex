@@ -23,6 +23,10 @@ export interface BrainConfig {
   headerEnv?: Record<string, string>;
   maxTokens?: number;
   temperature?: number;
+  /** Round trips the model gets per turn, including the one that answers. */
+  maxSteps?: number;
+  /** `required` makes the model call a tool rather than answering in prose. */
+  toolChoice?: "auto" | "required";
 }
 
 export interface RelayRoles {
@@ -201,6 +205,8 @@ function parseBrain(value: unknown): BrainConfig {
         "headerEnv",
         "maxTokens",
         "temperature",
+        "maxSteps",
+        "toolChoice",
       ],
       "brain",
     );
@@ -221,6 +227,15 @@ function parseBrain(value: unknown): BrainConfig {
       throw new ConfigError(`brain.baseUrl must be an http(s) URL: ${baseUrl}`);
     }
 
+    // Rejected rather than coerced: a typo here silently changes whether the
+    // model is obliged to use the tool at all.
+    let toolChoice: "auto" | "required" | undefined;
+    if (brain.toolChoice !== undefined) {
+      if (brain.toolChoice !== "auto" && brain.toolChoice !== "required")
+        throw new ConfigError('brain.toolChoice must be "auto" or "required"');
+      toolChoice = brain.toolChoice;
+    }
+
     if (brain.temperature !== undefined) {
       if (typeof brain.temperature !== "number" || brain.temperature < 0)
         throw new ConfigError("brain.temperature must be a number ≥ 0");
@@ -236,6 +251,11 @@ function parseBrain(value: unknown): BrainConfig {
         brain.maxTokens === undefined
           ? undefined
           : requirePositiveInt(brain.maxTokens, "brain.maxTokens"),
+      maxSteps:
+        brain.maxSteps === undefined
+          ? undefined
+          : requirePositiveInt(brain.maxSteps, "brain.maxSteps"),
+      toolChoice,
       temperature: brain.temperature as number | undefined,
     };
   }

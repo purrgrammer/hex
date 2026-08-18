@@ -30,6 +30,15 @@ export interface Inbound {
    * recomputes it, so the two cannot disagree.
    */
   addressesSelf: boolean;
+  /**
+   * The message this one replies to, if any.
+   *
+   * This is what makes a conversation a conversation: a mention opens one, Hex's
+   * answer continues it, and a reply to that answer is the next turn of the SAME
+   * exchange rather than unrelated room chatter. Set by the transport, which knows
+   * how its protocol threads.
+   */
+  replyToId?: string;
   /** The raw event, for verification and for a richer brain context later. */
   event: NostrEvent;
 }
@@ -40,6 +49,13 @@ export interface Transport {
   start(): Observable<Inbound>;
   /** Bounded newest-first history, for context. */
   history(room: Room, limit: number): Promise<Inbound[]>;
+  /**
+   * One message by id, for walking a thread back past what is in memory.
+   *
+   * Optional: a protocol with no way to fetch a single message just yields a
+   * shorter conversation.
+   */
+  fetchById?(room: Room, id: string): Promise<Inbound | null>;
   /** Publish a reply and return its event id. */
   reply(to: Inbound, text: string): Promise<string>;
   /**

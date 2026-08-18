@@ -15,6 +15,8 @@ import { OpenAICompatibleBrain } from "./openai-compatible.js";
 export interface CreateBrainOptions {
   /** Hex's own pubkey, so its prior lines are labelled as its own. */
   selfPubkey?: string;
+  /** Where the brain's own notes go — the plain-text fallback announces itself. */
+  log?: (line: string) => void;
   env?: NodeJS.ProcessEnv;
   /** Force the echo brain — `--brain echo`, for smoke tests. */
   override?: "echo";
@@ -56,7 +58,10 @@ export function createBrain(
       apiKey,
       headers,
       maxTokens: config.maxTokens,
+      maxSteps: config.maxSteps,
+      toolChoice: config.toolChoice,
       temperature: config.temperature,
+      log: options.log,
     },
     options.selfPubkey,
   );

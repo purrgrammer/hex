@@ -8,7 +8,10 @@ import {
 } from "../brain/openai-compatible.js";
 import { createBrain } from "../brain/create.js";
 import { parseConfig } from "../config.js";
+import { ConsoleTools } from "../tools/console-tools.js";
+import { RESPOND_TOOL } from "../tools/types.js";
 import type { BrainRequest } from "../brain/types.js";
+import type { Room } from "../transports/types.js";
 
 interface Captured {
   url: string;
@@ -22,9 +25,13 @@ interface FakeProvider {
   close(): Promise<void>;
 }
 
-/** A chat-completions endpoint that records what it was sent. */
+/**
+ * A chat-completions endpoint that records what it was sent and answers with a
+ * scripted sequence — one entry per round trip, so a tool-calling loop can be
+ * driven turn by turn.
+ */
 async function startProvider(
-  reply: { status?: number; body?: unknown } = {},
+  replies: { status?: number; body?: unknown }[] = [],
 ): Promise<FakeProvider> {
   const received: Captured[] = [];
   const server: Server = createServer((request, response) => {
@@ -36,18 +43,12 @@ async function startProvider(
         headers: request.headers,
         body: JSON.parse(Buffer.concat(chunks).toString() || "{}"),
       });
+      const reply =
+        replies[Math.min(received.length - 1, replies.length - 1)] ?? {};
       response.writeHead(reply.status ?? 200, {
         "Content-Type": "application/json",
       });
-      response.end(
-        JSON.stringify(
-          reply.body ?? {
-            choices: [
-              { message: { content: "  a kind 9 is a group message  " } },
-            ],
-          },
-        ),
-      );
+      response.end(JSON.stringify(reply.body ?? { choices: [] }));
     });
   });
 
@@ -63,18 +64,55 @@ async function startProvider(
   };
 }
 
-const SELF = "a".repeat(64);
+/** An assistant message that calls `respond`. */
+function respondCall(text: string, id = "call-1") {
+  return {
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              function: {
+                name: RESPOND_TOOL,
+                arguments: JSON.stringify({ text }),
+              },
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
 
-function request(overrides: Partial<BrainRequest> = {}): BrainRequest {
+function plainText(content: string) {
+  return { choices: [{ message: { role: "assistant", content } }] };
+}
+
+const SELF = "a".repeat(64);
+const ROOM: Room = {
+  transport: "nip-29",
+  id: "dev",
+  relay: "wss://g.example/",
+};
+
+function requestWith(
+  tools: ConsoleTools,
+  overrides: Partial<BrainRequest> = {},
+): BrainRequest {
   return {
     instructions: "You are Hex.",
     history: [],
+    tools,
     incoming: {
       id: "id1",
       author: "b".repeat(64),
       text: "what is kind 9?",
       createdAt: 1000,
-      room: { transport: "nip-29", id: "dev", relay: "wss://groups.example/" },
+      room: ROOM,
       addressesSelf: true,
       event: {
         id: "id1",
@@ -88,6 +126,15 @@ function request(overrides: Partial<BrainRequest> = {}): BrainRequest {
     },
     ...overrides,
   };
+}
+
+/** Collects what `respond` delivered instead of printing it. */
+function collector() {
+  const said: string[] = [];
+  const tools = new ConsoleTools(ROOM, "b".repeat(64), (text) =>
+    said.push(text.trim()),
+  );
+  return { said, tools };
 }
 
 let provider: FakeProvider | undefined;
@@ -116,8 +163,9 @@ describe("completionsUrl", () => {
 describe("buildMessages", () => {
   it("labels each speaker and marks Hex's own turns as the assistant", () => {
     // A group is not a two-party chat: unlabelled `user` turns lose who asked.
+    const { tools } = collector();
     const messages = buildMessages(
-      request({
+      requestWith(tools, {
         history: [
           { author: "c".repeat(64), name: "alice", text: "hi", at: 1 },
           { author: SELF, text: "hello", at: 2 },
@@ -126,26 +174,37 @@ describe("buildMessages", () => {
       SELF,
     );
 
+    // The persona comes first; the runtime's tool contract is a system message of
+    // its own, so assert on the conversation rather than on indices.
     expect(messages[0]).toEqual({ role: "system", content: "You are Hex." });
-    expect(messages[1]).toEqual({ role: "user", content: "alice: hi" });
-    expect(messages[2]).toEqual({ role: "assistant", content: "hello" });
-    expect(messages[3]!.role).toBe("user");
-    expect(messages[3]!.content).toContain("what is kind 9?");
+    expect(messages[1]!.role).toBe("system");
+    expect(messages[1]!.content).toContain(RESPOND_TOOL);
+    const conversation = messages.filter(
+      (message) => message.role !== "system",
+    );
+    expect(conversation[0]).toEqual({ role: "user", content: "alice: hi" });
+    expect(conversation[1]).toEqual({ role: "assistant", content: "hello" });
+    expect(conversation[2]!.content).toContain("what is kind 9?");
   });
 
   it("falls back to a short pubkey when there is no display name", () => {
+    const { tools } = collector();
     const messages = buildMessages(
-      request({
+      requestWith(tools, {
         history: [{ author: "c".repeat(64), text: "hi", at: 1 }],
       }),
     );
-    expect(messages[1]!.content).toBe("cccccccc…: hi");
+    const conversation = messages.filter(
+      (message) => message.role !== "system",
+    );
+    expect(conversation[0]!.content).toBe("cccccccc…: hi");
   });
 });
 
 describe("OpenAICompatibleBrain", () => {
-  it("posts to the right path with the key and the model", async () => {
-    provider = await startProvider();
+  it("offers the host's tools and delivers through respond", async () => {
+    provider = await startProvider([{ body: respondCall("a group message") }]);
+    const { said, tools } = collector();
     const brain = new OpenAICompatibleBrain({
       baseUrl: provider.baseUrl,
       model: "some-model",
@@ -155,100 +214,288 @@ describe("OpenAICompatibleBrain", () => {
       temperature: 0.4,
     });
 
-    const reply = await brain.respond(request());
+    const outcome = await brain.turn(requestWith(tools));
 
-    expect(reply).toBe("a kind 9 is a group message");
+    expect(said).toEqual(["a group message"]);
+    expect(outcome.delivered).toBe(true);
+
     const [captured] = provider.received;
     expect(captured!.url).toBe("/v1/chat/completions");
     expect(captured!.headers.authorization).toBe("Bearer sk-test");
     expect(captured!.headers["x-extra"]).toBe("yes");
     expect(captured!.body.model).toBe("some-model");
-    expect(captured!.body.max_tokens).toBe(256);
-    expect(captured!.body.temperature).toBe(0.4);
+    expect(captured!.body.tool_choice).toBe("auto");
+    // The tool the host offered, in the wire's shape.
+    const wireTools = captured!.body.tools as {
+      function: { name: string };
+    }[];
+    expect(wireTools.map((tool) => tool.function.name)).toEqual([RESPOND_TOOL]);
+  });
+
+  it("feeds the tool's result back and keeps going", async () => {
+    // A model that called a tool must learn what came of it, or it cannot correct
+    // course — that feedback loop is the whole point of tools over return values.
+    provider = await startProvider([
+      {
+        body: {
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c1",
+                    type: "function",
+                    function: { name: "nonexistent", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      { body: respondCall("recovered") },
+    ]);
+    const { said, tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: provider.baseUrl,
+      model: "m",
+    });
+
+    const outcome = await brain.turn(requestWith(tools));
+
+    expect(said).toEqual(["recovered"]);
+    expect(outcome.delivered).toBe(true);
+    // The second request carries the assistant's call and the tool's answer.
+    const second = provider.received[1]!.body.messages as {
+      role: string;
+      content: string | null;
+    }[];
+    // The assistant's own call, then the tool's answer to it, at the end.
+    expect(second.slice(-2).map((message) => message.role)).toEqual([
+      "assistant",
+      "tool",
+    ]);
+    expect(second.at(-1)!.content).toContain("no tool called");
+  });
+
+  it("tells the model when its arguments were not valid JSON", async () => {
+    provider = await startProvider([
+      {
+        body: {
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c1",
+                    type: "function",
+                    function: { name: RESPOND_TOOL, arguments: "{not json" },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      { body: respondCall("second try") },
+    ]);
+    const { said, tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: provider.baseUrl,
+      model: "m",
+    });
+
+    await brain.turn(requestWith(tools));
+
+    expect(said).toEqual(["second try"]);
+    const second = provider.received[1]!.body.messages as {
+      content: string | null;
+    }[];
+    expect(second.at(-1)!.content).toContain("not valid JSON");
+  });
+
+  it("delivers a plain-text answer that forgot the tool, and says so", async () => {
+    // Dropping it would be silence in the room, which is the worse failure.
+    provider = await startProvider([{ body: plainText("kind 9, plainly") }]);
+    const { said, tools } = collector();
+    const lines: string[] = [];
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: provider.baseUrl,
+      model: "m",
+      log: (line) => lines.push(line),
+    });
+
+    const outcome = await brain.turn(requestWith(tools));
+
+    expect(said).toEqual(["kind 9, plainly"]);
+    expect(outcome.delivered).toBe(true);
+    expect(lines.some((line) => line.includes("without calling respond"))).toBe(
+      true,
+    );
+  });
+
+  it("can be made strict about the tool contract", async () => {
+    provider = await startProvider([{ body: plainText("kind 9, plainly") }]);
+    const { said, tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: provider.baseUrl,
+      model: "m",
+      deliverPlainText: false,
+    });
+
+    const outcome = await brain.turn(requestWith(tools));
+
+    expect(said).toEqual([]);
+    expect(outcome.delivered).toBe(false);
+    expect(outcome.note).toContain("never called respond");
+  });
+
+  it("stops as soon as the answer is delivered", async () => {
+    // Answering is terminal: another round trip buys prose nobody reads, or a
+    // second message in the room.
+    provider = await startProvider([
+      { body: respondCall("the answer") },
+      { body: plainText("I hope that helped") },
+    ]);
+    const { said, tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: provider.baseUrl,
+      model: "m",
+    });
+
+    const outcome = await brain.turn(requestWith(tools));
+
+    expect(said).toEqual(["the answer"]);
+    expect(provider.received).toHaveLength(1);
+    expect(outcome.note).toContain("1 step");
+  });
+
+  it("stays quiet when the model says and does nothing", async () => {
+    provider = await startProvider([{ body: plainText("") }]);
+    const { said, tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: provider.baseUrl,
+      model: "m",
+    });
+
+    const outcome = await brain.turn(requestWith(tools));
+
+    expect(said).toEqual([]);
+    expect(outcome.delivered).toBe(false);
+    expect(outcome.note).toBe("stayed quiet");
+  });
+
+  it("gives up after maxSteps rather than looping forever", async () => {
+    // A model that keeps calling a tool and never answers must not burn a room's
+    // budget indefinitely.
+    provider = await startProvider([
+      {
+        body: {
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "c",
+                    type: "function",
+                    function: { name: "nonexistent", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const { said, tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: provider.baseUrl,
+      model: "m",
+      maxSteps: 3,
+    });
+
+    const outcome = await brain.turn(requestWith(tools));
+
+    expect(said).toEqual([]);
+    expect(outcome.delivered).toBe(false);
+    expect(outcome.note).toContain("3 steps");
+    expect(provider.received).toHaveLength(3);
   });
 
   it("sends no Authorization header when there is no key", async () => {
     // A local llama.cpp wants no auth, and `Bearer undefined` is a 401.
-    provider = await startProvider();
+    provider = await startProvider([{ body: respondCall("hi") }]);
+    const { tools } = collector();
     const brain = new OpenAICompatibleBrain({
       baseUrl: provider.baseUrl,
       model: "local",
     });
-    await brain.respond(request());
+    await brain.turn(requestWith(tools));
     expect(provider.received[0]!.headers.authorization).toBeUndefined();
   });
 
   it("omits max_tokens and temperature when unset", async () => {
     // Sending nulls makes strict providers reject the whole request.
-    provider = await startProvider();
+    provider = await startProvider([{ body: respondCall("hi") }]);
+    const { tools } = collector();
     const brain = new OpenAICompatibleBrain({
       baseUrl: provider.baseUrl,
       model: "local",
     });
-    await brain.respond(request());
+    await brain.turn(requestWith(tools));
     expect(provider.received[0]!.body).not.toHaveProperty("max_tokens");
     expect(provider.received[0]!.body).not.toHaveProperty("temperature");
   });
 
   it("throws on a rejected request instead of going quiet", async () => {
-    // `null` means "stay silent" and is a legitimate answer, so a wrong key must
-    // not be able to produce it — a bot with a bad key would be indistinguishable
-    // from one that had nothing to add.
-    provider = await startProvider({
-      status: 401,
-      body: { error: { message: "invalid api key" } },
-    });
+    // Silence is a legitimate outcome, so a wrong key must not be able to produce
+    // it — a bot with a bad key would be indistinguishable from one that had
+    // nothing to add.
+    provider = await startProvider([
+      { status: 401, body: { error: { message: "invalid api key" } } },
+    ]);
+    const { tools } = collector();
     const brain = new OpenAICompatibleBrain({
       baseUrl: provider.baseUrl,
       model: "m",
       apiKey: "sk-wrong",
     });
 
-    await expect(brain.respond(request())).rejects.toThrow(/401/);
+    await expect(brain.turn(requestWith(tools))).rejects.toThrow(/401/);
   });
 
   it("never puts the key in an error message", async () => {
-    provider = await startProvider({ status: 500, body: { error: "boom" } });
+    provider = await startProvider([{ status: 500, body: { error: "boom" } }]);
+    const { tools } = collector();
     const brain = new OpenAICompatibleBrain({
       baseUrl: provider.baseUrl,
       model: "m",
       apiKey: "sk-secret-value",
     });
 
-    await expect(brain.respond(request())).rejects.toThrow(
+    await expect(brain.turn(requestWith(tools))).rejects.toThrow(
       expect.objectContaining({
         message: expect.not.stringContaining("sk-secret-value"),
       }) as Error,
     );
   });
 
-  it("treats an empty completion as silence", async () => {
-    provider = await startProvider({
-      body: { choices: [{ message: { content: "   " } }] },
-    });
-    const brain = new OpenAICompatibleBrain({
-      baseUrl: provider.baseUrl,
-      model: "m",
-    });
-    expect(await brain.respond(request())).toBeNull();
-  });
-
-  it("treats a response with no choices as silence", async () => {
-    provider = await startProvider({ body: {} });
-    const brain = new OpenAICompatibleBrain({
-      baseUrl: provider.baseUrl,
-      model: "m",
-    });
-    expect(await brain.respond(request())).toBeNull();
-  });
-
   it("reports an unreachable provider with its URL", async () => {
+    const { tools } = collector();
     const brain = new OpenAICompatibleBrain({
       baseUrl: "http://127.0.0.1:1/v1",
       model: "m",
       timeoutMs: 500,
     });
-    await expect(brain.respond(request())).rejects.toThrow(/127\.0\.0\.1:1/);
+    await expect(brain.turn(requestWith(tools))).rejects.toThrow(
+      /127\.0\.0\.1:1/,
+    );
   });
 });
 
@@ -324,5 +571,18 @@ describe("createBrain", () => {
         },
       }),
     ).toThrow(/http\(s\) URL/);
+  });
+
+  it("accepts maxSteps", () => {
+    const config = parseConfig({
+      ...base,
+      brain: {
+        type: "openai-compatible",
+        baseUrl: "https://api.example/v1",
+        model: "m",
+        maxSteps: 6,
+      },
+    });
+    expect(config.brain.maxSteps).toBe(6);
   });
 });

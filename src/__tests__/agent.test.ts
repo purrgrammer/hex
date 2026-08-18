@@ -5,7 +5,8 @@ import { runAgent, ACK_EMOJI } from "../agent.js";
 import { ReplyGate } from "../policy.js";
 import { RoomContext } from "../context.js";
 import { createRelays } from "../relays.js";
-import type { Brain, BrainRequest } from "../brain/types.js";
+import type { Brain, BrainRequest, TurnOutcome } from "../brain/types.js";
+import { RESPOND_TOOL } from "../tools/types.js";
 import type { Inbound, Room, Transport } from "../transports/types.js";
 
 const SELF = "a".repeat(64);
@@ -56,6 +57,7 @@ class FakeTransport implements Transport {
   }
 }
 
+/** Answers by calling the respond tool, like a real brain does. */
 class FixedBrain implements Brain {
   readonly name = "fixed";
   readonly seen: BrainRequest[] = [];
@@ -63,10 +65,15 @@ class FixedBrain implements Brain {
     private readonly answer: string | null,
     private readonly fail = false,
   ) {}
-  async respond(request: BrainRequest): Promise<string | null> {
+  async turn(request: BrainRequest): Promise<TurnOutcome> {
     this.seen.push(request);
     if (this.fail) throw new Error("provider exploded");
-    return this.answer;
+    if (this.answer === null) return { delivered: false, note: "stayed quiet" };
+    const result = await request.tools.call({
+      name: RESPOND_TOOL,
+      arguments: { text: this.answer },
+    });
+    return { delivered: request.tools.delivered, note: result.output };
   }
 }
 
@@ -281,7 +288,7 @@ describe("runAgent", () => {
 
     expect(transport.replies).toEqual([]);
     expect(transport.reactions).toEqual([]);
-    expect(lines.some((line) => line.includes("would reply"))).toBe(true);
+    expect(lines.some((line) => line.includes("would say"))).toBe(true);
     agent.stop();
     relays.close();
   });
@@ -317,14 +324,16 @@ describe("runAgent", () => {
     const order: string[] = [];
     const brain: Brain = {
       name: "slow-then-fast",
-      respond: async (request) => {
+      turn: async (request) => {
         if (request.incoming.room.id === "slow") {
           await new Promise((resolve) => setTimeout(resolve, 50));
           order.push("slow");
-          return "slow answer";
-        }
-        order.push("fast");
-        return "fast answer";
+        } else order.push("fast");
+        await request.tools.call({
+          name: RESPOND_TOOL,
+          arguments: { text: "answer" },
+        });
+        return { delivered: request.tools.delivered };
       },
     };
     const { transport, agent, relays } = harness(brain);
@@ -345,9 +354,13 @@ describe("runAgent", () => {
   it("holds one room to a single reply in flight", async () => {
     const brain: Brain = {
       name: "slow",
-      respond: async () => {
+      turn: async (request) => {
         await new Promise((resolve) => setTimeout(resolve, 30));
-        return "answer";
+        await request.tools.call({
+          name: RESPOND_TOOL,
+          arguments: { text: "answer" },
+        });
+        return { delivered: request.tools.delivered };
       },
     };
     const { transport, agent, relays } = harness(brain);
@@ -376,9 +389,13 @@ describe("runAgent logging", () => {
   it("says which rule refused, for the ones that mean misconfiguration", async () => {
     const brain: Brain = {
       name: "slow",
-      respond: async () => {
+      turn: async (request) => {
         await new Promise((resolve) => setTimeout(resolve, 20));
-        return "answer";
+        await request.tools.call({
+          name: RESPOND_TOOL,
+          arguments: { text: "answer" },
+        });
+        return { delivered: request.tools.delivered };
       },
     };
     const { transport, agent, lines, relays } = harness(brain);

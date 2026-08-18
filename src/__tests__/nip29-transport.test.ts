@@ -1,13 +1,13 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { firstValueFrom } from "rxjs";
-import { take, toArray } from "rxjs/operators";
+import { take, toArray, filter as rxFilter } from "rxjs/operators";
 import {
   finalizeEvent,
   generateSecretKey,
   getPublicKey,
 } from "nostr-tools/pure";
 import { PrivateKeySigner } from "applesauce-signers";
-import { createRelays } from "../relays.js";
+import { createRelays, publishTo } from "../relays.js";
 import { Nip29Transport, KIND_GROUP_MESSAGE } from "../transports/nip29.js";
 import { startMockRelay, type MockRelay } from "./mock-relay.js";
 import type { Inbound } from "../transports/types.js";
@@ -203,6 +203,55 @@ describe("Nip29Transport.reply", () => {
     await expect(
       transportFor(relay.url).reply(inboundFor(relay.url), "hello"),
     ).rejects.toThrow(/did not accept the reply/);
+  });
+
+  it("treats a reply to its own message as addressing it", async () => {
+    // Nobody repeats the bot's name in their second sentence. Without this, every
+    // exchange dies after one turn.
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const bus = transportFor(relay.url);
+    const own = await bus.reply(inboundFor(relay.url), "an answer");
+
+    const followUp = finalizeEvent(
+      {
+        kind: KIND_GROUP_MESSAGE,
+        content: "and what about kind 11?",
+        created_at: 3000,
+        tags: [
+          ["h", GROUP],
+          ["e", own],
+        ],
+      },
+      authorKey,
+    );
+
+    // Into the relay first, then read it back: this mock serves on REQ.
+    await publishTo(relays, [relay.url], followUp);
+    const inbound = await firstValueFrom(
+      bus.start().pipe(
+        rxFilter((message) => message.id === followUp.id),
+        take(1),
+      ),
+    );
+
+    // No mention, no p-tag — and still addressed, because it continues the
+    // conversation Hex is already in.
+    expect(inbound.text).not.toContain("hex");
+    expect(inbound.replyToId).toBe(own);
+    expect(inbound.addressesSelf).toBe(true);
+  });
+
+  it("does not treat a reply to somebody else as addressing it", async () => {
+    relay = await startMockRelay({
+      kind: "normal",
+      events: [message("replying to a human", GROUP, [["e", "someone-elses"]])],
+    });
+    relays = createRelays();
+    const [inbound] = await firstValueFrom(
+      transportFor(relay.url).start().pipe(take(1), toArray()),
+    );
+    expect(inbound!.addressesSelf).toBe(false);
   });
 
   it("reacts with an h-tagged kind 7 pointing at the message", async () => {

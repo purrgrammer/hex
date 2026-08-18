@@ -56,6 +56,44 @@ restart does not re-pair.
   then listen. A message that addresses Hex gets a 👀 reaction while the model
   thinks and a threaded kind 9 when it answers. Runs until interrupted.
 
+## How a turn works
+
+Delivery is a **tool call**, not a return value. The runtime hands the brain a
+tool host bound to one message in one room; the brain may think, may call tools,
+and speaks by calling `respond`. Whatever it writes outside a tool call is
+private thinking that nobody hears.
+
+That is what keeps the agent transport-agnostic: `respond` is the same tool in a
+NIP-29 group, in a DM, or in `hex ask` — the runtime routes it to whichever
+backend owns the room. It is also the seam a sandboxed coding agent will use, so
+every call is attributable to a room and a requesting pubkey from the start.
+
+What the brain is told back is the truth: `delivered as <id>`, or
+`not delivered: <why>`. A relay that refused is a refusal the model can read and
+react to, and `delivered` is a fact about the transport rather than a claim by
+the model.
+
+Two guards worth knowing: one answer per turn (a second `respond` is refused, not
+published), and `maxSteps` round trips per turn. A model that answers in prose
+without calling the tool has its text delivered anyway and the fallback says so in
+the log — set `brain.toolChoice: "required"` to make the tool path certain, or
+`deliverPlainText: false` to make the contract strict.
+
+## Conversations
+
+A mention opens a conversation; Hex's answer continues it; a reply to that answer
+is the next turn of the same exchange. Two things make that work:
+
+- **A reply to something Hex said addresses Hex**, with no name and no p-tag.
+  Nobody repeats a bot's name in their second sentence.
+- **The context is the thread**, walked back through reply tags — not the room's
+  last N lines. Unrelated chatter between a question and its answer is noise the
+  model would have to reason around. A message that starts a conversation gets the
+  room's recent window instead, since there is no thread yet.
+
+Own-message recognition is session-scoped: after a restart, a follow-up has to
+name Hex again.
+
 ## When Hex speaks
 
 It answers only when addressed: p-tagged, or named by one of `mentions` on a word

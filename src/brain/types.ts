@@ -1,4 +1,5 @@
 import type { Inbound } from "../transports/types.js";
+import type { ToolHost } from "../tools/types.js";
 
 export interface ContextMessage {
   author: string;
@@ -14,49 +15,40 @@ export interface BrainRequest {
   history: ContextMessage[];
   incoming: Inbound;
   /**
-   * Tools Hex may call. Absent in every brain shipped so far — the seam for a
-   * sandboxed coding agent, deliberately injected rather than ambient so a
-   * brain with no host cannot act.
+   * What the brain can DO. Speaking is one of these — see `respond`.
+   *
+   * The host is bound to the room and the message, so the brain never addresses a
+   * relay, a protocol, or a room other than the one it was given.
    */
-  tools?: ToolHost;
+  tools: ToolHost;
 }
 
-/**
- * The execution boundary, when there is one.
- *
- * Nothing implements this yet, and the contract is written before the feature on
- * purpose: every call is attributable to a room and a requesting pubkey, and
- * bounded. Whatever runs the work must not be this process — the daemon holds a
- * signing key.
- */
-export interface ToolHost {
-  list(): Promise<ToolSpec[]>;
-  call(request: ToolCall): Promise<ToolResult>;
-}
-
-export interface ToolSpec {
-  name: string;
-  description: string;
-  /** JSON Schema for the arguments. */
-  parameters: Record<string, unknown>;
-}
-
-export interface ToolCall {
-  name: string;
-  arguments: Record<string, unknown>;
-  /** Who asked, and where. An unattributable tool call is not authorized. */
-  requestedBy: string;
-  room: Inbound["room"];
-  timeoutMs: number;
-}
-
-export interface ToolResult {
-  ok: boolean;
-  output: string;
+export interface TurnOutcome {
+  /**
+   * Whether anything reached the room. Read from the tool host rather than
+   * claimed by the brain: what was delivered is a fact about the transport, not
+   * an assertion by the model.
+   */
+  delivered: boolean;
+  /** For the log. What the brain did, or why it did nothing. */
+  note?: string;
 }
 
 export interface Brain {
   readonly name: string;
-  /** `null` means stay silent — a first-class answer, not a failure. */
-  respond(request: BrainRequest): Promise<string | null>;
+  /**
+   * Take one turn.
+   *
+   * A turn may think, may call tools, and may decide to stay out of it — silence
+   * is a legitimate outcome, not a failure. Nothing a brain RETURNS is published;
+   * delivery only ever happens through `request.tools`.
+   */
+  turn(request: BrainRequest): Promise<TurnOutcome>;
 }
+
+export type {
+  ToolHost,
+  ToolSpec,
+  ToolCall,
+  ToolResult,
+} from "../tools/types.js";
