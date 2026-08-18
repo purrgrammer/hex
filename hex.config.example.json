@@ -1,0 +1,31 @@
+{
+  "identity": { "signer": { "type": "nsec", "env": "HEX_NSEC" } },
+  "instructions": "./instructions.md",
+  "mentions": ["hex", "@hex"],
+  "brain": {
+    "type": "openai-compatible",
+    "baseUrl": "https://example.invalid/v1",
+    "model": "your-model",
+    "apiKeyEnv": "HEX_API_KEY"
+  },
+  "relays": {
+    "read": ["wss://relay.example.invalid"],
+    "publish": ["wss://relay.example.invalid"],
+    "dm": ["wss://inbox.example.invalid"]
+  },
+  "profile": {
+    "publish": true,
+    "name": "Hex",
+    "about": "grimoire assistant",
+    "picture": "https://example.invalid/hex.png"
+  },
+  "context": { "messages": 40 },
+  "limits": { "repliesPerRoomPerHour": 20 },
+  "transports": [
+    {
+      "type": "nip-29",
+      "autoJoin": false,
+      "groups": [{ "relay": "wss://groups.example.invalid", "id": "your-group" }]
+    }
+  ]
+}

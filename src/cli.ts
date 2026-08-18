@@ -1,0 +1,179 @@
+#!/usr/bin/env node
+/**
+ * `hex <command> [config]`
+ *
+ * whoami   — resolve the signer and print the npub. No publishing.
+ * check    — validate the config and dial every relay, per role. No publishing.
+ * announce — write kind 0 / 10002 / 10050 from config, skipping what matches.
+ * run      — not yet: the transports land in the next phase.
+ */
+
+import { parseArgs } from "node:util";
+import { nip19 } from "nostr-tools";
+import { loadConfig } from "./config-file.js";
+import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
+import { resolveSigner } from "./signer.js";
+import { announceIdentity } from "./identity.js";
+
+const USAGE = `hex — a transport-agnostic agent for Nostr groups
+
+Usage:
+  hex whoami   [config]            print the pubkey the configured signer holds
+  hex check    [config]            validate config and dial every relay
+  hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
+  hex run      [config]            (next phase)
+
+Config defaults to ./hex.config.json.
+`;
+
+function fail(message: string): never {
+  console.error(`hex: ${message}`);
+  process.exit(1);
+}
+
+function describeHealth(health: RelayHealth): string {
+  switch (health.state) {
+    case "ok":
+      return `ok (${health.roundTripMs}ms)`;
+    case "silent":
+      // Deliberately distinct from "no events": a relay that accepted the REQ
+      // and said nothing is the shape that hangs clients.
+      return "SILENT — accepted the request and never answered";
+    case "auth-required":
+      return "AUTH — reachable, but serves nothing until Hex authenticates (NIP-42)";
+    case "error":
+      return `ERROR — ${health.message}`;
+  }
+}
+
+async function main(): Promise<void> {
+  const { positionals, values } = parseArgs({
+    allowPositionals: true,
+    options: {
+      "dry-run": { type: "boolean", default: false },
+      help: { type: "boolean", default: false, short: "h" },
+    },
+  });
+
+  if (values.help || positionals.length === 0) {
+    console.log(USAGE);
+    return;
+  }
+
+  const [command, configArg] = positionals;
+  const configPath = configArg ?? "hex.config.json";
+  const loaded = await loadConfig(configPath);
+  const { config } = loaded;
+  const relays = createRelays();
+
+  try {
+    switch (command) {
+      case "whoami": {
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        console.log(`pubkey  ${resolved.pubkey}`);
+        console.log(`npub    ${nip19.npubEncode(resolved.pubkey)}`);
+        console.log(`signer  ${resolved.source}`);
+        await resolved.close();
+        return;
+      }
+
+      case "check": {
+        console.log(`config  ${loaded.path}`);
+        console.log(`brain   ${config.brain.type}`);
+        console.log(
+          `mentions ${config.mentions.length ? config.mentions.join(", ") : "(none — only a p-tag will reach Hex)"}`,
+        );
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        console.log(`signer  ${resolved.source}`);
+        console.log(`npub    ${nip19.npubEncode(resolved.pubkey)}`);
+
+        const roles: [string, string[]][] = [
+          ["read", config.relays.read],
+          ["publish", config.relays.publish],
+          ["dm", config.relays.dm],
+          [
+            "nip-29 groups",
+            config.transports.flatMap((transport) =>
+              transport.groups.map((group) => group.relay),
+            ),
+          ],
+        ];
+
+        // One check per relay, then reported under every role that names it:
+        // roles overlap, and checking a relay twice at once races its own socket.
+        const health = await checkRelays(
+          relays,
+          roles.flatMap(([, urls]) => urls),
+        );
+        const unhealthy = [...health.values()].filter(
+          (result) => result.state !== "ok",
+        ).length;
+
+        for (const [role, urls] of roles) {
+          if (urls.length === 0) continue;
+          console.log(`\n${role}:`);
+          for (const url of new Set(urls)) {
+            const result = health.get(url);
+            console.log(
+              `  ${url}  ${result ? describeHealth(result) : "not checked"}`,
+            );
+          }
+        }
+
+        await resolved.close();
+        if (unhealthy > 0) {
+          console.error(`\n${unhealthy} relay(s) did not answer cleanly`);
+          process.exitCode = 1;
+        }
+        return;
+      }
+
+      case "announce": {
+        if (!config.profile.publish)
+          fail(
+            "profile.publish is false — this config says Hex's metadata is managed elsewhere",
+          );
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const results = await announceIdentity(
+          relays,
+          resolved.signer,
+          resolved.pubkey,
+          config,
+          { dryRun: values["dry-run"] },
+        );
+        for (const result of results)
+          console.log(
+            `kind ${result.kind}  ${result.action}${result.detail ? ` — ${result.detail}` : ""}`,
+          );
+        await resolved.close();
+        if (results.some((result) => result.action === "failed"))
+          process.exitCode = 1;
+        return;
+      }
+
+      case "run":
+        // `fail` never returns, but eslint reads control flow, not types.
+        return fail("run needs a transport, and none is implemented yet");
+
+      default:
+        fail(`unknown command "${command}"\n\n${USAGE}`);
+    }
+  } finally {
+    relays.close();
+  }
+}
+
+main().catch((error: unknown) => {
+  fail(error instanceof Error ? error.message : String(error));
+});

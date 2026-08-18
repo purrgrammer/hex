@@ -1,0 +1,49 @@
+{
+  "name": "nostr-hex",
+  "version": "0.1.0",
+  "description": "Hex — a transport-agnostic agent for Nostr groups. NIP-29 today, NIP-17 and Concord next.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Alejandro Gómez",
+  "keywords": ["nostr", "agent", "bot", "nip-29", "nip-17"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "hex": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "instructions.md",
+    "hex.config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "applesauce-common": "^6.2.0",
+    "applesauce-core": "^6.2.0",
+    "applesauce-relay": "^6.2.1",
+    "applesauce-signers": "^6.2.2",
+    "nostr-tools": "~2.19",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "~6.0.3",
+    "ws": "^8.18.0"
+  }
+}
