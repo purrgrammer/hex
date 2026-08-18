@@ -17,7 +17,9 @@
     "publish": true,
     "name": "Hex",
     "about": "The grimoire assistant. Ask me about NIPs, kinds, and how relays actually behave.",
-    "picture": "https://i.nostr.build/6BK9LpTI5oFAvlyy.png"
+    "picture": "https://i.nostr.build/6BK9LpTI5oFAvlyy.png",
+    "nip05": "hex@grimoire.rocks",
+    "website": "https://grimoire.rocks"
   },
   "context": { "messages": 40 },
   "limits": { "repliesPerRoomPerHour": 20 },
