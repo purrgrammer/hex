@@ -171,7 +171,7 @@ describe("parseConfig", () => {
       ],
     });
     const [transport] = config.transports;
-    expect(transport?.type === "nip-17" && transport.allow[0]).toMatch(
+    expect(transport?.type === "nip-17" && transport.allow[0]?.pubkey).toMatch(
       /^[0-9a-f]{64}$/,
     );
   });

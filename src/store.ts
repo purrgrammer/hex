@@ -45,6 +45,15 @@ export interface StoredSession {
   lastAt: number;
 }
 
+/** A checkout one session works in, so a restart finds it again. */
+export interface StoredWorktree {
+  sessionId: string;
+  repo: string;
+  path: string;
+  branch: string;
+  createdAt: number;
+}
+
 export interface AgentHome {
   /** The root every agent lives under, e.g. `~/.hex`. */
   root: string;
@@ -109,6 +118,15 @@ CREATE TABLE IF NOT EXISTS participants (
   PRIMARY KEY (session_id, pubkey)
 );
 CREATE INDEX IF NOT EXISTS participants_pubkey ON participants (pubkey);
+
+CREATE TABLE IF NOT EXISTS worktrees (
+  session_id TEXT NOT NULL,
+  repo       TEXT NOT NULL,
+  path       TEXT NOT NULL,
+  branch     TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, repo)
+);
 `;
 
 export class HexStore {
@@ -140,6 +158,45 @@ export class HexStore {
       .prepare("SELECT own FROM messages WHERE id = ?")
       .get(id) as { own?: number } | undefined;
     return row?.own === 1;
+  }
+
+  /**
+   * The checkout this session works in, if it has one.
+   *
+   * In the database rather than inferred from what is on disk: a directory that
+   * happens to exist proves nothing about which conversation owns it, and two
+   * processes deciding that from `readdir` would both claim the same one.
+   */
+  worktreeFor(sessionId: string, repo: string): StoredWorktree | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT session_id, repo, path, branch, created_at FROM worktrees WHERE session_id = ? AND repo = ?",
+      )
+      .get(sessionId, repo) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      sessionId: String(row.session_id),
+      repo: String(row.repo),
+      path: String(row.path),
+      branch: String(row.branch),
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  /** Claim a checkout for a session. Never overwritten; the first one wins. */
+  recordWorktree(worktree: StoredWorktree): void {
+    this.db
+      .prepare(
+        `INSERT INTO worktrees (session_id, repo, path, branch, created_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+      )
+      .run(
+        worktree.sessionId,
+        worktree.repo,
+        worktree.path,
+        worktree.branch,
+        worktree.createdAt,
+      );
   }
 
   getMessage(id: string): StoredMessage | undefined {

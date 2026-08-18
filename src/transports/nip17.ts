@@ -294,14 +294,25 @@ export class Nip17Transport implements Transport {
    * its own inbox is the only record it has.
    */
   async reply(to: Inbound, text: string): Promise<string> {
-    const peer = to.room.id;
+    return this.send(to.room.id, text, to.id);
+  }
 
+  /**
+   * Send to someone who did not write first.
+   *
+   * The same path as a reply, minus the thing being replied to — which is what
+   * a notification is: Hex reporting on work nobody just asked about. Kept
+   * separate from `reply` because a `Transport` answers messages, and speaking
+   * first is not that.
+   */
+  async send(peer: string, text: string, replyToId?: string): Promise<string> {
     // Stamped, not signed: a rumor carries a pubkey and an id and no signature.
     // The id is computed here because the session store keys on it, and because
     // both wraps must carry the SAME rumor — one message, two envelopes.
-    const unsigned = await WrappedMessageFactory.create(peer, text)
-      .replyTo(to.id)
-      .stamp(this.options.signer);
+    const draft = WrappedMessageFactory.create(peer, text);
+    const unsigned = await (replyToId ? draft.replyTo(replyToId) : draft).stamp(
+      this.options.signer,
+    );
     const rumor = { ...unsigned, id: getEventHash(unsigned) } as Rumor;
 
     const theirInbox = await this.inboxOf(peer);

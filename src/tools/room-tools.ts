@@ -12,8 +12,10 @@
 
 import type { Inbound, Transport } from "../transports/types.js";
 import type { KnowledgeTools } from "./knowledge.js";
+import type { RepoTools } from "./repo-tools.js";
 import {
   canonicalId,
+  filterTools,
   REACT_TOOL,
   RESPOND_TOOL,
   type ToolCall,
@@ -37,6 +39,23 @@ export interface RoomToolsOptions {
    * serves `hex ask`. Optional, so a room can be served without them.
    */
   knowledge?: KnowledgeTools;
+  /**
+   * Running commands, if this channel was granted it.
+   *
+   * Absent for every channel that was not — which is the authorization, and the
+   * reason it is a constructor argument rather than a check inside a tool. A
+   * model is never offered a tool it may not call, so it never spends a turn
+   * being refused, and a room's grant is decided once by whoever built the host.
+   */
+  repo?: RepoTools;
+  /**
+   * Which tools this channel gets, as ids or `namespace.*`.
+   *
+   * `chat.*` is exempt — a channel Hex listens to must be one it can answer in.
+   * Undefined means everything composed in is offered, which is what a channel
+   * with no toolset in config gets.
+   */
+  grants?: string[];
 }
 
 /**
@@ -112,8 +131,17 @@ export class RoomTools implements ToolHost {
           " not an answer.",
       });
 
-    // Whatever else the runtime can do, offered alongside speaking.
-    if (this.options.knowledge) specs.push(...this.options.knowledge.list());
+    // Whatever else the runtime can do, offered alongside speaking — and only
+    // what this channel was granted. Speaking itself is never filtered.
+    const optional: ToolSpec[] = [];
+    if (this.options.knowledge) optional.push(...this.options.knowledge.list());
+    if (this.options.repo) optional.push(...this.options.repo.list());
+
+    specs.push(
+      ...(this.options.grants
+        ? filterTools(optional, this.options.grants)
+        : optional),
+    );
 
     return specs;
   }
@@ -121,7 +149,22 @@ export class RoomTools implements ToolHost {
   async call(call: ToolCall): Promise<ToolResult> {
     // A model may call by wire name (`chat_respond`) or by canonical id; the
     // prompt says the id, and losing a round trip to punctuation is silly.
-    const name = canonicalId(call.name, this.list());
+    const offered = this.list();
+    const name = canonicalId(call.name, offered);
+
+    // Offered and callable are the same set. `list()` is what a well-behaved
+    // model reads, but a call is what actually happens, and a model that names
+    // a tool it was never shown must not reach the thing behind it.
+    if (!offered.some((spec) => spec.name === name))
+      return {
+        ok: false,
+        output: `there is no tool called "${call.name}". Available: ${offered
+          .map((spec) => spec.name)
+          .join(", ")}`,
+      };
+
+    if (this.options.repo?.handles(name))
+      return this.options.repo.call(name, call.arguments);
 
     if (this.options.knowledge?.handles(name))
       return this.options.knowledge.call(name, call.arguments);

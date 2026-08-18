@@ -19,7 +19,7 @@
 
 import type { Room } from "../transports/types.js";
 
-export type ToolNamespace = "chat" | "grimoire" | "nostr";
+export type ToolNamespace = "chat" | "grimoire" | "nostr" | "repo";
 
 export interface ToolSpec {
   /** Canonical id, `<namespace>.<action>`. */
@@ -62,6 +62,47 @@ export const HELP_TOOL = "grimoire.help";
 export const REQ_TOOL = "nostr.req";
 /** A bech32 entity turned into the person or event it names. */
 export const RESOLVE_TOOL = "nostr.resolve";
+/** A command, in this session's worktree. Writes, builds, runs tests. */
+export const EXEC_TOOL = "repo.exec";
+/** A whole file, written in one call — a shell heredoc is a bad text editor. */
+export const WRITE_TOOL = "repo.write";
+
+/**
+ * Every tool id that exists, so config can refuse one that does not.
+ *
+ * A grant naming `nostr.request` instead of `nostr.req` would parse, offer
+ * nothing, and look like a model that would not use its tools — the same class
+ * of silent misconfiguration `rejectUnknown` exists to catch.
+ */
+export const KNOWN_TOOLS: readonly string[] = [
+  RESPOND_TOOL,
+  REACT_TOOL,
+  HELP_TOOL,
+  REQ_TOOL,
+  RESOLVE_TOOL,
+  EXEC_TOOL,
+  WRITE_TOOL,
+];
+
+/**
+ * Does a grant pattern cover this tool id?
+ *
+ * Either an exact id or a whole namespace: `nostr.*`. No other wildcard, and
+ * notably no bare `*` — a channel that can do everything should have to say
+ * which everything, because the set grows.
+ */
+export function grantCovers(pattern: string, id: string): boolean {
+  if (pattern === id) return true;
+  if (!pattern.endsWith(".*")) return false;
+  return id.startsWith(pattern.slice(0, -1));
+}
+
+/** The subset of `specs` a set of grants allows. */
+export function filterTools(specs: ToolSpec[], grants: string[]): ToolSpec[] {
+  return specs.filter((spec) =>
+    grants.some((grant) => grantCovers(grant, spec.name)),
+  );
+}
 
 /**
  * The name a provider sees.

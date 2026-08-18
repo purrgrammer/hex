@@ -26,6 +26,9 @@ import { ReplyGate } from "./policy.js";
 import { runAgent } from "./agent.js";
 import { ConsoleTools } from "./tools/console-tools.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
+import { RepoTools } from "./tools/repo-tools.js";
+import { WorktreeManager } from "./worktree.js";
+import { toolsetFor } from "./grants.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { SessionTracker } from "./sessions.js";
 
@@ -37,6 +40,7 @@ Usage:
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
   hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
   hex ask      [config] "question" [--brain echo]  one turn through the brain
+  hex dm       [config] <npub> "message"   send a private message, unprompted
   hex run      [config] [--dry-run] [--brain echo]  join, listen, and answer
 
 Config defaults to ./hex.config.json.
@@ -173,6 +177,32 @@ async function main(): Promise<void> {
           }
         }
 
+        // Who may ask for what. Printed even when nothing is granted, because
+        // "no channel can run anything" is the fact an operator wants confirmed.
+        console.log("\ncapabilities:");
+        if (config.toolsets.size === 0) {
+          console.log("  (none — every channel gets the read tools only)");
+        } else {
+          for (const [name, toolset] of config.toolsets) {
+            const where = toolset.isolation
+              ? ` — runs in ${toolset.repos.join(", ")} (${toolset.isolation}, ${toolset.execTimeoutMinutes ?? 15}min)`
+              : "";
+            console.log(`  ${name}: ${toolset.tools.join(" ")}${where}`);
+          }
+          for (const transport of config.transports) {
+            if (transport.type === "nip-17")
+              for (const peer of transport.allow)
+                console.log(
+                  `  dm ${nip19.npubEncode(peer.pubkey).slice(0, 16)}… → ${peer.toolset ?? transport.toolset ?? "(default)"}`,
+                );
+            else
+              for (const group of transport.groups)
+                console.log(
+                  `  ${group.relay}'${group.id} → ${group.toolset ?? transport.toolset ?? "(default)"}`,
+                );
+          }
+        }
+
         await resolved.close();
         if (unhealthy > 0) {
           console.error(`\n${unhealthy} relay(s) did not answer cleanly`);
@@ -301,6 +331,63 @@ async function main(): Promise<void> {
         return;
       }
 
+      /**
+       * Speak first: a private message to someone, unprompted.
+       *
+       * For reporting on work rather than answering about it — a long task
+       * finishing, a build breaking. Restricted to the DM allow-list, because
+       * an agent that can message anyone is a spam engine with a signing key.
+       */
+      case "dm": {
+        const dm = dmTransport(config.transports);
+        if (!dm) fail("this config has no nip-17 transport");
+        const [, , who, ...rest] = positionals;
+        const text = rest.join(" ").trim();
+        if (!who || !text) fail('usage: hex dm [config] <npub|hex> "message"');
+
+        const peer = /^[0-9a-f]{64}$/i.test(who)
+          ? who.toLowerCase()
+          : (() => {
+              try {
+                const decoded = nip19.decode(who);
+                if (decoded.type === "npub") return decoded.data;
+              } catch {
+                // Named below rather than throwing something opaque.
+              }
+              return fail(`${who} is not an npub or a hex pubkey`);
+            })();
+
+        if (!dm.allow.some((allowed) => allowed.pubkey === peer))
+          fail(
+            `${nip19.npubEncode(peer).slice(0, 16)}… is not on this config's DM allow list`,
+          );
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const transport = new Nip17Transport({
+          relays,
+          signer: resolved.signer,
+          pubkey: resolved.pubkey,
+          inboxRelays: config.relays.dm,
+          readRelays: config.relays.read,
+          allow: dm.allow.map((allowed) => allowed.pubkey),
+          since: Math.floor(Date.now() / 1000),
+          log: (line) => console.log(line),
+        });
+
+        if (values["dry-run"]) {
+          console.log(`would send to ${nip19.npubEncode(peer)}: ${text}`);
+        } else {
+          const id = await transport.send(peer, text);
+          console.log(`sent ${id}`);
+        }
+        transport.stop();
+        await resolved.close();
+        return;
+      }
+
       case "run": {
         const resolved = await resolveSigner(config.identity.signer, {
           baseDir: loaded.baseDir,
@@ -398,20 +485,65 @@ async function main(): Promise<void> {
               pubkey: resolved.pubkey,
               inboxRelays: config.relays.dm,
               readRelays: config.relays.read,
-              allow: dm.allow,
+              allow: dm.allow.map((peer) => peer.pubkey),
               since: startedAt,
               log: (line) => console.log(line),
             }),
           );
           console.log(
             `dm      ${dm.allow.length} allowed: ${dm.allow
-              .map((pubkey) => nip19.npubEncode(pubkey).slice(0, 16) + "…")
+              .map(
+                (peer) =>
+                  nip19.npubEncode(peer.pubkey).slice(0, 16) +
+                  "…" +
+                  ((peer.toolset ?? dm.toolset)
+                    ? ` (${peer.toolset ?? dm.toolset})`
+                    : ""),
+              )
               .join(", ")}`,
           );
         }
 
+        // One per process; the per-conversation checkouts it hands out are
+        // rows in the same store the sessions live in.
+        const worktrees = new WorktreeManager({
+          store,
+          root: home.worktrees,
+          repos: config.repos,
+          log: (line) => console.log(line),
+        });
+
         const agent = runAgent({
           transports,
+          /**
+           * What this message's channel may do.
+           *
+           * Built here rather than inside the agent because it is a config
+           * question, and resolved per message because the answer differs by
+           * room and by speaker. A channel with no toolset gets `undefined`,
+           * which is the read tools and no execution.
+           */
+          capabilities: (inbound, sessionId) => {
+            const toolset = toolsetFor(config, inbound);
+            if (!toolset) return {};
+            return {
+              grants: toolset.tools,
+              repo:
+                toolset.isolation && toolset.repos.length > 0
+                  ? new RepoTools({
+                      worktrees,
+                      repos: toolset.repos,
+                      sessionId,
+                      requestedBy: inbound.author,
+                      dryRun: values["dry-run"],
+                      timeoutMs: toolset.execTimeoutMinutes
+                        ? toolset.execTimeoutMinutes * 60_000
+                        : undefined,
+                      log: (line) => console.log(line),
+                    })
+                  : undefined,
+            };
+          },
           gate: new ReplyGate({
             selfPubkey: resolved.pubkey,
             mentions: config.mentions,
