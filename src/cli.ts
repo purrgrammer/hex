@@ -16,6 +16,7 @@ import { resolveSigner } from "./signer.js";
 import { announceIdentity } from "./identity.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
+import { createBrain } from "./brain/create.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -24,6 +25,7 @@ Usage:
   hex check    [config]            validate config and dial every relay
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
   hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
+  hex ask      [config] "question" [--brain echo]  one turn through the brain
   hex run      [config]            (next phase)
 
 Config defaults to ./hex.config.json.
@@ -59,6 +61,7 @@ async function main(): Promise<void> {
       "dry-run": { type: "boolean", default: false },
       auto: { type: "boolean", default: false },
       "env-file": { type: "string" },
+      brain: { type: "string" },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -175,6 +178,46 @@ async function main(): Promise<void> {
         await resolved.close();
         if (results.some((result) => result.action === "failed"))
           process.exitCode = 1;
+        return;
+      }
+
+      case "ask": {
+        // One turn through the brain, with no relay and no room. This is how a
+        // provider gets verified: base URL, key, model and instructions, before
+        // any of it is wired to a group where failures are somebody else's
+        // problem.
+        const question = positionals.slice(2).join(" ").trim();
+        if (!question) fail('ask needs a question: hex ask [config] "…"');
+
+        const brain = createBrain(config.brain, {
+          override: values.brain === "echo" ? "echo" : undefined,
+        });
+        console.log(`brain   ${brain.name}`);
+
+        const reply = await brain.respond({
+          instructions: loaded.instructions,
+          history: [],
+          incoming: {
+            id: "local",
+            author: "0".repeat(64),
+            text: question,
+            createdAt: Math.floor(Date.now() / 1000),
+            room: { transport: "nip-29", id: "local", label: "hex ask" },
+            addressesSelf: true,
+            event: {
+              id: "local",
+              pubkey: "0".repeat(64),
+              created_at: Math.floor(Date.now() / 1000),
+              kind: 9,
+              content: question,
+              tags: [],
+              sig: "",
+            },
+          },
+        });
+
+        // `null` is a real answer from a brain: it means stay quiet.
+        console.log(reply === null ? "(silence)" : `\n${reply}`);
         return;
       }
 

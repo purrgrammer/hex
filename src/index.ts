@@ -67,6 +67,14 @@ export type {
   ToolSpec,
 } from "./brain/types.js";
 export { EchoBrain } from "./brain/echo.js";
+export { createBrain, type CreateBrainOptions } from "./brain/create.js";
+export {
+  OpenAICompatibleBrain,
+  completionsUrl,
+  buildMessages,
+  BRAIN_TIMEOUT_MS,
+  type OpenAICompatibleOptions,
+} from "./brain/openai-compatible.js";
 export { loadEnvFile, type EnvFileResult } from "./env-file.js";
 export {
   joinGroup,

@@ -14,11 +14,15 @@ export type SignerConfig =
 
 export interface BrainConfig {
   type: "openai-compatible" | "echo";
+  /** e.g. `https://api.openai.com/v1`. Any chat-completions endpoint. */
   baseUrl?: string;
   model?: string;
+  /** Name of the env var holding the key — never the key itself. */
   apiKeyEnv?: string;
   /** Extra headers, values read from env by name. */
   headerEnv?: Record<string, string>;
+  maxTokens?: number;
+  temperature?: number;
 }
 
 export interface RelayRoles {
@@ -181,9 +185,23 @@ function parseBrain(value: unknown): BrainConfig {
   }
 
   if (type === "openai-compatible") {
+    // Checked before the generic unknown-key error, because this particular
+    // mistake — a key pasted into the config — deserves to be named.
+    if (brain.apiKey !== undefined)
+      throw new ConfigError(
+        "brain.apiKey is not an option — name an env var with brain.apiKeyEnv instead, so the key stays out of the config file",
+      );
     rejectUnknown(
       brain,
-      ["type", "baseUrl", "model", "apiKeyEnv", "headerEnv"],
+      [
+        "type",
+        "baseUrl",
+        "model",
+        "apiKeyEnv",
+        "headerEnv",
+        "maxTokens",
+        "temperature",
+      ],
       "brain",
     );
     const headerEnvRaw = brain.headerEnv;
@@ -194,12 +212,31 @@ function parseBrain(value: unknown): BrainConfig {
       for (const [header, envName] of Object.entries(record))
         headerEnv[header] = requireString(envName, `brain.headerEnv.${header}`);
     }
+    const baseUrl = requireString(brain.baseUrl, "brain.baseUrl");
+    try {
+      const parsed = new URL(baseUrl);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:")
+        throw new Error("not http(s)");
+    } catch {
+      throw new ConfigError(`brain.baseUrl must be an http(s) URL: ${baseUrl}`);
+    }
+
+    if (brain.temperature !== undefined) {
+      if (typeof brain.temperature !== "number" || brain.temperature < 0)
+        throw new ConfigError("brain.temperature must be a number ≥ 0");
+    }
+
     return {
       type: "openai-compatible",
-      baseUrl: requireString(brain.baseUrl, "brain.baseUrl"),
+      baseUrl,
       model: requireString(brain.model, "brain.model"),
       apiKeyEnv: optionalString(brain.apiKeyEnv, "brain.apiKeyEnv"),
       headerEnv,
+      maxTokens:
+        brain.maxTokens === undefined
+          ? undefined
+          : requirePositiveInt(brain.maxTokens, "brain.maxTokens"),
+      temperature: brain.temperature as number | undefined,
     };
   }
 
