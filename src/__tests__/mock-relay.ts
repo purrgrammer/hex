@@ -37,6 +37,14 @@ export type MockRelayBehaviour =
   /** Challenge on connect, then refuse every REQ with an `auth-required` CLOSED. */
   | { kind: "auth-required" }
   /**
+   * Challenge on connect and refuse every EVENT until the socket AUTHs.
+   *
+   * What a NIP-42 inbox relay actually does to a publish, which is the case that
+   * silently dropped gift wraps: the message is refused, not lost, and the client
+   * has to decide which key to authenticate with.
+   */
+  | { kind: "auth-to-write" }
+  /**
    * Refuse every REQ with a CLOSED carrying NO machine-readable prefix, and
    * accept publishes.
    *
@@ -50,6 +58,8 @@ export interface MockRelay {
   url: string;
   /** Every event the relay was asked to store, in arrival order. */
   received: NostrEvent[];
+  /** Pubkeys that have AUTHed on any connection, in order. */
+  authenticated: string[];
   close(): Promise<void>;
 }
 
@@ -58,13 +68,19 @@ export async function startMockRelay(
 ): Promise<MockRelay> {
   const server = new WebSocketServer({ port: 0 });
   const received: NostrEvent[] = [];
+  const authenticated: string[] = [];
   const sockets = new Set<WebSocket>();
 
   server.on("connection", (socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
-    if (behaviour.kind === "auth-required")
+    if (
+      behaviour.kind === "auth-required" ||
+      behaviour.kind === "auth-to-write"
+    )
       socket.send(JSON.stringify(["AUTH", "challenge-string"]));
+    // Who this socket has authenticated as, if anyone.
+    let authenticatedAs: string | undefined;
     socket.on("message", (raw) => {
       let message: unknown;
       try {
@@ -105,15 +121,35 @@ export async function startMockRelay(
         const filters = rest.slice(1) as Filter[];
         // Serve what was published to it as well as what it was seeded with — a
         // relay that forgets its own EVENTs cannot exercise "already published".
-        for (const event of [...(behaviour.events ?? []), ...received])
+        const seeded = "events" in behaviour ? (behaviour.events ?? []) : [];
+        for (const event of [...seeded, ...received])
           if (filters.some((filter) => matchesFilter(filter, event)))
             socket.send(JSON.stringify(["EVENT", subscriptionId, event]));
         socket.send(JSON.stringify(["EOSE", subscriptionId]));
         return;
       }
 
+      if (verb === "AUTH") {
+        const event = rest[0] as NostrEvent;
+        authenticatedAs = event.pubkey;
+        authenticated.push(event.pubkey);
+        socket.send(JSON.stringify(["OK", event.id, true, ""]));
+        return;
+      }
+
       if (verb === "EVENT") {
         const event = rest[0] as NostrEvent;
+        if (behaviour.kind === "auth-to-write" && !authenticatedAs) {
+          socket.send(
+            JSON.stringify([
+              "OK",
+              event.id,
+              false,
+              "auth-required: we only take events from authenticated clients",
+            ]),
+          );
+          return;
+        }
         // Silent means silent in both directions: no OK either. A relay that
         // takes an EVENT and never acknowledges it has not stored anything.
         if (behaviour.kind === "silent") return;
@@ -134,6 +170,7 @@ export async function startMockRelay(
   return {
     url: `ws://127.0.0.1:${address.port}/`,
     received,
+    authenticated,
     close: () =>
       new Promise<void>((resolve, reject) => {
         for (const socket of sockets) socket.terminate();
