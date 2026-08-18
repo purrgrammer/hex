@@ -8,6 +8,7 @@
  */
 
 import type { KnowledgeTools } from "./knowledge.js";
+import type { RepoTools } from "./repo-tools.js";
 import {
   canonicalId,
   RESPOND_TOOL,
@@ -28,6 +29,12 @@ export class ConsoleTools implements ToolHost {
       console.log(text),
     /** The same read tools a room turn gets, so `hex ask` exercises them too. */
     private readonly knowledge?: KnowledgeTools,
+    /**
+     * And the coding tools, when the caller asked to be treated as a channel
+     * that has them. `hex ask --as <npub>` is the only way to drive the whole
+     * loop without a second key to send the DM from.
+     */
+    private readonly repo?: RepoTools,
   ) {}
 
   get delivered() {
@@ -53,11 +60,13 @@ export class ConsoleTools implements ToolHost {
           " say, and nothing else you write is heard.",
       },
       ...(this.knowledge?.list() ?? []),
+      ...(this.repo?.list() ?? []),
     ];
   }
 
   async call(call: ToolCall): Promise<ToolResult> {
     const name = canonicalId(call.name, this.list());
+    if (this.repo?.handles(name)) return this.repo.call(name, call.arguments);
     if (this.knowledge?.handles(name))
       return this.knowledge.call(name, call.arguments);
 

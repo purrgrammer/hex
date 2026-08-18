@@ -39,7 +39,7 @@ Usage:
   hex check    [config]            validate config and dial every relay
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
   hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
-  hex ask      [config] "question" [--brain echo]  one turn through the brain
+  hex ask      [config] "question" [--as <npub>]  one turn through the brain
   hex dm       [config] <npub> "message"   send a private message, unprompted
   hex run      [config] [--dry-run] [--brain echo]  join, listen, and answer
 
@@ -93,6 +93,7 @@ async function main(): Promise<void> {
       auto: { type: "boolean", default: false },
       "env-file": { type: "string" },
       brain: { type: "string" },
+      as: { type: "string" },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -252,18 +253,86 @@ async function main(): Promise<void> {
         });
         console.log(`brain   ${brain.name}`);
 
-        const room = {
-          transport: "nip-29" as const,
-          id: "local",
-          label: "hex ask",
-        };
+        /**
+         * `--as <npub>` asks the question as a DM from that person.
+         *
+         * Which matters because the coding tools only exist for a channel that
+         * was granted them, and driving that end to end otherwise needs a
+         * second key to send the DM from. The grant is resolved through the
+         * same function the daemon uses, so this is the real path and not a
+         * bypass: a pubkey that is not on the allow-list gets nothing.
+         */
+        const asRaw = values.as;
+        const asPubkey = asRaw
+          ? /^[0-9a-f]{64}$/i.test(asRaw)
+            ? asRaw.toLowerCase()
+            : (() => {
+                try {
+                  const decoded = nip19.decode(asRaw);
+                  if (decoded.type === "npub") return decoded.data;
+                } catch {
+                  // Named below.
+                }
+                return fail(`--as ${asRaw} is not an npub or a hex pubkey`);
+              })()
+          : "0".repeat(64);
+
+        const room = asRaw
+          ? { transport: "nip-17" as const, id: asPubkey, label: "hex ask" }
+          : { transport: "nip-29" as const, id: "local", label: "hex ask" };
+
+        let repoTools: RepoTools | undefined;
+        if (asRaw) {
+          const resolved = await resolveSigner(config.identity.signer, {
+            baseDir: loaded.baseDir,
+            relays,
+          });
+          const home = agentHome(
+            config.state.home
+              ? expandHome(config.state.home, loaded.baseDir)
+              : DEFAULT_HOME,
+            resolved.pubkey,
+          );
+          await resolved.close();
+          const store = HexStore.open(home.db);
+          const toolset = toolsetFor(config, {
+            id: "local",
+            author: asPubkey,
+            text: question,
+            createdAt: 0,
+            addressesSelf: true,
+            room,
+          } as Parameters<typeof toolsetFor>[1]);
+          console.log(`as      ${asRaw} → ${toolset?.name ?? "(default)"}`);
+          if (toolset?.isolation && toolset.repos.length > 0)
+            repoTools = new RepoTools({
+              worktrees: new WorktreeManager({
+                store,
+                root: home.worktrees,
+                repos: config.repos,
+                log: (line) => console.log(line),
+              }),
+              repos: toolset.repos,
+              // A named session, so repeated `hex ask` runs share one checkout
+              // instead of leaving a worktree behind per question.
+              sessionId: `ask#${asPubkey.slice(0, 16)}`,
+              requestedBy: asPubkey,
+              dryRun: values["dry-run"],
+              timeoutMs: toolset.execTimeoutMinutes
+                ? toolset.execTimeoutMinutes * 60_000
+                : undefined,
+              log: (line) => console.log(line),
+            });
+        }
+
         // The same tools a room turn gets: speaking, pointed at stdout, plus the
         // read tools — so `hex ask` verifies the whole surface, not a subset.
         const tools = new ConsoleTools(
           room,
-          "0".repeat(64),
+          asPubkey,
           (text) => console.log(text),
           new KnowledgeTools({ relays, readRelays: config.relays.read }),
+          repoTools,
         );
 
         const outcome = await brain.turn({
@@ -272,14 +341,14 @@ async function main(): Promise<void> {
           tools,
           incoming: {
             id: "local",
-            author: "0".repeat(64),
+            author: asPubkey,
             text: question,
             createdAt: Math.floor(Date.now() / 1000),
             room,
             addressesSelf: true,
             event: {
               id: "local",
-              pubkey: "0".repeat(64),
+              pubkey: asPubkey,
               created_at: Math.floor(Date.now() / 1000),
               kind: 9,
               content: question,

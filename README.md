@@ -71,6 +71,8 @@ uses, because it is the same Hex:
 | `grimoire.help` | A NIP's text or a kind's definition, from the NIPs repository. |
 | `nostr.req` | A NIP-01 filter against relays. Read-only, capped. |
 | `nostr.resolve` | A bech32 entity turned into the person or event it names. |
+| `repo.exec` | A shell command, in this conversation's git worktree. Granted, never default. |
+| `repo.write` | A whole file in that worktree. Exists because a heredoc is a bad text editor. |
 
 The ids carry the dot; the wire carries an underscore, since OpenAI-shaped
 function names cannot contain one. Nothing here signs, publishes, spends or
@@ -167,7 +169,67 @@ A brain that returns nothing is silence, which is a legitimate answer. A brain o
 relay that FAILS is logged as a failure — never dressed up as having nothing to
 say.
 
+## Capabilities, per channel
+
+Channels are not equal. A relay group is whoever the relay admits, and its
+membership changes without Hex hearing about it; a DM is one named person on an
+allow-list. So what may be asked for is a property of the channel, resolved per
+message:
+
+```json
+"toolsets": {
+  "reader": { "tools": ["grimoire.*", "nostr.*"] },
+  "coder": {
+    "tools": ["grimoire.*", "nostr.*", "repo.*"],
+    "repos": ["grimoire"],
+    "isolation": "host-worktree",
+    "execTimeoutMinutes": 15
+  }
+},
+"transports": [
+  { "type": "nip-29", "toolset": "reader", "groups": [ ... ] },
+  { "type": "nip-17", "allow": [{ "pubkey": "npub1…", "toolset": "coder" }] }
+]
+```
+
+A person or a group wins over their transport, which wins over nothing at all —
+and nothing at all means the read tools, never the ones that run. Grants name a
+tool id or a whole namespace; there is no bare `*`, because a channel that can
+do everything should have to say which everything.
+
+**Coding tools are NIP-17 only, refused at parse time.** A group's membership is
+the relay's to change, so it can never be the basis for handing someone a shell.
+A config naming a repo that does not exist, a tool that does not exist, or
+execution with nowhere to run it fails at startup rather than at the first
+command — a config that parses and then declines everything is the harder bug.
+
+`hex check` prints the whole resolved picture. `hex ask --as <npub>` drives one
+turn as that person, through the same resolution the daemon uses, which is how
+the coding path is exercised without a second key to send a DM from.
+
+## Working in a repository
+
+A granted conversation gets a git worktree of its own — one per (session, repo),
+on branch `hex/<hash>`, created on the first command and reused for every later
+one including after a restart. The mapping is a row in SQLite, not a guess about
+what is on disk. Nothing is ever deleted automatically; a finished conversation
+still holds work only the operator can judge.
+
+`host-worktree` runs commands as the user who started the daemon. It is named
+rather than implied so a config asking for something stronger fails instead of
+quietly getting less, and it offers no isolation: anything it runs can read the
+daemon's secrets off disk. What is bounded is each call — a wall clock that
+kills the process group, an output ceiling that keeps both ends, a working
+directory the caller cannot choose, and secrets stripped from the child's
+environment.
+
+Hex commits on its own branch and never pushes. Sending work anywhere is the
+operator's decision, not the agent's.
+
 ## Status
 
-NIP-29 works end to end. NIP-17 and Concord are the next transports; the
-`ToolHost` seam for a sandboxed coding agent is defined and unimplemented.
+NIP-29 and NIP-17 work end to end, with a coding agent on the DM side. Concord
+is the next transport. Known limits: a task in flight cannot be steered or
+cancelled — a follow-up bounces off the in-flight gate until the turn ends — and
+`host-worktree` is the only isolation implemented, with a container backend the
+obvious next rung.
