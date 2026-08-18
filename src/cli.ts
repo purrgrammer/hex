@@ -16,8 +16,11 @@ import { resolveSigner } from "./signer.js";
 import { announceIdentity } from "./identity.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
+import type { TransportConfig } from "./config.js";
 import { createBrain } from "./brain/create.js";
 import { Nip29Transport } from "./transports/nip29.js";
+import { Nip17Transport } from "./transports/nip17.js";
+import type { Transport } from "./transports/types.js";
 import { RoomContext } from "./context.js";
 import { ReplyGate } from "./policy.js";
 import { runAgent } from "./agent.js";
@@ -41,6 +44,22 @@ Config defaults to ./hex.config.json.
 Secrets come from the environment. Every command loads a \`.env\` beside the
 config, or --env-file <path>; a variable already exported always wins.
 `;
+
+/** The NIP-29 half of a config's transports. */
+function groupTransports(transports: TransportConfig[]) {
+  return transports.filter(
+    (transport): transport is Extract<TransportConfig, { type: "nip-29" }> =>
+      transport.type === "nip-29",
+  );
+}
+
+/** The DM half, of which at most one matters. */
+function dmTransport(transports: TransportConfig[]) {
+  return transports.find(
+    (transport): transport is Extract<TransportConfig, { type: "nip-17" }> =>
+      transport.type === "nip-17",
+  );
+}
 
 function fail(message: string): never {
   console.error(`hex: ${message}`);
@@ -127,7 +146,7 @@ async function main(): Promise<void> {
           ["dm", config.relays.dm],
           [
             "nip-29 groups",
-            config.transports.flatMap((transport) =>
+            groupTransports(config.transports).flatMap((transport) =>
               transport.groups.map((group) => group.relay),
             ),
           ],
@@ -248,8 +267,9 @@ async function main(): Promise<void> {
 
       case "join": {
         // Every configured group, or only the ones marked autoJoin with --auto.
-        const groups = config.transports.flatMap((transport) =>
-          values.auto && !transport.autoJoin ? [] : transport.groups,
+        const groups = groupTransports(config.transports).flatMap(
+          (transport) =>
+            values.auto && !transport.autoJoin ? [] : transport.groups,
         );
         if (groups.length === 0)
           fail(
@@ -312,8 +332,8 @@ async function main(): Promise<void> {
             console.log(`kind ${result.kind}  ${result.action}`);
         }
 
-        const autoJoinGroups = config.transports.flatMap((transport) =>
-          transport.autoJoin ? transport.groups : [],
+        const autoJoinGroups = groupTransports(config.transports).flatMap(
+          (transport) => (transport.autoJoin ? transport.groups : []),
         );
         if (autoJoinGroups.length > 0) {
           const outcomes = await joinConfiguredGroups(
@@ -354,7 +374,7 @@ async function main(): Promise<void> {
         // refused as backfill.
         const startedAt = Math.floor(Date.now() / 1000);
 
-        const transports = config.transports.map(
+        const transports: Transport[] = groupTransports(config.transports).map(
           (transport) =>
             new Nip29Transport({
               relays,
@@ -366,6 +386,29 @@ async function main(): Promise<void> {
               isOwnMessage: (id) => sessions.isOwn(id),
             }),
         );
+
+        // Private messages, if the config opened that door — and it only opens
+        // to the pubkeys it names, because a DM needs no mention to be addressed.
+        const dm = dmTransport(config.transports);
+        if (dm) {
+          transports.push(
+            new Nip17Transport({
+              relays,
+              signer: resolved.signer,
+              pubkey: resolved.pubkey,
+              inboxRelays: config.relays.dm,
+              readRelays: config.relays.read,
+              allow: dm.allow,
+              since: startedAt,
+              log: (line) => console.log(line),
+            }),
+          );
+          console.log(
+            `dm      ${dm.allow.length} allowed: ${dm.allow
+              .map((pubkey) => nip19.npubEncode(pubkey).slice(0, 16) + "…")
+              .join(", ")}`,
+          );
+        }
 
         const agent = runAgent({
           transports,
@@ -392,10 +435,11 @@ async function main(): Promise<void> {
           }),
         });
 
-        for (const group of config.transports.flatMap(
+        for (const group of groupTransports(config.transports).flatMap(
           (transport) => transport.groups,
         ))
           console.log(`listening ${group.relay}'${group.id}`);
+        if (dm) console.log(`listening dms on ${config.relays.dm.join(", ")}`);
 
         // Runs until interrupted. The signer is closed on the way out so a
         // bunker session ends cleanly rather than timing out on the far side.

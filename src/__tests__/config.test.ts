@@ -22,7 +22,8 @@ describe("parseConfig", () => {
     expect(config.mentions).toEqual([]);
     // No profile means Hex never touches its own metadata.
     expect(config.profile.publish).toBe(false);
-    expect(config.transports[0]!.autoJoin).toBe(false);
+    const [transport] = config.transports;
+    expect(transport?.type === "nip-29" && transport.autoJoin).toBe(false);
   });
 
   it("rejects an unknown key rather than ignoring it", () => {
@@ -137,13 +138,59 @@ describe("parseConfig", () => {
         },
       ],
     });
-    expect(config.transports[0]!.groups[0]!.id).toBe("Bitcoin");
+    const [transport] = config.transports;
+    expect(
+      transport?.type === "nip-29" ? transport.groups[0]!.id : undefined,
+    ).toBe("Bitcoin");
   });
 
   it("refuses a transport type it cannot serve", () => {
     expect(() =>
-      parseConfig({ ...minimal, transports: [{ type: "nip-17" }] }),
-    ).toThrow(/only "nip-29" is implemented/);
+      parseConfig({ ...minimal, transports: [{ type: "concord" }] }),
+    ).toThrow(/must be "nip-29" or "nip-17"/);
+  });
+
+  it("refuses a DM transport with nobody allowed", () => {
+    // A private message needs no mention to be addressed, so an empty allow list
+    // is an open inbox — and an open invitation to spend the operator's tokens.
+    expect(() =>
+      parseConfig({ ...minimal, transports: [{ type: "nip-17", allow: [] }] }),
+    ).toThrow(/an empty gate is an open one/);
+  });
+
+  it("takes npubs in the allow list and stores them as hex", () => {
+    const config = parseConfig({
+      ...minimal,
+      transports: [
+        {
+          type: "nip-17",
+          allow: [
+            "npub107jk7htfv243u0x5ynn43scq9wrxtaasmrwwa8lfu2ydwag6cx2quqncxg",
+          ],
+        },
+      ],
+    });
+    const [transport] = config.transports;
+    expect(transport?.type === "nip-17" && transport.allow[0]).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
+  });
+
+  it("refuses something that is neither an npub nor a hex key", () => {
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        transports: [{ type: "nip-17", allow: ["alice@example.com"] }],
+      }),
+    ).toThrow(/npub or a 64-character hex pubkey/);
+  });
+
+  it("takes repos as data, since the channel link lives elsewhere", () => {
+    const config = parseConfig({
+      ...minimal,
+      repos: [{ name: "grimoire", path: "/Users/x/grimoire" }],
+    });
+    expect(config.repos[0]!.name).toBe("grimoire");
   });
 
   it("refuses profile.publish with no profile fields", () => {

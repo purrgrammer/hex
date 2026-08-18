@@ -7,6 +7,8 @@
  * that decides whether Hex speaks or where it publishes.
  */
 
+import { nip19 } from "nostr-tools";
+
 export type SignerConfig =
   | { type: "nsec"; env: string }
   | { type: "nsec"; file: string }
@@ -63,11 +65,39 @@ export interface Nip29GroupConfig {
   id: string;
 }
 
-export type TransportConfig = {
-  type: "nip-29";
-  groups: Nip29GroupConfig[];
-  autoJoin: boolean;
-};
+export type TransportConfig =
+  | {
+      type: "nip-29";
+      groups: Nip29GroupConfig[];
+      autoJoin: boolean;
+    }
+  | {
+      type: "nip-17";
+      /**
+       * Who may DM Hex, as hex pubkeys (npubs are accepted and decoded).
+       *
+       * Required and non-empty. A private message needs no mention to be
+       * addressed, so this list is the only gate there is — an open inbox is an
+       * open invitation to spend the operator's tokens, and later to ask for
+       * code to be run.
+       */
+      allow: string[];
+    };
+
+/**
+ * A repository Hex can work in.
+ *
+ * Named in config for now: the channel-to-repo link lives elsewhere and this
+ * package does not read it yet.
+ */
+export interface RepoConfig {
+  /** What people call it: `grimoire`. */
+  name: string;
+  /** An existing clone on this machine, worked in through git worktrees. */
+  path: string;
+  /** Branch new work starts from. Defaults to the clone's current HEAD. */
+  baseRef?: string;
+}
 
 export interface StateConfig {
   /**
@@ -94,6 +124,7 @@ export interface HexConfig {
   context: { messages: number };
   limits: { repliesPerRoomPerHour: number };
   state: StateConfig;
+  repos: RepoConfig[];
   transports: TransportConfig[];
 }
 
@@ -345,6 +376,36 @@ function parseProfile(value: unknown): ProfileConfig {
   };
 }
 
+/** An npub or a hex pubkey, as hex. */
+function parsePubkey(value: unknown, path: string): string {
+  const raw = requireString(value, path);
+  if (/^[0-9a-f]{64}$/i.test(raw)) return raw.toLowerCase();
+  if (raw.startsWith("npub1")) {
+    try {
+      const decoded = nip19.decode(raw);
+      if (decoded.type === "npub") return decoded.data;
+    } catch {
+      // Falls through to the error below, which names the field.
+    }
+  }
+  throw new ConfigError(`${path} must be an npub or a 64-character hex pubkey`);
+}
+
+function parseRepos(value: unknown): RepoConfig[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new ConfigError("repos must be an array");
+  return value.map((entry, index) => {
+    const path = `repos[${index}]`;
+    const repo = requireRecord(entry, path);
+    rejectUnknown(repo, ["name", "path", "baseRef"], path);
+    return {
+      name: requireString(repo.name, `${path}.name`),
+      path: requireString(repo.path, `${path}.path`),
+      baseRef: optionalString(repo.baseRef, `${path}.baseRef`),
+    };
+  });
+}
+
 function parseTransports(value: unknown): TransportConfig[] {
   if (!Array.isArray(value) || value.length === 0)
     throw new ConfigError("transports must be a non-empty array");
@@ -353,9 +414,25 @@ function parseTransports(value: unknown): TransportConfig[] {
     const path = `transports[${index}]`;
     const transport = requireRecord(entry, path);
     const type = requireString(transport.type, `${path}.type`);
+
+    if (type === "nip-17") {
+      rejectUnknown(transport, ["type", "allow"], path);
+      const allowRaw = transport.allow;
+      if (!Array.isArray(allowRaw) || allowRaw.length === 0)
+        throw new ConfigError(
+          `${path}.allow must list who may DM Hex — an empty gate is an open one`,
+        );
+      return {
+        type: "nip-17" as const,
+        allow: allowRaw.map((who, i) =>
+          parsePubkey(who, `${path}.allow[${i}]`),
+        ),
+      };
+    }
+
     if (type !== "nip-29")
       throw new ConfigError(
-        `${path}.type: only "nip-29" is implemented (got ${JSON.stringify(type)})`,
+        `${path}.type must be "nip-29" or "nip-17" (got ${JSON.stringify(type)})`,
       );
     rejectUnknown(transport, ["type", "groups", "autoJoin"], path);
 
@@ -407,6 +484,7 @@ export function parseConfig(input: unknown): HexConfig {
       "context",
       "limits",
       "state",
+      "repos",
       "transports",
     ],
     "config",
@@ -475,6 +553,7 @@ export function parseConfig(input: unknown): HexConfig {
     context,
     limits,
     state,
+    repos: parseRepos(raw.repos),
     transports: parseTransports(raw.transports),
   };
 
