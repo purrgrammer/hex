@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>rocks.grimoire.hex</string>
+
+  <!-- caffeinate holds sleep off for as long as hex runs, and exits with it, so
+       no assertion is left behind when the agent stops. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>-s</string>
+    <string>/Users/YOU/.nvm/versions/node/v26.3.1/bin/node</string>
+    <string>/Users/YOU/grimoire/.claude/worktrees/hex-agent/packages/hex/dist/cli.js</string>
+    <string>run</string>
+    <string>/Users/YOU/.hex/hex.config.json</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart on crash, and only on crash: a clean exit is a deliberate stop. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/grimoire/.claude/worktrees/hex-agent</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/.hex/hex.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/.hex/hex.err.log</string>
+</dict>
+</plist>

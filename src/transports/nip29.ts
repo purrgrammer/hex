@@ -65,6 +65,15 @@ export interface Nip29TransportOptions {
   /** Unix seconds. The live subscription asks for nothing older. */
   since: number;
   publishTimeoutMs?: number;
+  /**
+   * "Did Hex publish this?", asked of something that outlives the process.
+   *
+   * The in-memory set below only knows this run. With a persistent answer, a
+   * reply to something Hex said last week still reads as addressed to it, which
+   * is the difference between an agent with a memory and one that meets everyone
+   * again on every restart.
+   */
+  isOwnMessage?: (id: string) => boolean;
 }
 
 /**
@@ -136,7 +145,8 @@ export class Nip29Transport implements Transport {
     // the only one that knows which messages are Hex's own.
     const continuesConversation =
       inbound.replyToId !== undefined &&
-      this.ownMessageIds.has(inbound.replyToId);
+      (this.ownMessageIds.has(inbound.replyToId) ||
+        (this.options.isOwnMessage?.(inbound.replyToId) ?? false));
 
     return {
       ...inbound,

@@ -15,6 +15,7 @@ import { ReplyGate } from "./policy.js";
 import { roomKey, type Inbound, type Transport } from "./transports/types.js";
 import { RoomTools } from "./tools/room-tools.js";
 import type { KnowledgeTools } from "./tools/knowledge.js";
+import type { SessionTracker } from "./sessions.js";
 
 /** What Hex reacts with while it is working on an answer. */
 export const ACK_EMOJI = "👀";
@@ -31,6 +32,13 @@ export interface AgentOptions {
   maxResponsesPerTurn?: number;
   /** The read tools — NIPs, kinds, REQs. Offered alongside speaking. */
   knowledge?: KnowledgeTools;
+  /**
+   * Conversations that outlive the process.
+   *
+   * Without it the agent works and forgets everything on restart; with it, a
+   * follow-up lands in the exchange it belongs to.
+   */
+  sessions?: SessionTracker;
   /** Emoji for the "working on it" reaction. Empty string disables the ack. */
   ackEmoji?: string;
   log?: (line: string) => void;
@@ -52,6 +60,19 @@ export function runAgent(options: AgentOptions): RunningAgent {
     // Recorded whatever the verdict: the next answer needs the conversation,
     // including the parts nobody addressed to Hex.
     options.context.record(inbound);
+
+    // Resolved before the gate: which conversation this belongs to is answered
+    // from the session store, and that survives a restart.
+    const session = options.sessions?.resolve(inbound);
+    if (session && options.sessions)
+      options.sessions.record(session.id, {
+        id: inbound.id,
+        room: where,
+        author: inbound.author,
+        text: inbound.text,
+        at: inbound.createdAt,
+        replyToId: inbound.replyToId,
+      });
 
     const verdict = options.gate.consider(inbound);
     if (!verdict.reply) {
@@ -83,7 +104,11 @@ export function runAgent(options: AgentOptions): RunningAgent {
         }
       }
 
-      const history = await options.context.history(transport, inbound);
+      const history = await options.context.history(
+        transport,
+        inbound,
+        session?.id,
+      );
 
       // The brain's only way to be heard. Bound to this message, in this room,
       // on the transport that delivered it — so nothing the model returns is
@@ -106,9 +131,21 @@ export function runAgent(options: AgentOptions): RunningAgent {
       });
 
       published = tools.delivered;
-      for (const id of tools.deliveredIds)
+      for (const id of tools.deliveredIds) {
         // Hex's own message comes straight back through the same subscription.
         options.gate.remember(id);
+        // And into the session, so a reply to it — today or after a restart —
+        // continues this conversation instead of opening a new one.
+        if (session && options.sessions)
+          options.sessions.recordOwn(session.id, {
+            id,
+            room: where,
+            author: "",
+            text: tools.deliveredText.get(id) ?? "",
+            at: Math.floor(Date.now() / 1000),
+            replyToId: inbound.id,
+          });
+      }
 
       log(
         published

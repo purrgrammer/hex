@@ -104,18 +104,33 @@ the log — set `brain.toolChoice: "required"` to make the tool path certain, or
 
 ## Conversations
 
-A mention opens a conversation; Hex's answer continues it; a reply to that answer
-is the next turn of the same exchange. Two things make that work:
+A mention opens a conversation; Hex's answer continues it; a reply to that answer,
+or another mention a minute later, is the next turn of the same exchange.
 
-- **A reply to something Hex said addresses Hex**, with no name and no p-tag.
-  Nobody repeats a bot's name in their second sentence.
-- **The context is the thread**, walked back through reply tags — not the room's
-  last N lines. Unrelated chatter between a question and its answer is noise the
-  model would have to reason around. A message that starts a conversation gets the
-  room's recent window instead, since there is no thread yet.
+A message joins an existing session when it **replies to anything in one** — at
+any age, because threading is explicit intent — or when it comes **from someone
+already in that session in that room**, within `state.sessionIdleMinutes`
+(default 30). Otherwise it opens a new one. A reply chain alone is not enough:
+people address a bot again rather than threading, and treating that as a
+stranger's first sentence makes it answer the same question twice.
 
-Own-message recognition is session-scoped: after a restart, a follow-up has to
-name Hex again.
+A reply to something Hex said addresses Hex, with no name and no p-tag — nobody
+repeats a bot's name in their second sentence.
+
+## Durability
+
+Sessions and what Hex has said live in `state.file` (default `hex-state.json`
+beside the config), written atomically and bounded. A restart therefore resumes
+conversations instead of meeting everyone again — which is also what makes a
+supervisor safe to point at it.
+
+An unreadable state file is a warning and a fresh start, never a refusal to boot:
+the contents are a convenience, and a crash loop over them trades a small loss for
+a total one.
+
+`packages/hex/deploy/` has a launchd plist for macOS — `KeepAlive` on non-zero
+exit, `RunAtLoad`, and `caffeinate -i -s` wrapping the process so the machine
+stays awake exactly as long as Hex runs.
 
 ## When Hex speaks
 

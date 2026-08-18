@@ -69,6 +69,13 @@ export type TransportConfig = {
   autoJoin: boolean;
 };
 
+export interface StateConfig {
+  /** Where the state file lives. Relative paths resolve against the config. */
+  file?: string;
+  /** How long a conversation stays open to a follow-up that is not a reply. */
+  sessionIdleMinutes?: number;
+}
+
 export interface HexConfig {
   identity: { signer: SignerConfig };
   /** Path to the instructions file, resolved against the config file's dir. */
@@ -80,6 +87,7 @@ export interface HexConfig {
   profile: ProfileConfig;
   context: { messages: number };
   limits: { repliesPerRoomPerHour: number };
+  state: StateConfig;
   transports: TransportConfig[];
 }
 
@@ -392,6 +400,7 @@ export function parseConfig(input: unknown): HexConfig {
       "profile",
       "context",
       "limits",
+      "state",
       "transports",
     ],
     "config",
@@ -433,6 +442,23 @@ export function parseConfig(input: unknown): HexConfig {
           };
         })();
 
+  const stateRaw = raw.state;
+  let state: StateConfig = {};
+  if (stateRaw !== undefined) {
+    const record = requireRecord(stateRaw, "state");
+    rejectUnknown(record, ["file", "sessionIdleMinutes"], "state");
+    state = {
+      file: optionalString(record.file, "state.file"),
+      sessionIdleMinutes:
+        record.sessionIdleMinutes === undefined
+          ? undefined
+          : requirePositiveInt(
+              record.sessionIdleMinutes,
+              "state.sessionIdleMinutes",
+            ),
+    };
+  }
+
   const config: HexConfig = {
     identity: { signer: parseSigner(identity.signer) },
     instructions: optionalString(raw.instructions, "instructions"),
@@ -442,6 +468,7 @@ export function parseConfig(input: unknown): HexConfig {
     profile: parseProfile(raw.profile),
     context,
     limits,
+    state,
     transports: parseTransports(raw.transports),
   };
 

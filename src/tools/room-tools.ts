@@ -53,6 +53,8 @@ export class RoomTools implements ToolHost {
   private didDeliver = false;
   /** Ids of what actually landed, so the caller can recognise its own events. */
   readonly deliveredIds: string[] = [];
+  /** What was said under each id, for the conversation record. */
+  readonly deliveredText = new Map<string, string>();
 
   constructor(private readonly options: RoomToolsOptions) {}
 
@@ -173,6 +175,7 @@ export class RoomTools implements ToolHost {
       this.responses += 1;
       this.didDeliver = true;
       this.deliveredIds.push(id);
+      this.deliveredText.set(id, text);
       return { ok: true, output: `delivered as ${id}` };
     } catch (error) {
       // The brain is told the truth: it was not heard. Whether it tries again is

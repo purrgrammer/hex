@@ -87,6 +87,18 @@ export {
   type KnowledgeOptions,
 } from "./tools/knowledge.js";
 export { buildSystemPrompt } from "./prompt.js";
+export {
+  StateStore,
+  defaultStatePath,
+  type HexState,
+  type StoredSession,
+  type StoredMessage,
+} from "./state.js";
+export {
+  SessionTracker,
+  DEFAULT_SESSION_IDLE_SECS,
+  type SessionOptions,
+} from "./sessions.js";
 export { RoomTools, type RoomToolsOptions } from "./tools/room-tools.js";
 export { ConsoleTools } from "./tools/console-tools.js";
 export { createBrain, type CreateBrainOptions } from "./brain/create.js";

@@ -9,6 +9,7 @@
  */
 
 import { parseArgs } from "node:util";
+import { resolve } from "node:path";
 import { nip19 } from "nostr-tools";
 import { loadConfig } from "./config-file.js";
 import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
@@ -23,6 +24,8 @@ import { ReplyGate } from "./policy.js";
 import { runAgent } from "./agent.js";
 import { ConsoleTools } from "./tools/console-tools.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
+import { StateStore, defaultStatePath } from "./state.js";
+import { SessionTracker } from "./sessions.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -325,6 +328,22 @@ async function main(): Promise<void> {
             console.log(`join    ${outcome.group}  ${outcome.action}`);
         }
 
+        // Conversations outlive the process: what Hex said, and which messages
+        // belong together, are read back from disk before the first REQ.
+        const statePath = config.state.file
+          ? resolve(loaded.baseDir, config.state.file)
+          : defaultStatePath(loaded.baseDir);
+        const store = new StateStore(statePath);
+        await store.load();
+        const sessions = new SessionTracker({
+          store,
+          maxMessages: config.context.messages,
+          idleSecs: config.state.sessionIdleMinutes
+            ? config.state.sessionIdleMinutes * 60
+            : undefined,
+        });
+        console.log(`state   ${statePath}`);
+
         // Unix seconds, captured once: the subscription's floor and the gate's
         // cutoff are the same instant, so nothing is fetched that would only be
         // refused as backfill.
@@ -339,6 +358,7 @@ async function main(): Promise<void> {
               groups: transport.groups,
               mentions: config.mentions,
               since: startedAt,
+              isOwnMessage: (id) => sessions.isOwn(id),
             }),
         );
 
@@ -356,7 +376,9 @@ async function main(): Promise<void> {
             relays,
             lookupRelays: config.relays.read,
             messages: config.context.messages,
+            sessions,
           }),
+          sessions,
           instructions: loaded.instructions,
           dryRun: values["dry-run"],
           knowledge: new KnowledgeTools({
@@ -383,6 +405,9 @@ async function main(): Promise<void> {
         });
 
         await agent.idle();
+        // Anything the last turn recorded belongs on disk before the process
+        // goes; a debounced write that never fired is a conversation lost.
+        await store.flush();
         await resolved.close();
         return;
       }

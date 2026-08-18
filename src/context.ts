@@ -11,6 +11,7 @@
  */
 
 import type { ContextMessage } from "./brain/types.js";
+import type { SessionTracker } from "./sessions.js";
 import type { HexRelays } from "./relays.js";
 import { requestEvents } from "./relays.js";
 import {
@@ -34,6 +35,14 @@ const ID_INDEX_MULTIPLE = 20;
 
 export interface ContextOptions {
   relays: HexRelays;
+  /**
+   * Sessions, when the agent keeps them.
+   *
+   * With one, the conversation is whatever the session holds — which survives a
+   * restart and covers a follow-up that mentions Hex again instead of replying.
+   * Without one, the thread walk and the room window are all there is.
+   */
+  sessions?: SessionTracker;
   /** Where to look up kind 0. Never a group relay: that is not its job. */
   lookupRelays: string[];
   /** How many messages of history a reply gets. */
@@ -97,8 +106,36 @@ export class RoomContext {
   async history(
     transport: Transport,
     incoming: Inbound,
+    sessionId?: string,
   ): Promise<ContextMessage[]> {
     const key = roomKey(incoming.room);
+
+    // A session already knows what belongs together, including turns from before
+    // the process started and follow-ups that never threaded.
+    if (sessionId && this.options.sessions) {
+      const stored = this.options.sessions.history(sessionId, incoming.id);
+      if (stored.length > 0)
+        return this.withNames(
+          stored.map((message) => ({
+            id: message.id,
+            author: message.author,
+            text: message.text,
+            createdAt: message.at,
+            room: incoming.room,
+            addressesSelf: false,
+            replyToId: message.replyToId,
+            event: {
+              id: message.id,
+              pubkey: message.author,
+              created_at: message.at,
+              kind: 9,
+              content: message.text,
+              tags: [],
+              sig: "",
+            },
+          })),
+        );
+    }
 
     if (incoming.replyToId) {
       const thread = await this.thread(transport, incoming);
