@@ -66,6 +66,18 @@ function context(messages = 20) {
 }
 
 describe("replyTarget", () => {
+  it("prefers the q tag, which is what a kind-9 reply carries", () => {
+    // NIP-C7 quotes the parent, and grimoire writes and reads `q` for group
+    // chat. Reading only `e` made a reply typed in grimoire look unrelated.
+    const event = {
+      tags: [
+        ["e", "some-thread-root"],
+        ["q", "the-parent", "wss://g.example/", "b".repeat(64)],
+      ],
+    } as NostrEvent;
+    expect(replyTarget(event)).toBe("the-parent");
+  });
+
   it("takes the e tag as the parent", () => {
     expect(replyTarget(message("c", HUMAN, "x", 3, "b").event)).toBe("b");
   });

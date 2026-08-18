@@ -32,11 +32,20 @@ export const KIND_GROUP_MESSAGE = 9;
 /**
  * Which message an event replies to.
  *
- * `["e", id, relay, "reply"]` is explicit and wins; otherwise the first `e` tag is
- * the parent. A `root` marker is deliberately NOT treated as the parent: threading
- * to the root would flatten a long exchange into one turn.
+ * `q` FIRST, because that is what a kind-9 reply actually carries: NIP-C7 quotes
+ * the parent with `["q", id, relay, pubkey]`, and grimoire both writes and reads
+ * that tag for group chat. Reading only `e` meant a reply typed in grimoire —
+ * including a reply to Hex — arrived looking like an unrelated message.
+ *
+ * `e` is still honoured for clients that thread that way: an explicit
+ * `["e", id, relay, "reply"]` wins over an unmarked one, and a lone `root` is
+ * taken only because nothing better exists — threading to the root would flatten
+ * a long exchange into a single turn.
  */
 export function replyTarget(event: NostrEvent): string | undefined {
+  const quoted = event.tags.find((tag) => tag[0] === "q" && tag[1]);
+  if (quoted) return quoted[1];
+
   const tags = event.tags.filter((tag) => tag[0] === "e" && tag[1]);
   const marked = tags.find((tag) => tag[3] === "reply");
   if (marked) return marked[1];
@@ -118,8 +127,8 @@ export class Nip29Transport implements Transport {
       createdAt: event.created_at,
       room,
       addressesSelf: false,
-      // A NIP-29 reply is an `e` tag. A `reply` marker wins when present, since a
-      // client may also carry a `root` — otherwise the first `e` is the parent.
+      // A kind-9 reply quotes its parent with `q` (NIP-C7), which is what
+      // grimoire writes and reads; `e` is the fallback.
       replyToId: replyTarget(event),
       event,
     };
@@ -214,11 +223,18 @@ export class Nip29Transport implements Transport {
    */
   async reply(to: Inbound, text: string): Promise<string> {
     if (!to.room.relay) throw new Error("a NIP-29 room needs its relay");
+    const relay = to.room.relay;
     const event = await GroupMessageFactory.reply(
-      { id: to.room.id, relay: to.room.relay },
+      { id: to.room.id, relay },
       to.event,
       text,
-    ).sign(this.options.signer);
+    )
+      // The `q` tag is what makes this a REPLY in a kind-9 room: NIP-C7 quotes
+      // the parent, and grimoire reads `q` and ignores the factory's `e`. With
+      // the relay hint and the author, so a client can fetch what is quoted.
+      // The `e` stays for clients that thread on it instead.
+      .modifyPublicTags((tags) => [...tags, ["q", to.id, relay, to.author]])
+      .sign(this.options.signer);
 
     const outcomes = await publishTo(
       this.options.relays,

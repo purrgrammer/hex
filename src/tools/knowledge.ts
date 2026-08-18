@@ -14,6 +14,7 @@
 import { nip19 } from "nostr-tools";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { requestEvents, type HexRelays } from "../relays.js";
+import catalogue from "../data/commands.json" with { type: "json" };
 import {
   HELP_TOOL,
   REQ_TOOL,
@@ -47,6 +48,34 @@ export interface KnowledgeOptions {
   requestTimeoutMs?: number;
 }
 
+export interface CommandEntry {
+  name: string;
+  synopsis: string;
+  summary: string;
+  description: string;
+  flags?: string[];
+  category?: string;
+}
+
+/**
+ * grimoire's commands, as data.
+ *
+ * A snapshot generated from the app's own registry by `scripts/sync-commands.mjs`
+ * — the in-app assistant reads `manPages` directly, which a published package
+ * cannot. Stale by construction if a command changes and nobody re-runs the
+ * script, so `--check` exists to fail CI instead of letting Hex describe a
+ * command that no longer exists.
+ */
+export const COMMANDS: CommandEntry[] = catalogue.commands as CommandEntry[];
+
+/** One line per command: the menu that goes in the system prompt. */
+export function commandCatalogue(): string {
+  return COMMANDS.map(
+    (command) =>
+      `  ${command.synopsis}${command.flags?.length ? `\n    flags: ${command.flags.join(" ")}` : ""}\n    ${command.summary}`,
+  ).join("\n");
+}
+
 /** Kind → what it is, parsed once from the NIPs index. */
 interface KindEntry {
   kind: number;
@@ -65,18 +94,29 @@ export class KnowledgeTools {
       {
         name: HELP_TOOL,
         description:
-          "Look up a NIP's text or an event kind's definition, from the NIPs " +
-          "repository itself. Use this instead of recalling spec details.",
+          "Look up a NIP's text, an event kind's definition, or a grimoire " +
+          "command's manual page. Use this instead of recalling spec details or " +
+          "guessing at a command's flags.",
         parameters: {
           type: "object",
           properties: {
             nip: { type: "string", description: 'NIP id, e.g. "01" or "29".' },
             kind: { type: "number", description: "Event kind number." },
+            command: {
+              type: "string",
+              // Enumerated: the whole set is two dozen names, and a model that
+              // guesses spends a round finding out it guessed wrong.
+              enum: COMMANDS.map((command) => command.name),
+              description:
+                'A grimoire command name, e.g. "req" — returns its synopsis, ' +
+                "flags and description.",
+            },
           },
         },
         prompt:
-          "`grimoire.help` returns a NIP's text or a kind's definition from the" +
-          " spec itself — read it rather than recalling what a kind number means.",
+          "`grimoire.help` returns a NIP's text, a kind's definition, or a" +
+          " grimoire command's manual page with its flags — read it rather than" +
+          " recalling what a kind number means or what a command takes.",
       },
       {
         name: REQ_TOOL,
@@ -187,6 +227,15 @@ export class KnowledgeTools {
   private async help(args: Record<string, unknown>): Promise<ToolResult> {
     const result: Record<string, unknown> = {};
 
+    if (typeof args.command === "string" && args.command.trim()) {
+      const wanted = args.command.trim().split(/\s+/)[0]!.toLowerCase();
+      const command = COMMANDS.find((entry) => entry.name === wanted);
+      result.command = command ?? {
+        name: wanted,
+        error: `No such command. Known commands: ${COMMANDS.map((entry) => entry.name).join(", ")}.`,
+      };
+    }
+
     if (typeof args.kind === "number" && Number.isFinite(args.kind)) {
       const entry = await this.kindInfo(args.kind);
       result.kind = entry ?? { kind: args.kind, known: false };
@@ -206,7 +255,10 @@ export class KnowledgeTools {
     }
 
     if (Object.keys(result).length === 0)
-      return { ok: false, output: "Pass a nip id or a kind number." };
+      return {
+        ok: false,
+        output: "Pass a nip id, a kind number, or a command name.",
+      };
     return { ok: true, output: JSON.stringify(result) };
   }
 

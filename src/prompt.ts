@@ -13,6 +13,7 @@
  */
 
 import { describeTools, RESPOND_TOOL, type ToolSpec } from "./tools/types.js";
+import { commandCatalogue } from "./tools/knowledge.js";
 
 /**
  * What Hex is, in a room rather than in a window.
@@ -58,6 +59,10 @@ const HONESTY = [
     " shared. A spellbook is a saved workspace, the whole window layout," +
     " published as kind 30777. Neither is a script, and a spellbook is not a" +
     " collection of spells.",
+  // The catalogue is a menu, not a manual: enough to name the right command,
+  // and `grimoire.help` has the flags. Without it Hex invents plausible
+  // commands, which render as buttons that do nothing.
+  `grimoire's commands:\n${commandCatalogue()}`,
 ].join("\n\n");
 
 /** Rules that only make sense once there is something to call. */

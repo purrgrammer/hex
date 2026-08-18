@@ -189,7 +189,15 @@ describe("Nip29Transport.reply", () => {
     expect(reply.tags.some((tag) => tag[0] === "h" && tag[1] === GROUP)).toBe(
       true,
     );
-    // Threaded, so a client shows the answer under the question.
+    // Threaded, so a client shows the answer under the question. The `q` tag is
+    // the load-bearing one: grimoire reads `q` for a kind-9 reply and ignores
+    // `e`, so without it the answer renders as a loose message.
+    expect(reply.tags).toContainEqual([
+      "q",
+      inbound.id,
+      relay.url,
+      inbound.author,
+    ]);
     expect(
       reply.tags.some((tag) => tag[0] === "e" && tag[1] === inbound.id),
     ).toBe(true);
@@ -218,9 +226,10 @@ describe("Nip29Transport.reply", () => {
         kind: KIND_GROUP_MESSAGE,
         content: "and what about kind 11?",
         created_at: 3000,
+        // As grimoire would write it: a `q` tag, no mention, no p-tag.
         tags: [
           ["h", GROUP],
-          ["e", own],
+          ["q", own, relay!.url, pubkey],
         ],
       },
       authorKey,
