@@ -1,6 +1,19 @@
 {
   "commands": [
     {
+      "name": "ai",
+      "synopsis": "ai [--conversation <id>] [--system <text>] [target] [prompt...]",
+      "summary": "Chat with a language model through the Inference Provider API (window.inference).",
+      "description": "Chat with a language model through the Inference Provider API (window.inference). An extension you install owns the API keys, provider, and model — grimoire never sees them, and the extension asks your permission per origin. Without such an extension this window explains what to install.",
+      "flags": [
+        "--conversation <id>",
+        "<target>",
+        "--system <text>",
+        "prompt..."
+      ],
+      "category": "System"
+    },
+    {
       "name": "blossom",
       "synopsis": "blossom <subcommand> [options]",
       "summary": "Manage blob storage on Blossom servers.",
@@ -18,22 +31,24 @@
     },
     {
       "name": "call",
-      "synopsis": "call [community [channel]]",
+      "synopsis": "call [community [channel] | relay'group-id]",
       "summary": "The voice and video call of the Concord channel you are reading (CORD-07).",
-      "description": "The voice and video call of the Concord channel you are reading (CORD-07). Every channel is callable — there is no separate voice channel — and the call's coordinates derive from the same channel key that addresses its chat, so a rekey moves the call and removal from the channel is removal from its calls. There is no host and no roster: a token comes from a BLIND broker, which authorizes possession of the channel's key rather than membership, and which therefore cannot tell what community a room belongs to or who is joining. Media is end-to-end encrypted under per-sender keys every member derives and nobody exchanges, so the broker and the SFU forward ciphertext and nothing else. Who is in a call is announced over the channel itself, encrypted, so no relay learns it either — which is also why a participant the channel's own presence cannot vouch for is never decoded: identities are visible to members, so a copied one proves nothing, and both claimants stay silent until the stale claim ages out. The call outlives the window you started it from — switching workspaces does not end it — and closing that window does. Nothing survives a reload. Opened by the headset in a channel's header; typed on its own it shows the call you are in.",
+      "description": "The voice and video call of the Concord channel you are reading (CORD-07). Every channel is callable — there is no separate voice channel — and the call's coordinates derive from the same channel key that addresses its chat, so a rekey moves the call and removal from the channel is removal from its calls. There is no host and no roster: a token comes from a BLIND broker, which authorizes possession of the channel's key rather than membership, and which therefore cannot tell what community a room belongs to or who is joining. Media is end-to-end encrypted under per-sender keys every member derives and nobody exchanges, so the broker and the SFU forward ciphertext and nothing else. Who is in a call is announced over the channel itself, encrypted, so no relay learns it either — which is also why a participant the channel's own presence cannot vouch for is never decoded: identities are visible to members, so a copied one proves nothing, and both claimants stay silent until the stale claim ages out. The call outlives the window you started it from — switching workspaces does not end it — and closing that window does. Nothing survives a reload. Opened by the headset in a channel's header; typed on its own it shows the call you are in. ALSO OPENS A NIP-29 RELAY GROUP'S SPACE, which is the same window and almost none of the same machinery: a group whose kind:39000 carries a `livekit` tag has a media room run by the relay itself, so the token comes from that relay's own endpoint (authorized with a NIP-98 signature by YOUR key, not a group key), who is in the room is a kind:39004 the relay publishes rather than something the members announce, and there is no end-to-end encryption — the relay issuing the credential is the relay that already reads the group, so encrypting the audio to it would protect nothing. Media travels over TLS to that relay's SFU and no further. The trade is the one NIP-29 makes everywhere: the relay is trusted, and a hostile one could put anyone in a room under anyone's name. Raising a hand and floating an emoji are Concord extensions carried on presence rumors, so a group's space offers neither. There is one call in the app, whichever kind it is: joining a space hangs up a Concord call, and vice versa.",
       "flags": [
         "[community]",
-        "[channel]"
+        "[channel]",
+        "[relay'group-id]"
       ],
       "category": "Nostr"
     },
     {
       "name": "chat",
-      "synopsis": "chat [identifier]",
+      "synopsis": "chat [identifier|community]",
       "summary": "Join and participate in Nostr chat conversations.",
-      "description": "Join and participate in Nostr chat conversations. With no argument it opens the browser: private conversations, NIP-29 relay groups and Concord communities as collapsible sections in one sidebar, each sorted by its most recent message. Supports NIP-17 private direct messages, NIP-29 relay-based groups, NIP-53 live activity chat, NIP-10 thread chat, NIP-22 comment threads on any event kind, and multi-room group list interface. A direct message is gift-wrapped (NIP-59): the outer event is signed by a throwaway key, so the relay holding it cannot tell who sent it, and grimoire never authenticates on the socket it publishes one over. Messages are decrypted once and mirrored locally, so a conversation opens with no signer prompt; the first time an account reads its inbox it is asked for permission, because opening a backlog of wraps means two decryptions each. NIP-22 comments work as a catch-all: any event that isn't kind 1 (NIP-10) or a relay group/live activity gets a comment thread. You can also comment on URLs and hashtags. In a room that can page backwards — a relay group, a live chat, a Concord channel — clicking a reply preview fetches history until it finds the message being answered, and the calendar button in the header jumps to a date. A thread or a comment set is loaded whole, so neither applies there.",
+      "description": "Join and participate in Nostr chat conversations. With no argument it opens the browser: private conversations, NIP-29 relay groups and Concord communities as collapsible sections in one sidebar, each sorted by its most recent message. A Concord community can be named directly — by name or id prefix, matched against your own decrypted list exactly as `concord` does, which `chat` supersedes. Each window keeps its own place, so two of them open two channels. Supports NIP-17 private direct messages, NIP-29 relay-based groups, NIP-53 live activity chat, NIP-10 thread chat, NIP-22 comment threads on any event kind, and multi-room group list interface. A direct message is gift-wrapped (NIP-59): the outer event is signed by a throwaway key, so the relay holding it cannot tell who sent it, and grimoire never authenticates on the socket it publishes one over. Messages are decrypted once and mirrored locally, so a conversation opens with no signer prompt; the first time an account reads its inbox it is asked for permission, because opening a backlog of wraps means two decryptions each. NIP-22 comments work as a catch-all: any event that isn't kind 1 (NIP-10) or a relay group/live activity gets a comment thread. You can also comment on URLs and hashtags. In a room that can page backwards — a relay group, a live chat, a Concord channel — clicking a reply preview fetches history until it finds the message being answered, and the calendar button in the header jumps to a date. A thread or a comment set is loaded whole, so neither applies there.",
       "flags": [
-        "<identifier>"
+        "<identifier>",
+        "<community>"
       ],
       "category": "Nostr"
     },
