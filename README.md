@@ -215,6 +215,11 @@ one including after a restart. The mapping is a row in SQLite, not a guess about
 what is on disk. Nothing is ever deleted automatically; a finished conversation
 still holds work only the operator can judge.
 
+Set `repos[].baseRef` to a remote-tracking ref — `gh/main`, `origin/main` — and
+new work branches from what a fetch just brought down. Without one it branches
+from whatever the clone has checked out, which is however stale the operator
+left it, and the agent will read an old tree while reporting it as current.
+
 `host-worktree` runs commands as the user who started the daemon. It is named
 rather than implied so a config asking for something stronger fails instead of
 quietly getting less, and it offers no isolation: anything it runs can read the

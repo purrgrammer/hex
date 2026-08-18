@@ -220,3 +220,77 @@ describe("RoomTools.call", () => {
     expect(tools.requestedBy).toBe(AUTHOR);
   });
 });
+
+/**
+ * Offered and callable are the same set.
+ *
+ * `list()` is what a well-behaved model reads, but `call()` is what actually
+ * happens. A model that names a tool it was never shown — because it saw one in
+ * another conversation, or invented it — must not reach the thing behind it.
+ */
+describe("grants at the call, not just the listing", () => {
+  /** A repo host that would happily run something if it were ever reached. */
+  const reachable = {
+    list: () => [
+      { name: "repo.exec", description: "run", parameters: {}, prompt: "" },
+    ],
+    handles: (name: string) => name === "repo.exec",
+    call: async () => ({ ok: true, output: "RAN" }),
+  };
+
+  it("refuses a tool the channel's grants exclude", async () => {
+    const tools = new RoomTools({
+      transport: transport(),
+      incoming: INBOUND,
+      repo: reachable as never,
+      grants: ["grimoire.*"],
+    });
+
+    expect(tools.list().map((spec) => spec.name)).not.toContain("repo.exec");
+    const result = await tools.call({ name: "repo.exec", arguments: {} });
+    expect(result.ok).toBe(false);
+    expect(result.output).not.toContain("RAN");
+    expect(result.output).toMatch(/no tool called/);
+  });
+
+  it("refuses it by wire name too", async () => {
+    // `repo_exec` is what a provider actually sends; resolving the dot back
+    // must not be a way around the grant.
+    const tools = new RoomTools({
+      transport: transport(),
+      incoming: INBOUND,
+      repo: reachable as never,
+      grants: [],
+    });
+    const result = await tools.call({ name: "repo_exec", arguments: {} });
+    expect(result.ok).toBe(false);
+    expect(result.output).not.toContain("RAN");
+  });
+
+  it("still speaks when granted nothing at all", async () => {
+    // A channel Hex listens to must be one it can answer in, whatever else it
+    // is denied.
+    const tools = new RoomTools({
+      transport: transport(),
+      incoming: INBOUND,
+      grants: [],
+    });
+    expect(tools.list().map((spec) => spec.name)).toContain(RESPOND_TOOL);
+    const result = await tools.call({
+      name: RESPOND_TOOL,
+      arguments: { text: "here" },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("runs it when the grant covers it", async () => {
+    const tools = new RoomTools({
+      transport: transport(),
+      incoming: INBOUND,
+      repo: reachable as never,
+      grants: ["repo.*"],
+    });
+    const result = await tools.call({ name: "repo.exec", arguments: {} });
+    expect(result.output).toBe("RAN");
+  });
+});

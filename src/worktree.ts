@@ -95,6 +95,26 @@ export class WorktreeManager {
     const path = join(this.options.root, `${repoName}-${hash}`);
 
     if (!existsSync(path)) {
+      // A clone the operator has not pulled in a week is what a new
+      // conversation would otherwise branch from, and every task after that
+      // reads and edits an old tree while reporting it as current. Best effort:
+      // a repo with no remote, or no network, still gets its worktree.
+      try {
+        await run("git", ["fetch", "--quiet", "--all"], {
+          cwd: repo.path,
+          timeout: GIT_TIMEOUT_MS,
+        });
+      } catch (error) {
+        this.options.log?.(
+          `[hex] worktree ${repoName}: could not fetch — branching from what is on disk (${
+            error instanceof Error ? error.message.split("\n")[0] : error
+          })`,
+        );
+      }
+
+      // `baseRef` is where new work starts. Name a remote-tracking ref
+      // (`origin/main`) to branch from what was just fetched; without one this
+      // is the clone's current HEAD, whatever the operator left checked out.
       const base = repo.baseRef ?? "HEAD";
       this.options.log?.(
         `[hex] worktree ${repoName}: creating ${path} on ${branch} from ${base}`,
