@@ -95,8 +95,11 @@ export class RepoTools {
           "Run a shell command in this conversation's own git worktree of the " +
           "repository. Use it to read files, search, edit, build and run tests. " +
           "The working directory is the worktree root and cannot be changed by " +
-          "you; `cd` within the command is fine. State persists between calls " +
-          "and between messages, so an install done once stays done.",
+          "you; `cd` within the command is fine. State on disk persists between " +
+          "calls and between messages, so an install done once stays done, but " +
+          "PROCESSES do not: anything still running when the command returns is " +
+          "killed, so a dev server or a watcher will not be there afterwards and " +
+          "you should not tell anyone it is.",
         parameters: {
           type: "object",
           properties: {
