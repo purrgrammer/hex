@@ -45,9 +45,10 @@ export interface StoredSession {
   lastAt: number;
 }
 
-/** A checkout one session works in, so a restart finds it again. */
+/** A checkout one conversation works in, so a restart finds it again. */
 export interface StoredWorktree {
-  sessionId: string;
+  /** The room the checkout belongs to. See `RepoToolsOptions.workspace`. */
+  workspace: string;
   repo: string;
   path: string;
   branch: string;
@@ -120,12 +121,12 @@ CREATE TABLE IF NOT EXISTS participants (
 CREATE INDEX IF NOT EXISTS participants_pubkey ON participants (pubkey);
 
 CREATE TABLE IF NOT EXISTS worktrees (
-  session_id TEXT NOT NULL,
+  workspace  TEXT NOT NULL,
   repo       TEXT NOT NULL,
   path       TEXT NOT NULL,
   branch     TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (session_id, repo)
+  PRIMARY KEY (workspace, repo)
 );
 `;
 
@@ -144,6 +145,14 @@ export class HexStore {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec("PRAGMA foreign_keys = ON");
+    // The worktree table was briefly keyed by session before it was keyed by
+    // room. Dropped rather than migrated: the rows only map a conversation to a
+    // directory, and the directories are still on disk for the operator to keep
+    // or remove. Cheap, and it runs once.
+    const legacy = db
+      .prepare("SELECT name FROM pragma_table_info('worktrees') WHERE name = ?")
+      .get("session_id");
+    if (legacy) db.exec("DROP TABLE worktrees");
     db.exec(SCHEMA);
     return new HexStore(db);
   }
@@ -167,15 +176,15 @@ export class HexStore {
    * happens to exist proves nothing about which conversation owns it, and two
    * processes deciding that from `readdir` would both claim the same one.
    */
-  worktreeFor(sessionId: string, repo: string): StoredWorktree | undefined {
+  worktreeFor(workspace: string, repo: string): StoredWorktree | undefined {
     const row = this.db
       .prepare(
-        "SELECT session_id, repo, path, branch, created_at FROM worktrees WHERE session_id = ? AND repo = ?",
+        "SELECT workspace, repo, path, branch, created_at FROM worktrees WHERE workspace = ? AND repo = ?",
       )
-      .get(sessionId, repo) as Record<string, unknown> | undefined;
+      .get(workspace, repo) as Record<string, unknown> | undefined;
     if (!row) return undefined;
     return {
-      sessionId: String(row.session_id),
+      workspace: String(row.workspace),
       repo: String(row.repo),
       path: String(row.path),
       branch: String(row.branch),
@@ -187,11 +196,11 @@ export class HexStore {
   recordWorktree(worktree: StoredWorktree): void {
     this.db
       .prepare(
-        `INSERT INTO worktrees (session_id, repo, path, branch, created_at)
+        `INSERT INTO worktrees (workspace, repo, path, branch, created_at)
          VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       )
       .run(
-        worktree.sessionId,
+        worktree.workspace,
         worktree.repo,
         worktree.path,
         worktree.branch,

@@ -4,13 +4,17 @@
  * Work Hex is asked to do in a DM happens in a git worktree of the named repo,
  * not in the repo itself: the operator is probably using that clone right now,
  * and a bot running `git checkout` underneath them is a bad afternoon. One
- * worktree per (session, repo), created on the first command and reused for
- * every later one — including after a restart, because the mapping is a row in
- * SQLite rather than a guess about what is on disk.
+ * worktree per (room, repo), created on the first command and reused for every
+ * later one — including after a restart, because the mapping is a row in SQLite
+ * rather than a guess about what is on disk.
  *
- * Branches are named `hex/<hash>` from the session id. Two reasons it is hashed
- * rather than slugified: a session id contains `#` and `:`, which git refuses in
- * a ref, and a branch can be checked out in exactly one worktree at a time — so
+ * Keyed by ROOM and not by session, which turns over on a quiet half hour: a
+ * peer who came back after a long build got a second empty checkout and no
+ * memory of the work they were asking about.
+ *
+ * Branches are named `hex/<hash>`. Two reasons it is hashed rather than
+ * slugified: a room key contains `|` and `'`, which git refuses in a ref, and a
+ * branch can be checked out in exactly one worktree at a time — so
  * a collision is not a cosmetic problem, it is a worktree that cannot be
  * created. This repository already carries a dozen worktrees; the hash keeps
  * Hex's out of everyone's way.
@@ -35,9 +39,9 @@ const HASH_CHARS = 12;
 /** Creating a worktree is local git work; it should never take this long. */
 const GIT_TIMEOUT_MS = 60_000;
 
-export function worktreeName(sessionId: string): string {
+export function worktreeName(workspace: string): string {
   return createHash("sha256")
-    .update(sessionId)
+    .update(workspace)
     .digest("hex")
     .slice(0, HASH_CHARS);
 }
@@ -71,7 +75,7 @@ export class WorktreeManager {
    * possible to reach it for a repo the channel was never given.
    */
   async ensure(
-    sessionId: string,
+    workspace: string,
     repoName: string,
     allowed: string[],
   ): Promise<StoredWorktree> {
@@ -85,12 +89,12 @@ export class WorktreeManager {
         `no repo named "${repoName}" is configured (known: ${this.names().join(", ") || "none"})`,
       );
 
-    const existing = this.options.store.worktreeFor(sessionId, repoName);
+    const existing = this.options.store.worktreeFor(workspace, repoName);
     // A row whose directory is gone — someone tidied up, or a disk moved — is
     // stale, not authoritative. Rebuild at the same path and branch.
     if (existing && existsSync(existing.path)) return existing;
 
-    const hash = worktreeName(sessionId);
+    const hash = worktreeName(workspace);
     const branch = `hex/${hash}`;
     const path = join(this.options.root, `${repoName}-${hash}`);
 
@@ -119,14 +123,29 @@ export class WorktreeManager {
       this.options.log?.(
         `[hex] worktree ${repoName}: creating ${path} on ${branch} from ${base}`,
       );
+      // `rm -rf` on a worktree directory — the obvious way to reclaim disk —
+      // leaves git's registration behind, and every later command in that
+      // conversation then dies on "missing but already registered worktree".
+      // Pruning first costs nothing and is the difference between a tidy-up and
+      // a permanently broken conversation.
+      try {
+        await run("git", ["worktree", "prune"], {
+          cwd: repo.path,
+          timeout: GIT_TIMEOUT_MS,
+        });
+      } catch {
+        // Nothing to prune, or a git too old to care. Either way, carry on.
+      }
+
       try {
         await run("git", ["worktree", "add", "-b", branch, path, base], {
           cwd: repo.path,
           timeout: GIT_TIMEOUT_MS,
         });
       } catch (error) {
-        // A branch left behind by a worktree that was removed by hand: reuse it
-        // rather than failing the first command of every later conversation.
+        // The branch outlived its worktree — a conversation resumed after the
+        // checkout was deleted. Reuse it rather than failing every command from
+        // here on; the work that was committed to it is still there.
         const message = error instanceof Error ? error.message : String(error);
         if (!message.includes("already exists")) throw error;
         await run("git", ["worktree", "add", path, branch], {
@@ -137,7 +156,7 @@ export class WorktreeManager {
     }
 
     const record: StoredWorktree = {
-      sessionId,
+      workspace,
       repo: repoName,
       path,
       branch,

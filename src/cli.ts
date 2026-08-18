@@ -282,6 +282,7 @@ async function main(): Promise<void> {
           : { transport: "nip-29" as const, id: "local", label: "hex ask" };
 
         let repoTools: RepoTools | undefined;
+        let askGrants: string[] | undefined;
         if (asRaw) {
           const resolved = await resolveSigner(config.identity.signer, {
             baseDir: loaded.baseDir,
@@ -304,6 +305,7 @@ async function main(): Promise<void> {
             room,
           } as Parameters<typeof toolsetFor>[1]);
           console.log(`as      ${asRaw} → ${toolset?.name ?? "(default)"}`);
+          askGrants = toolset?.tools;
           if (toolset?.isolation && toolset.repos.length > 0)
             repoTools = new RepoTools({
               worktrees: new WorktreeManager({
@@ -313,9 +315,11 @@ async function main(): Promise<void> {
                 log: (line) => console.log(line),
               }),
               repos: toolset.repos,
-              // A named session, so repeated `hex ask` runs share one checkout
-              // instead of leaving a worktree behind per question.
-              sessionId: `ask#${asPubkey.slice(0, 16)}`,
+              // Named, so repeated `hex ask` runs share one checkout instead
+              // of leaving a worktree behind per question. Deliberately the
+              // same key the daemon would use for a DM with this person, so
+              // the harness works in the tree they would be working in.
+              workspace: `nip-17|${asPubkey}`,
               requestedBy: asPubkey,
               dryRun: values["dry-run"],
               timeoutMs: toolset.execTimeoutMinutes
@@ -333,6 +337,7 @@ async function main(): Promise<void> {
           (text) => console.log(text),
           new KnowledgeTools({ relays, readRelays: config.relays.read }),
           repoTools,
+          askGrants,
         );
 
         const outcome = await brain.turn({
@@ -592,7 +597,7 @@ async function main(): Promise<void> {
            * room and by speaker. A channel with no toolset gets `undefined`,
            * which is the read tools and no execution.
            */
-          capabilities: (inbound, sessionId) => {
+          capabilities: (inbound, workspace) => {
             const toolset = toolsetFor(config, inbound);
             if (!toolset) return {};
             return {
@@ -602,7 +607,7 @@ async function main(): Promise<void> {
                   ? new RepoTools({
                       worktrees,
                       repos: toolset.repos,
-                      sessionId,
+                      workspace,
                       requestedBy: inbound.author,
                       dryRun: values["dry-run"],
                       timeoutMs: toolset.execTimeoutMinutes

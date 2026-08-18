@@ -51,26 +51,32 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function tools(sessionId: string, repos = ["grimoire"], timeoutMs?: number) {
+function tools(
+  workspace: string,
+  repos = ["grimoire"],
+  timeoutMs?: number,
+  dryRun = false,
+) {
   return new RepoTools({
     worktrees: manager,
     repos,
-    sessionId,
+    workspace,
     requestedBy: "f".repeat(64),
     timeoutMs,
+    dryRun,
   });
 }
 
 describe("worktree naming", () => {
-  it("survives a session id git would refuse as a branch", () => {
-    // Session ids carry `#` and `:`; a branch may carry neither.
+  it("survives a room key git would refuse as a branch", () => {
+    // Room keys carry `|`, `'` and `#`; a branch may carry none of them.
     const name = worktreeName("nip-17|abc#0123456789abcdef");
     expect(name).toMatch(/^[0-9a-f]{12}$/);
   });
 
   it("is stable, so a restart finds the same checkout", () => {
-    expect(worktreeName("session-one")).toBe(worktreeName("session-one"));
-    expect(worktreeName("session-one")).not.toBe(worktreeName("session-two"));
+    expect(worktreeName("room-one")).toBe(worktreeName("room-one"));
+    expect(worktreeName("room-one")).not.toBe(worktreeName("room-two"));
   });
 });
 
@@ -143,6 +149,84 @@ describe("repo.exec", () => {
       delete process.env.HEX_HARMLESS;
     }
   });
+});
+
+describe("dry run", () => {
+  /**
+   * `--dry-run` means nothing is touched, and `ensure` touches plenty: it
+   * fetches in the operator's live clone and registers a branch and a full
+   * checkout. Trialling the feature safely is the first thing anyone does with
+   * it, and it used to be the thing that modified their repository.
+   */
+  it("creates no worktree, no branch, and no row", async () => {
+    const before = await run("git", ["branch", "--list", "hex/*"], {
+      cwd: repo,
+    });
+
+    const exec = await tools("dry-1", ["grimoire"], undefined, true).call(
+      EXEC_TOOL,
+      { command: "echo should-not-run > proof.txt" },
+    );
+    expect(exec.ok).toBe(true);
+    expect(exec.output).toMatch(/dry run/);
+
+    const write = await tools("dry-1", ["grimoire"], undefined, true).call(
+      WRITE_TOOL,
+      { path: "proof.txt", content: "no" },
+    );
+    expect(write.output).toMatch(/dry run/);
+
+    expect(store.worktreeFor("dry-1", "grimoire")).toBeUndefined();
+    expect(
+      existsSync(join(worktreeRoot, `grimoire-${worktreeName("dry-1")}`)),
+    ).toBe(false);
+    const after = await run("git", ["branch", "--list", "hex/*"], {
+      cwd: repo,
+    });
+    expect(after.stdout).toBe(before.stdout);
+  });
+});
+
+describe("what a command leaves behind", () => {
+  it("does not wait on a job the command backgrounded", async () => {
+    // The shell exits at once while its child holds the inherited pipe. Waiting
+    // for `close` waits for the child, which pinned the whole turn — and the
+    // room's in-flight gate with it — for the full timeout.
+    const started = Date.now();
+    const result = await tools("bg-1", ["grimoire"], 10_000).call(EXEC_TOOL, {
+      command: "sleep 30 & echo started",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain("started");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 20_000);
+
+  it("reaps it rather than leaving it running", async () => {
+    // A dev server left bound to a port with ppid 1, outliving the daemon, is
+    // what "ok" used to mean here.
+    const marker = join(root, "survivor.txt");
+    await tools("bg-2").call(EXEC_TOOL, {
+      command: `(sleep 1; echo alive > ${marker}) & echo backgrounded`,
+    });
+    await new Promise((done) => setTimeout(done, 2_000));
+    expect(existsSync(marker)).toBe(false);
+  }, 20_000);
+});
+
+describe("a worktree deleted by hand", () => {
+  it("is rebuilt instead of bricking the conversation", async () => {
+    // `rm -rf` is the obvious way to reclaim the disk, and it leaves git's
+    // registration behind. Without a prune, every later command in that
+    // conversation dies on "missing but already registered worktree".
+    await tools("gone-1").call(EXEC_TOOL, { command: "true" });
+    const stored = store.worktreeFor("gone-1", "grimoire");
+    expect(stored).toBeDefined();
+    await rm(stored!.path, { recursive: true, force: true });
+
+    const result = await tools("gone-1").call(EXEC_TOOL, { command: "pwd" });
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain(worktreeName("gone-1"));
+  }, 30_000);
 });
 
 describe("repo.write", () => {

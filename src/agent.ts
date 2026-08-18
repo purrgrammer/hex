@@ -50,7 +50,8 @@ export interface AgentOptions {
    */
   capabilities?: (
     inbound: Inbound,
-    sessionId: string,
+    /** The room key: what a workspace is keyed by, and it outlives a session. */
+    workspace: string,
   ) => { grants?: string[]; repo?: RepoTools };
   /** Emoji for the "working on it" reaction. Empty string disables the ack. */
   ackEmoji?: string;
@@ -125,7 +126,7 @@ export function runAgent(options: AgentOptions): RunningAgent {
 
       // Decided per message: a channel granted nothing gets the read tools and
       // nothing that runs.
-      const granted = options.capabilities?.(inbound, session?.id ?? where);
+      const granted = options.capabilities?.(inbound, where);
 
       // The brain's only way to be heard. Bound to this message, in this room,
       // on the transport that delivered it — so nothing the model returns is

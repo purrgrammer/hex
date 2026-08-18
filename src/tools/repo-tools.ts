@@ -38,8 +38,17 @@ export interface RepoToolsOptions {
   worktrees: WorktreeManager;
   /** Repos this channel may touch. Empty means these tools do nothing. */
   repos: string[];
-  /** Which conversation the checkout belongs to. */
-  sessionId: string;
+  /**
+   * Which conversation the checkout belongs to — a ROOM, not a session.
+   *
+   * Sessions turn over: thirty quiet minutes without a threaded reply opens a
+   * new one, and a coding task routinely takes longer than that. Keyed by
+   * session, the peer who came back after a long build got a second full
+   * checkout, empty of the work they were asking about, while the tool
+   * description promised them state persists between messages. A room is the
+   * stable thing — one conversation, one workspace.
+   */
+  workspace: string;
   /** Who asked, for the log. Every command is attributable. */
   requestedBy: string;
   timeoutMs?: number;
@@ -58,6 +67,10 @@ export function truncateOutput(text: string): string {
 
 export class RepoTools {
   constructor(private readonly options: RepoToolsOptions) {}
+
+  private get workspace(): string {
+    return this.options.workspace;
+  }
 
   private repoEnum(): string[] {
     return this.options.repos;
@@ -163,17 +176,21 @@ export class RepoTools {
     if (!command) return { ok: false, output: "exec needs a `command`" };
 
     const repo = this.repoName(args);
-    const worktree = await this.options.worktrees.ensure(
-      this.options.sessionId,
-      repo,
-      this.options.repos,
-    );
-
     this.options.log?.(
       `[hex] exec (${repo}, ${this.options.requestedBy.slice(0, 8)}…): ${command}`,
     );
+    // Before the worktree, not after. `ensure` fetches in the operator's clone
+    // and registers a branch and a checkout — everywhere else in this package
+    // `--dry-run` means nothing is touched, and trialling this feature safely
+    // is the first thing anyone will do with it.
     if (this.options.dryRun)
       return { ok: true, output: "dry run — nothing was executed" };
+
+    const worktree = await this.options.worktrees.ensure(
+      this.workspace,
+      repo,
+      this.options.repos,
+    );
 
     const timeout = this.options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const result = await runCommand(command, worktree.path, timeout);
@@ -201,8 +218,15 @@ export class RepoTools {
       return { ok: false, output: "write needs `content`" };
 
     const repo = this.repoName(args);
+    if (this.options.dryRun) {
+      this.options.log?.(
+        `[hex] write (${repo}, ${this.options.requestedBy.slice(0, 8)}…): ${relPath} (${content.length} chars)`,
+      );
+      return { ok: true, output: "dry run — nothing was written" };
+    }
+
     const worktree = await this.options.worktrees.ensure(
-      this.options.sessionId,
+      this.workspace,
       repo,
       this.options.repos,
     );
@@ -224,9 +248,6 @@ export class RepoTools {
     this.options.log?.(
       `[hex] write (${repo}, ${this.options.requestedBy.slice(0, 8)}…): ${inside} (${content.length} chars)`,
     );
-    if (this.options.dryRun)
-      return { ok: true, output: "dry run — nothing was written" };
-
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, content, "utf8");
     return { ok: true, output: `wrote ${inside} (${content.length} chars)` };
@@ -240,13 +261,28 @@ interface CommandResult {
 }
 
 /**
+ * How long to keep reading output after the command itself has exited.
+ *
+ * A shell that backgrounds something exits immediately while its child holds
+ * the inherited pipe open, so waiting for `close` waits for the background job,
+ * which is forever. Waiting for `exit` instead can clip the last chunk, so the
+ * pipes get this long to drain and no longer.
+ */
+const FLUSH_GRACE_MS = 250;
+
+/**
  * Run one command and collect what it said.
  *
  * stdout and stderr are interleaved into one stream because that is how a
  * person reads a build log, and separating them loses which warning belonged to
- * which step. On timeout the whole process group is killed, not just the shell:
- * a `npm test` that hangs leaves children behind, and killing the parent alone
- * leaves them running and the pipe open.
+ * which step.
+ *
+ * The process group is killed on the way out of EVERY path, not only the
+ * timeout. A model told it can build and run tests will eventually start a dev
+ * server or a watcher; reaped only on timeout, `npm run dev &` returned "ok" in
+ * nine milliseconds and left a server bound to a port with `ppid 1`, outliving
+ * the daemon itself. Hex runs commands, it does not host daemons — anything
+ * still alive when the command finishes is a leak.
  */
 function runCommand(
   command: string,
@@ -276,24 +312,42 @@ function runCommand(
     child.stdout.on("data", append);
     child.stderr.on("data", append);
 
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const killGroup = () => {
       try {
         if (child.pid) process.kill(-child.pid, "SIGKILL");
       } catch {
-        // Already gone between the timer firing and the signal.
+        // Already gone, which is the outcome we wanted anyway.
       }
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup();
     }, timeoutMs);
 
+    let settled = false;
     const finish = (code: number) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      // Anything the command backgrounded dies with it, and the pipes are let
+      // go so a survivor cannot hold this promise open.
+      killGroup();
+      child.stdout.destroy();
+      child.stderr.destroy();
       resolve({ code, output, timedOut });
     };
+
     child.on("error", (error) => {
       output += `\n${error.message}`;
       finish(-1);
     });
-    child.on("close", (code) => finish(code ?? -1));
+    // `exit`, not `close`: close waits for every holder of the pipe, and a
+    // backgrounded grandchild is one — `npm run dev &` would hold the turn open
+    // for the full timeout. The grace lets the buffers drain first.
+    child.on("exit", (code) => {
+      setTimeout(() => finish(code ?? -1), FLUSH_GRACE_MS);
+    });
   });
 }
 
