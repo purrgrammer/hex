@@ -67,7 +67,18 @@ describe("mentionsName", () => {
     expect(mentionsName("cc @hex", ["@hex"])).toBe(true);
   });
 
-  it("does not treat a bare name as an @ mention", () => {
+  it("matches an @ mention from a BARE token", () => {
+    // Configuring ["hex"] and then being ignored because the room types "@hex"
+    // is the least debuggable failure this agent has.
+    expect(mentionsName("@hex what is this", ["hex"])).toBe(true);
+    expect(mentionsName("cc @Hex", ["hex"])).toBe(true);
+  });
+
+  it("still refuses a longer word after the @", () => {
+    expect(mentionsName("@hexagon ping", ["hex"])).toBe(false);
+  });
+
+  it("does not treat a bare name as an @ mention when the token spells the @", () => {
     expect(mentionsName("hex", ["@hex"])).toBe(false);
   });
 

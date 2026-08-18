@@ -11,7 +11,15 @@
 import { EventStore } from "applesauce-core";
 import { RelayPool } from "applesauce-relay";
 import { firstValueFrom, Observable, of, timer } from "rxjs";
-import { catchError, map, takeUntil, tap, toArray } from "rxjs/operators";
+import {
+  catchError,
+  filter,
+  map,
+  take,
+  takeUntil,
+  tap,
+  toArray,
+} from "rxjs/operators";
 import type { Filter, NostrEvent } from "nostr-tools";
 
 /**
@@ -210,27 +218,49 @@ export async function checkRelay(
   const relay = relays.pool.relay(url);
 
   try {
-    const answered = await firstValueFrom(
+    // The RAW req stream, not `request()`: `request()` completes gracefully on a
+    // CLOSED whose reason carries no machine-readable prefix, so a relay that
+    // REFUSED the subscription arrived here indistinguishable from one that
+    // served nothing and said EOSE — and was reported `ok`. Only EOSE means the
+    // relay answered the question that was asked.
+    const outcome = await firstValueFrom(
       relay
         // No reconnect: a health check reports what it found, it does not retry
         // past its own deadline.
-        .request([{ kinds: [1], limit: 0 }], { reconnect: false })
+        .req([{ kinds: [1], limit: 0 }], { reconnect: false })
         .pipe(
-          toArray(),
-          map(() => true),
+          filter(
+            (message) => message.type === "EOSE" || message.type === "CLOSED",
+          ),
+          take(1),
+          map((message) =>
+            message.type === "EOSE"
+              ? ({ answered: true } as const)
+              : ({ answered: false, reason: message.reason } as const),
+          ),
           takeUntil(timer(timeoutMs)),
         ),
-      { defaultValue: false },
+      { defaultValue: null },
     );
 
     // A relay holding a challenge answered the connection but not the REQ:
     // that is an auth gate, not a broken relay, and the operator needs to know
     // which one it is before wondering why Hex reads nothing there.
-    if (!answered)
+    if (outcome === null)
       return relay.challenge
         ? { relay: url, state: "auth-required" }
         : { relay: url, state: "silent" };
-    return { relay: url, state: "ok", roundTripMs: now() - startedAt };
+
+    if (outcome.answered)
+      return { relay: url, state: "ok", roundTripMs: now() - startedAt };
+
+    if (outcome.reason.includes("auth-required") || relay.challenge)
+      return { relay: url, state: "auth-required" };
+    return {
+      relay: url,
+      state: "error",
+      message: outcome.reason || "closed the subscription without a reason",
+    };
   } catch (error) {
     const message = describeError(error);
     if (message.includes("auth-required"))

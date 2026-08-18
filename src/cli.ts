@@ -15,6 +15,7 @@ import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
 import { resolveSigner } from "./signer.js";
 import { announceIdentity } from "./identity.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
+import { loadEnvFile } from "./env-file.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -26,6 +27,9 @@ Usage:
   hex run      [config]            (next phase)
 
 Config defaults to ./hex.config.json.
+
+Secrets come from the environment. Every command loads a \`.env\` beside the
+config, or --env-file <path>; a variable already exported always wins.
 `;
 
 function fail(message: string): never {
@@ -54,6 +58,7 @@ async function main(): Promise<void> {
     options: {
       "dry-run": { type: "boolean", default: false },
       auto: { type: "boolean", default: false },
+      "env-file": { type: "string" },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -67,6 +72,14 @@ async function main(): Promise<void> {
   const configPath = configArg ?? "hex.config.json";
   const loaded = await loadConfig(configPath);
   const { config } = loaded;
+
+  // Secrets live in the environment; a `.env` beside the config is where people
+  // put them. Loaded before the signer is resolved, and never over a variable
+  // the real environment already set.
+  const env = await loadEnvFile(loaded.baseDir, values["env-file"]);
+  if (env.path && env.applied.length > 0)
+    console.log(`env     ${env.path} (${env.applied.join(", ")})`);
+
   const relays = createRelays();
 
   try {

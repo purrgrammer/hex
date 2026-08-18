@@ -146,15 +146,25 @@ describe("parseConfig", () => {
     ).toThrow(/only "nip-29" is implemented/);
   });
 
-  it("refuses profile.publish with no publish relays", () => {
-    // parseRelayList already rejects an empty array, so this is the belt to its
-    // braces: the invariant is stated where the reader looks for it.
+  it("refuses profile.publish with no profile fields", () => {
+    // It would build `{}` and replace whatever kind 0 that npub had. A kind 0 is
+    // replaceable; nothing brings the old one back.
     expect(() =>
-      parseConfig({
-        ...minimal,
-        relays: { ...minimal.relays, publish: [] },
-        profile: { publish: true, name: "Hex" },
-      }),
+      parseConfig({ ...minimal, profile: { publish: true } }),
+    ).toThrow(/no profile fields/);
+  });
+
+  it("allows profile.publish false with no fields", () => {
+    // "managed elsewhere" is a legitimate configuration.
+    expect(
+      parseConfig({ ...minimal, profile: { publish: false } }).profile,
+    ).toEqual({ publish: false });
+  });
+
+  it("refuses an empty publish role outright", () => {
+    // There is nowhere to announce, and nowhere to send anything else either.
+    expect(() =>
+      parseConfig({ ...minimal, relays: { ...minimal.relays, publish: [] } }),
     ).toThrow(/relays\.publish/);
   });
 

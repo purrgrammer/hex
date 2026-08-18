@@ -3,6 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { startMockRelay } from "./mock-relay.js";
 import { nip19 } from "nostr-tools";
 import { createRelays } from "../relays.js";
 import { resolveSigner } from "../signer.js";
@@ -61,6 +62,29 @@ describe("resolveSigner", () => {
         { baseDir: process.cwd(), relays },
       ),
     ).rejects.toThrow(/valid nsec or hex key/);
+  });
+
+  it("gives up on a bunker that never answers, instead of hanging", async () => {
+    // `NostrConnectSigner.fromBunkerURI` awaits the remote signer's response and
+    // has no timeout of its own, so a bunker app that is simply closed — the
+    // normal state of one on a phone — left every command hanging silently.
+    const relay = await startMockRelay({ kind: "normal" });
+    const dir = await mkdtemp(join(tmpdir(), "hex-bunker-"));
+    relays = createRelays();
+    try {
+      await expect(
+        resolveSigner(
+          {
+            type: "bunker",
+            uri: `bunker://${getPublicKey(generateSecretKey())}?relay=${relay.url}`,
+            stateDir: dir,
+          },
+          { baseDir: dir, relays, connectTimeoutMs: 500 },
+        ),
+      ).rejects.toThrow(/did not answer within 500ms/);
+    } finally {
+      await relay.close();
+    }
   });
 
   it("accepts a bare hex key as well as an nsec", async () => {

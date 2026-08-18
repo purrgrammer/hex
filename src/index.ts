@@ -67,6 +67,7 @@ export type {
   ToolSpec,
 } from "./brain/types.js";
 export { EchoBrain } from "./brain/echo.js";
+export { loadEnvFile, type EnvFileResult } from "./env-file.js";
 export {
   joinGroup,
   joinConfiguredGroups,

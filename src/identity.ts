@@ -123,11 +123,46 @@ export interface AnnounceOptions {
 }
 
 /**
- * Publish Hex's identity, skipping whatever already matches.
+ * Which publish relays are missing this document?
  *
- * Reads from `relays.read` ∪ `relays.publish`: a copy sitting on a read-only
- * relay still tells us the network already has this exact document, and asking
- * costs one REQ.
+ * Asked PER RELAY, and only of the relays Hex would write to. Evidence from a
+ * read-only relay cannot answer the question: an operator who moves the outbox
+ * from A to B and leaves A in `read` would otherwise get `unchanged` from A's
+ * stale copy while B — the relay Hex's own kind 10002 now names — holds no
+ * profile and no DM relay list at all, forever, since the same stale copy
+ * answers every subsequent run.
+ *
+ * A relay that cannot be read (auth-gated, silent) counts as missing. That
+ * republishes on every run, which is churn; the alternative is a relay Hex
+ * believes it has announced to and never has.
+ */
+async function relaysMissing(
+  relays: HexRelays,
+  pubkey: string,
+  publishRelays: string[],
+  template: EventTemplate,
+  timeoutMs?: number,
+): Promise<string[]> {
+  const checks = await Promise.all(
+    publishRelays.map(async (url) => {
+      const published = await requestNewest(
+        relays,
+        [url],
+        { kinds: [template.kind], authors: [pubkey] },
+        { timeoutMs },
+      );
+      return matchesPublished(template, published) ? null : url;
+    }),
+  );
+  return checks.filter((url): url is string => url !== null);
+}
+
+/**
+ * Publish Hex's identity, skipping the relays that already hold it.
+ *
+ * Idempotent per relay, not globally: a relay is written to when its own copy
+ * does not match, so adding a relay to `publish` backfills it without rewriting
+ * the ones that were already correct.
  */
 export async function announceIdentity(
   relays: HexRelays,
@@ -137,21 +172,19 @@ export async function announceIdentity(
   options: AnnounceOptions = {},
 ): Promise<AnnounceResult[]> {
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
-  const lookupRelays = [
-    ...new Set([...config.relays.read, ...config.relays.publish]),
-  ];
   const templates = buildIdentityTemplates(config, now());
   const results: AnnounceResult[] = [];
 
   for (const template of templates) {
-    const published = await requestNewest(
+    const missing = await relaysMissing(
       relays,
-      lookupRelays,
-      { kinds: [template.kind], authors: [pubkey] },
-      { timeoutMs: options.lookupTimeoutMs },
+      pubkey,
+      config.relays.publish,
+      template,
+      options.lookupTimeoutMs,
     );
 
-    if (matchesPublished(template, published)) {
+    if (missing.length === 0) {
       results.push({ kind: template.kind, action: "unchanged" });
       continue;
     }
@@ -160,7 +193,7 @@ export async function announceIdentity(
       results.push({
         kind: template.kind,
         action: "published",
-        detail: "dry run — nothing sent",
+        detail: `dry run — would send to ${missing.join(", ")}`,
       });
       continue;
     }
@@ -169,7 +202,7 @@ export async function announceIdentity(
       const event = await signer.signEvent(template);
       const outcomes = await publishTo(
         relays,
-        config.relays.publish,
+        missing,
         event as NostrEvent,
         options.publishTimeoutMs,
       );

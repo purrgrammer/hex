@@ -109,6 +109,57 @@ describe("announceIdentity", () => {
     ]);
   });
 
+  it("backfills a publish relay that does not hold it, and only that one", async () => {
+    // The blocker this replaced: evidence came from `read ∪ publish` while the
+    // write went to `publish`, so a stale copy on a relay Hex no longer writes to
+    // reported `unchanged` and the real outbox stayed empty forever.
+    const stale = await startMockRelay({ kind: "normal" });
+    relay = stale;
+    relays = createRelays();
+
+    // First run announces to `stale` alone.
+    const first = parseConfig({
+      identity: { signer: { type: "nsec", env: "HEX_NSEC" } },
+      brain: { type: "echo" },
+      relays: { read: [stale.url], publish: [stale.url], dm: [stale.url] },
+      profile: { publish: true, name: "Hex" },
+      transports: [{ type: "nip-29", groups: [{ relay: stale.url, id: "d" }] }],
+    });
+    await announceIdentity(relays, signer, pubkey, first, { now: () => 1000 });
+    const staleCount = stale.received.length;
+
+    // Now the outbox moves: `fresh` is the only publish relay, `stale` stays in
+    // `read` and still answers with everything it holds.
+    const fresh = await startMockRelay({ kind: "normal" });
+    const moved = parseConfig({
+      identity: { signer: { type: "nsec", env: "HEX_NSEC" } },
+      brain: { type: "echo" },
+      relays: { read: [stale.url], publish: [fresh.url], dm: [fresh.url] },
+      profile: { publish: true, name: "Hex" },
+      transports: [{ type: "nip-29", groups: [{ relay: fresh.url, id: "d" }] }],
+    });
+
+    try {
+      const results = await announceIdentity(relays, signer, pubkey, moved, {
+        now: () => 2000,
+      });
+
+      // All three land on the new relay; the kind 0 is byte-identical to the one
+      // `stale` is serving, and that must not be taken as evidence.
+      expect(results.map((result) => result.action)).toEqual([
+        "published",
+        "published",
+        "published",
+      ]);
+      expect(fresh.received.map((event) => event.kind)).toEqual([
+        0, 10002, 10050,
+      ]);
+      expect(stale.received.length).toBe(staleCount);
+    } finally {
+      await fresh.close();
+    }
+  });
+
   it("sends nothing at all on a dry run", async () => {
     relay = await startMockRelay({ kind: "normal" });
     relays = createRelays();

@@ -238,6 +238,16 @@ function parseProfile(value: unknown): ProfileConfig {
   );
   if (typeof profile.publish !== "boolean")
     throw new ConfigError("profile.publish must be a boolean");
+
+  // `publish: true` with no fields builds `{}` and replaces whatever profile
+  // that npub had — a kind 0 is replaceable, so the old one is gone from every
+  // relay that honours the replacement. Nothing recovers it.
+  const fields = Object.keys(profile).filter((key) => key !== "publish");
+  if (profile.publish && fields.length === 0)
+    throw new ConfigError(
+      "profile.publish is true but no profile fields are set — that would replace Hex's kind 0 with an empty one",
+    );
+
   return {
     publish: profile.publish,
     name: optionalString(profile.name, "profile.name"),
@@ -365,11 +375,10 @@ export function parseConfig(input: unknown): HexConfig {
     transports: parseTransports(raw.transports),
   };
 
-  if (config.profile.publish && config.relays.publish.length === 0)
-    throw new ConfigError(
-      "profile.publish is true but relays.publish is empty — there is nowhere to announce",
-    );
-
+  // `relays.publish` cannot be empty — `parseRelayList` already refused that —
+  // so the only cross-field check worth making here is the one `parseProfile`
+  // cannot see on its own. There is none yet; the profile-field check lives
+  // there, where the fields are.
   return config;
 }
 

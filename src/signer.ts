@@ -31,6 +31,32 @@ export interface ResolvedSigner {
 /** Permissions a bunker must grant. Kinds Hex signs, and nothing wider. */
 export const BUNKER_SIGN_KINDS = [0, 7, 9, 9021, 10002, 10050, 1059, 13];
 
+/** How long to wait for a remote signer to answer the connect. */
+export const BUNKER_CONNECT_TIMEOUT_MS = 30_000;
+
+/** Reject a promise that outlives its deadline, with a message that says so. */
+async function withDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(message.replace("%d", String(timeoutMs)))),
+          timeoutMs,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function readNsecFromEnv(name: string): Promise<string> {
   const value = process.env[name];
   if (!value || value.trim() === "")
@@ -92,7 +118,12 @@ async function loadClientKey(stateDir: string): Promise<PrivateKeySigner> {
  */
 export async function resolveSigner(
   config: SignerConfig,
-  options: { baseDir: string; relays: HexRelays },
+  options: {
+    baseDir: string;
+    relays: HexRelays;
+    /** Deadline for a remote signer's answer. Tests pass a short one. */
+    connectTimeoutMs?: number;
+  },
 ): Promise<ResolvedSigner> {
   if (config.type === "nsec") {
     const secret =
@@ -129,10 +160,21 @@ export async function resolveSigner(
   const clientKey = await loadClientKey(
     resolve(options.baseDir, config.stateDir),
   );
-  const signer = await NostrConnectSigner.fromBunkerURI(config.uri, {
-    signer: clientKey,
-    permissions: NostrConnectSigner.buildSigningPermissions(BUNKER_SIGN_KINDS),
-  });
+  const bunker = NostrConnectSigner.parseBunkerURI(config.uri);
+
+  // `fromBunkerURI` awaits a response from the remote signer and has NO timeout
+  // of its own — a bunker whose app is closed (the normal state of one hosted on
+  // a phone) leaves every command hanging with nothing printed, and no hint
+  // whether the config, the relay or the signer is at fault.
+  const signer = await withDeadline(
+    NostrConnectSigner.fromBunkerURI(config.uri, {
+      signer: clientKey,
+      permissions:
+        NostrConnectSigner.buildSigningPermissions(BUNKER_SIGN_KINDS),
+    }),
+    options.connectTimeoutMs ?? BUNKER_CONNECT_TIMEOUT_MS,
+    `the remote signer did not answer within %dms (relays: ${bunker.relays.join(", ")}) — is the bunker app open?`,
+  );
 
   return {
     signer,

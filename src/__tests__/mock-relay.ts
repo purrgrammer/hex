@@ -35,7 +35,16 @@ export type MockRelayBehaviour =
   /** Answer nothing at all: no EVENT, EOSE, CLOSED, ERROR, or OK on a publish. */
   | { kind: "silent" }
   /** Challenge on connect, then refuse every REQ with an `auth-required` CLOSED. */
-  | { kind: "auth-required" };
+  | { kind: "auth-required" }
+  /**
+   * Refuse every REQ with a CLOSED carrying NO machine-readable prefix, and
+   * accept publishes.
+   *
+   * The shape that reported `ok`: applesauce completes such a stream gracefully,
+   * so a relay that served nothing and refused the subscription looked identical
+   * to one that answered EOSE with no events.
+   */
+  | { kind: "closed-no-prefix"; reason?: string };
 
 export interface MockRelay {
   url: string;
@@ -75,6 +84,16 @@ export async function startMockRelay(
               "CLOSED",
               subscriptionId,
               "auth-required: authenticate to read",
+            ]),
+          );
+          return;
+        }
+        if (behaviour.kind === "closed-no-prefix") {
+          socket.send(
+            JSON.stringify([
+              "CLOSED",
+              subscriptionId,
+              behaviour.reason ?? "we do not serve that filter",
             ]),
           );
           return;

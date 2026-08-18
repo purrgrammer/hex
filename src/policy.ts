@@ -48,16 +48,23 @@ const HOUR_SECS = 3600;
  * Does this text address Hex by name?
  *
  * Word-boundary and case-insensitive, because "hexadecimal" is not a summons.
- * The tokens come from config and may contain `@` or punctuation, so they are
- * escaped and the boundary is asserted with lookarounds rather than `\b` —
- * `\b@hex` never matches, since `@` is already a non-word character.
+ * The boundary is asserted with lookarounds rather than `\b`, since a token may
+ * start with `@` and `\b@hex` never matches — `@` is already a non-word
+ * character.
+ *
+ * A BARE token matches with or without an `@`: someone who configures
+ * `["hex"]` and then gets `@hex` in the room must not be met with silence,
+ * which is the least debuggable failure this agent has. A token that spells the
+ * `@` out is taken at its word and matches only the @-form.
  */
 export function mentionsName(text: string, mentions: string[]): boolean {
   return mentions.some((token) => {
     const trimmed = token.trim();
     if (!trimmed) return false;
     const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(`(?<![\\w@])${escaped}(?![\\w])`, "iu");
+    const pattern = trimmed.startsWith("@")
+      ? new RegExp(`(?<![\\w@])${escaped}(?![\\w])`, "iu")
+      : new RegExp(`(?<![\\w@])@?${escaped}(?![\\w])`, "iu");
     return pattern.test(text);
   });
 }

@@ -45,6 +45,21 @@ describe("checkRelay", () => {
     expect(health.state).toBe("silent");
   });
 
+  it("does not bless a relay that refused the subscription", async () => {
+    // applesauce completes a CLOSED-without-prefix stream gracefully, so this
+    // relay used to be reported `ok` with a round-trip time — for a relay Hex
+    // will read nothing from.
+    relay = await startMockRelay({
+      kind: "closed-no-prefix",
+      reason: "we do not serve that filter",
+    });
+    relays = createRelays();
+    const health = await checkRelay(relays, relay.url, 1000);
+    expect(health.state).toBe("error");
+    if (health.state === "error")
+      expect(health.message).toContain("do not serve");
+  });
+
   it("names an auth gate as an auth gate, not as broken", async () => {
     // The operator needs to know which one it is before wondering why Hex reads
     // nothing there.
