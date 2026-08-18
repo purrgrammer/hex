@@ -5,7 +5,7 @@
  * whoami   — resolve the signer and print the npub. No publishing.
  * check    — validate the config and dial every relay, per role. No publishing.
  * announce — write kind 0 / 10002 / 10050 from config, skipping what matches.
- * run      — not yet: the transports land in the next phase.
+ * run      — join, listen on every configured group, and answer when addressed.
  */
 
 import { parseArgs } from "node:util";
@@ -17,6 +17,10 @@ import { announceIdentity } from "./identity.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
 import { createBrain } from "./brain/create.js";
+import { Nip29Transport } from "./transports/nip29.js";
+import { RoomContext } from "./context.js";
+import { ReplyGate } from "./policy.js";
+import { runAgent } from "./agent.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -26,7 +30,7 @@ Usage:
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
   hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
   hex ask      [config] "question" [--brain echo]  one turn through the brain
-  hex run      [config]            (next phase)
+  hex run      [config] [--dry-run] [--brain echo]  join, listen, and answer
 
 Config defaults to ./hex.config.json.
 
@@ -256,9 +260,108 @@ async function main(): Promise<void> {
         return;
       }
 
-      case "run":
-        // `fail` never returns, but eslint reads control flow, not types.
-        return fail("run needs a transport, and none is implemented yet");
+      case "run": {
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const brain = createBrain(config.brain, {
+          selfPubkey: resolved.pubkey,
+          override: values.brain === "echo" ? "echo" : undefined,
+        });
+
+        console.log(`npub    ${nip19.npubEncode(resolved.pubkey)}`);
+        console.log(`brain   ${brain.name}`);
+        console.log(
+          `mentions ${config.mentions.length ? config.mentions.join(", ") : "(none — only a p-tag will reach Hex)"}`,
+        );
+        if (values["dry-run"])
+          console.log("dry run — answers are logged, nothing is published");
+
+        // Say who you are before speaking, if the config owns the profile.
+        if (config.profile.publish && !values["dry-run"]) {
+          const announced = await announceIdentity(
+            relays,
+            resolved.signer,
+            resolved.pubkey,
+            config,
+          );
+          for (const result of announced)
+            console.log(`kind ${result.kind}  ${result.action}`);
+        }
+
+        const autoJoinGroups = config.transports.flatMap((transport) =>
+          transport.autoJoin ? transport.groups : [],
+        );
+        if (autoJoinGroups.length > 0) {
+          const outcomes = await joinConfiguredGroups(
+            relays,
+            resolved.signer,
+            resolved.pubkey,
+            autoJoinGroups,
+            { dryRun: values["dry-run"] },
+          );
+          for (const outcome of outcomes)
+            console.log(`join    ${outcome.group}  ${outcome.action}`);
+        }
+
+        // Unix seconds, captured once: the subscription's floor and the gate's
+        // cutoff are the same instant, so nothing is fetched that would only be
+        // refused as backfill.
+        const startedAt = Math.floor(Date.now() / 1000);
+
+        const transports = config.transports.map(
+          (transport) =>
+            new Nip29Transport({
+              relays,
+              signer: resolved.signer,
+              pubkey: resolved.pubkey,
+              groups: transport.groups,
+              mentions: config.mentions,
+              since: startedAt,
+            }),
+        );
+
+        const agent = runAgent({
+          transports,
+          gate: new ReplyGate({
+            selfPubkey: resolved.pubkey,
+            mentions: config.mentions,
+            startedAt,
+            repliesPerRoomPerHour: config.limits.repliesPerRoomPerHour,
+            now: () => Math.floor(Date.now() / 1000),
+          }),
+          brain,
+          context: new RoomContext({
+            relays,
+            lookupRelays: config.relays.read,
+            messages: config.context.messages,
+          }),
+          instructions: loaded.instructions,
+          dryRun: values["dry-run"],
+        });
+
+        for (const group of config.transports.flatMap(
+          (transport) => transport.groups,
+        ))
+          console.log(`listening ${group.relay}'${group.id}`);
+
+        // Runs until interrupted. The signer is closed on the way out so a
+        // bunker session ends cleanly rather than timing out on the far side.
+        await new Promise<void>((resolveRun) => {
+          const shutdown = (signal: string) => {
+            console.log(`\n${signal} — stopping`);
+            agent.stop();
+            resolveRun();
+          };
+          process.once("SIGINT", () => shutdown("SIGINT"));
+          process.once("SIGTERM", () => shutdown("SIGTERM"));
+        });
+
+        await agent.idle();
+        await resolved.close();
+        return;
+      }
 
       default:
         fail(`unknown command "${command}"\n\n${USAGE}`);

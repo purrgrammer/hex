@@ -77,6 +77,18 @@ export {
 } from "./brain/openai-compatible.js";
 export { loadEnvFile, type EnvFileResult } from "./env-file.js";
 export {
+  runAgent,
+  ACK_EMOJI,
+  type AgentOptions,
+  type RunningAgent,
+} from "./agent.js";
+export { RoomContext, type ContextOptions } from "./context.js";
+export {
+  Nip29Transport,
+  KIND_GROUP_MESSAGE,
+  type Nip29TransportOptions,
+} from "./transports/nip29.js";
+export {
   joinGroup,
   joinConfiguredGroups,
   isGroupMember,

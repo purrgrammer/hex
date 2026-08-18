@@ -52,9 +52,32 @@ restart does not re-pair.
   (kind 9021, sent only to each group's own relay). `--auto` limits it to groups
   marked `autoJoin`, which is what `hex run` will do at startup. A group whose
   member or admin list already names Hex is skipped, so this is safe to repeat.
-- `hex run` — next phase.
+- `hex run [--dry-run] [--brain echo]` — announce, join every `autoJoin` group,
+  then listen. A message that addresses Hex gets a 👀 reaction while the model
+  thinks and a threaded kind 9 when it answers. Runs until interrupted.
+
+## When Hex speaks
+
+It answers only when addressed: p-tagged, or named by one of `mentions` on a word
+boundary. A bare token like `hex` matches `@hex` too; a token written `@hex`
+matches only that form.
+
+Four other rules, each of which exists because the alternative is a bot that
+misbehaves quietly:
+
+- Never its own message — a reply comes straight back through the same
+  subscription.
+- Never the same message twice, however many relays deliver it.
+- Never a message dated before the process started (minus a small grace), so a
+  restart does not answer a week of backfill at once.
+- One reply in flight per room, and `limits.repliesPerRoomPerHour` per room. A
+  turn that published nothing does not spend that budget.
+
+A brain that returns nothing is silence, which is a legitimate answer. A brain or
+relay that FAILS is logged as a failure — never dressed up as having nothing to
+say.
 
 ## Status
 
-Phase 1: identity, config, policy, relay plumbing. The NIP-29 transport, the
-brain, and the agent loop follow.
+NIP-29 works end to end. NIP-17 and Concord are the next transports; the
+`ToolHost` seam for a sandboxed coding agent is defined and unimplemented.

@@ -40,7 +40,16 @@ export interface Transport {
   start(): Observable<Inbound>;
   /** Bounded newest-first history, for context. */
   history(room: Room, limit: number): Promise<Inbound[]>;
-  reply(to: Inbound, text: string): Promise<void>;
+  /** Publish a reply and return its event id. */
+  reply(to: Inbound, text: string): Promise<string>;
+  /**
+   * Acknowledge that a message is being worked on.
+   *
+   * A model takes seconds; a room has no other way to know the difference
+   * between "thinking" and "ignored you". Optional, because not every transport
+   * has a reaction — a protocol without one simply has no ack.
+   */
+  react?(to: Inbound, emoji: string): Promise<string>;
   stop(): void;
 }
 
