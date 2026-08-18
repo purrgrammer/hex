@@ -116,6 +116,10 @@ export interface AnnounceResult {
 export interface AnnounceOptions {
   dryRun?: boolean;
   now?: () => number;
+  /** Deadline per relay for the "is it already published?" lookup. */
+  lookupTimeoutMs?: number;
+  /** Deadline per relay for each publish. */
+  publishTimeoutMs?: number;
 }
 
 /**
@@ -140,10 +144,12 @@ export async function announceIdentity(
   const results: AnnounceResult[] = [];
 
   for (const template of templates) {
-    const published = await requestNewest(relays, lookupRelays, {
-      kinds: [template.kind],
-      authors: [pubkey],
-    });
+    const published = await requestNewest(
+      relays,
+      lookupRelays,
+      { kinds: [template.kind], authors: [pubkey] },
+      { timeoutMs: options.lookupTimeoutMs },
+    );
 
     if (matchesPublished(template, published)) {
       results.push({ kind: template.kind, action: "unchanged" });
@@ -165,6 +171,7 @@ export async function announceIdentity(
         relays,
         config.relays.publish,
         event as NostrEvent,
+        options.publishTimeoutMs,
       );
       const accepted = outcomes.filter((outcome) => outcome.ok);
       if (accepted.length === 0) {

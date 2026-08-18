@@ -21,6 +21,7 @@ export {
   describeError,
   subscribe,
   REQUEST_TIMEOUT_MS,
+  PUBLISH_TIMEOUT_MS,
   type HexRelays,
   type RelayHealth,
   type PublishOutcome,

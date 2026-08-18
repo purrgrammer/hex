@@ -106,24 +106,56 @@ export interface PublishOutcome {
   message?: string;
 }
 
-/** Publish to every relay and report each one's answer separately. */
+/**
+ * Ceiling on one relay's answer to a publish.
+ *
+ * Enforced here rather than left to applesauce's own 30s default: a relay that
+ * takes the EVENT and never sends OK holds up everything waiting on the result,
+ * and `announce` runs three publishes in series at startup.
+ */
+export const PUBLISH_TIMEOUT_MS = 10_000;
+
+/**
+ * Publish to every relay and report each one's answer separately.
+ *
+ * A relay that never answered is reported as a failure, not as a success —
+ * silence is not acceptance, the same way it is not completion on a read.
+ */
 export async function publishTo(
   relays: HexRelays,
   urls: string[],
   event: NostrEvent,
+  timeoutMs = PUBLISH_TIMEOUT_MS,
 ): Promise<PublishOutcome[]> {
   const responses = await Promise.all(
     urls.map(async (url): Promise<PublishOutcome> => {
-      try {
-        const response = await relays.pool.relay(url).publish(event);
-        return { relay: url, ok: response.ok, message: response.message };
-      } catch (error) {
-        return {
-          relay: url,
-          ok: false,
-          message: describeError(error),
-        };
-      }
+      const deadline = new Promise<PublishOutcome>((resolve) => {
+        const timer = setTimeout(
+          () =>
+            resolve({
+              relay: url,
+              ok: false,
+              message: `no answer within ${timeoutMs}ms`,
+            }),
+          timeoutMs,
+        );
+        // Node keeps the process alive for a pending timer; this one is only a
+        // backstop, and a CLI that has said everything should exit.
+        timer.unref?.();
+      });
+
+      const attempt = (async (): Promise<PublishOutcome> => {
+        try {
+          const response = await relays.pool
+            .relay(url)
+            .publish(event, { timeout: timeoutMs });
+          return { relay: url, ok: response.ok, message: response.message };
+        } catch (error) {
+          return { relay: url, ok: false, message: describeError(error) };
+        }
+      })();
+
+      return Promise.race([attempt, deadline]);
     }),
   );
   return responses;
