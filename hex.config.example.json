@@ -16,8 +16,8 @@
   "profile": {
     "publish": true,
     "name": "Hex",
-    "about": "grimoire assistant",
-    "picture": "https://example.invalid/hex.png"
+    "about": "The grimoire assistant. Ask me about NIPs, kinds, and how relays actually behave.",
+    "picture": "https://i.nostr.build/6BK9LpTI5oFAvlyy.png"
   },
   "context": { "messages": 40 },
   "limits": { "repliesPerRoomPerHour": 20 },
