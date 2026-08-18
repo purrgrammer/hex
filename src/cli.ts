@@ -9,7 +9,6 @@
  */
 
 import { parseArgs } from "node:util";
-import { resolve } from "node:path";
 import { nip19 } from "nostr-tools";
 import { loadConfig } from "./config-file.js";
 import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
@@ -24,7 +23,7 @@ import { ReplyGate } from "./policy.js";
 import { runAgent } from "./agent.js";
 import { ConsoleTools } from "./tools/console-tools.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
-import { StateStore, defaultStatePath } from "./state.js";
+import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { SessionTracker } from "./sessions.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
@@ -328,13 +327,16 @@ async function main(): Promise<void> {
             console.log(`join    ${outcome.group}  ${outcome.action}`);
         }
 
-        // Conversations outlive the process: what Hex said, and which messages
-        // belong together, are read back from disk before the first REQ.
-        const statePath = config.state.file
-          ? resolve(loaded.baseDir, config.state.file)
-          : defaultStatePath(loaded.baseDir);
-        const store = new StateStore(statePath);
-        await store.load();
+        // Conversations outlive the process. The agent's home is named by its
+        // pubkey, so two agents on one machine share nothing.
+        const home = agentHome(
+          config.state.home
+            ? expandHome(config.state.home, loaded.baseDir)
+            : DEFAULT_HOME,
+          resolved.pubkey,
+        );
+        const store = HexStore.open(home.db);
+        store.prune();
         const sessions = new SessionTracker({
           store,
           maxMessages: config.context.messages,
@@ -342,7 +344,10 @@ async function main(): Promise<void> {
             ? config.state.sessionIdleMinutes * 60
             : undefined,
         });
-        console.log(`state   ${statePath}`);
+        const counts = store.counts();
+        console.log(
+          `home    ${home.dir} (${counts.sessions} sessions, ${counts.messages} messages)`,
+        );
 
         // Unix seconds, captured once: the subscription's floor and the gate's
         // cutoff are the same instant, so nothing is fetched that would only be
@@ -405,9 +410,9 @@ async function main(): Promise<void> {
         });
 
         await agent.idle();
-        // Anything the last turn recorded belongs on disk before the process
-        // goes; a debounced write that never fired is a conversation lost.
-        await store.flush();
+        // Every write already committed as it happened; this just releases the
+        // file handle so a supervisor's restart is not racing a WAL checkpoint.
+        store.close();
         await resolved.close();
         return;
       }

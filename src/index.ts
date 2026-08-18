@@ -88,12 +88,14 @@ export {
 } from "./tools/knowledge.js";
 export { buildSystemPrompt } from "./prompt.js";
 export {
-  StateStore,
-  defaultStatePath,
-  type HexState,
+  HexStore,
+  agentHome,
+  expandHome,
+  DEFAULT_HOME,
+  type AgentHome,
   type StoredSession,
   type StoredMessage,
-} from "./state.js";
+} from "./store.js";
 export {
   SessionTracker,
   DEFAULT_SESSION_IDLE_SECS,

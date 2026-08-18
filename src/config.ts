@@ -70,8 +70,14 @@ export type TransportConfig = {
 };
 
 export interface StateConfig {
-  /** Where the state file lives. Relative paths resolve against the config. */
-  file?: string;
+  /**
+   * Where agents keep their homes. Defaults to `~/.hex`.
+   *
+   * Each agent gets `<home>/<pubkey>/` with its own `data.db` and `worktrees/`,
+   * so two agents on one machine share nothing and two configs for one key share
+   * a memory.
+   */
+  home?: string;
   /** How long a conversation stays open to a follow-up that is not a reply. */
   sessionIdleMinutes?: number;
 }
@@ -446,9 +452,9 @@ export function parseConfig(input: unknown): HexConfig {
   let state: StateConfig = {};
   if (stateRaw !== undefined) {
     const record = requireRecord(stateRaw, "state");
-    rejectUnknown(record, ["file", "sessionIdleMinutes"], "state");
+    rejectUnknown(record, ["home", "sessionIdleMinutes"], "state");
     state = {
-      file: optionalString(record.file, "state.file"),
+      home: optionalString(record.home, "state.home"),
       sessionIdleMinutes:
         record.sessionIdleMinutes === undefined
           ? undefined

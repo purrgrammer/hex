@@ -119,14 +119,28 @@ repeats a bot's name in their second sentence.
 
 ## Durability
 
-Sessions and what Hex has said live in `state.file` (default `hex-state.json`
-beside the config), written atomically and bounded. A restart therefore resumes
-conversations instead of meeting everyone again — which is also what makes a
-supervisor safe to point at it.
+Each agent gets a home named by its pubkey:
 
-An unreadable state file is a warning and a fresh start, never a refusal to boot:
-the contents are a convenience, and a crash loop over them trades a small loss for
-a total one.
+```
+~/.hex/<pubkey>/
+  data.db      sessions, messages, what Hex has said
+  worktrees/   isolated checkouts, for when Hex runs code
+```
+
+Keyed by pubkey because the key is the identity: two configs for one key are one
+agent and should share a memory, two agents on one machine must share nothing.
+`state.home` moves the root.
+
+Storage is SQLite — `node:sqlite`, so no dependency and no native build — in WAL
+mode with a busy timeout. A file was not enough: two processes that each hold a
+JSON document read it, mutate it in memory, and write the whole thing back, and
+the last writer erases the other's conversation. Writing atomically makes one
+write survivable and does nothing about two. A restart overlapping its
+predecessor, or `hex ask` beside the daemon, is now a second connection rather
+than a lost conversation.
+
+Rows are bounded (20k messages, 2k sessions, oldest dropped) and pruned at
+startup, so the cost lands at boot rather than mid-conversation.
 
 `packages/hex/deploy/` has a launchd plist for macOS — `KeepAlive` on non-zero
 exit, `RunAtLoad`, and `caffeinate -i -s` wrapping the process so the machine

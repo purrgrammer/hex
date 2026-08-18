@@ -23,7 +23,7 @@
     "website": "https://grimoire.rocks"
   },
   "context": { "messages": 40 },
-  "state": { "file": "./hex-state.json", "sessionIdleMinutes": 30 },
+  "state": { "home": "~/.hex", "sessionIdleMinutes": 30 },
   "limits": { "repliesPerRoomPerHour": 20 },
   "transports": [
     {
