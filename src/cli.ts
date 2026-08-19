@@ -6,6 +6,7 @@
  * check    — validate the config and dial every relay, per role. No publishing.
  * announce — write kind 0 / 10002 / 10050 from config, skipping what matches.
  * eve      — follow an Eve session and publish it as events.
+ * serve     — answer private messages by running them through Eve.
  */
 
 import { existsSync } from "node:fs";
@@ -22,6 +23,7 @@ import { Nip17Transport } from "./transports/nip17.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
+import { EveServer } from "./eve/serve.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -33,6 +35,8 @@ Usage:
   hex dm       [config] <npub> "message"   send a private message, unprompted
   hex eve      [config] <session-id> [--host <url>] [--dry-run]
                                    follow an Eve session, publish it as events
+  hex serve    [config] [--host <url>] [--reply]
+                                   answer DMs by running them through Eve
 
 Config defaults to ./hex.config.json.
 
@@ -113,6 +117,7 @@ async function main(): Promise<void> {
       auto: { type: "boolean", default: false },
       "env-file": { type: "string" },
       host: { type: "string" },
+      reply: { type: "boolean", default: false },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -489,6 +494,123 @@ async function main(): Promise<void> {
         else if (disconnected) await transcript.close();
         else await transcript.close("done");
         transport?.stop();
+        store.close();
+        await resolved.close();
+        return;
+      }
+
+      case "serve": {
+        const transcriptConfig = config.transcript;
+        if (!transcriptConfig)
+          fail(
+            "this config has no `transcript` section, so a session would run with nobody to read it",
+          );
+        const host = values.host ?? config.eve?.host;
+        if (!host)
+          fail("no Eve host — set `eve.host` in the config or pass --host");
+        const dm = dmTransport(config.transports);
+        if (!dm)
+          fail(
+            "`serve` answers private messages, so it needs a nip-17 transport",
+          );
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+
+        const home = agentHome(
+          config.state.home
+            ? expandHome(config.state.home, loaded.baseDir)
+            : DEFAULT_HOME,
+          resolved.pubkey,
+        );
+        const store = HexStore.open(home.db);
+
+        const startedAt = Math.floor(Date.now() / 1000);
+        const transport = new Nip17Transport({
+          relays,
+          signer: resolved.signer,
+          pubkey: resolved.pubkey,
+          inboxRelays: config.relays.dm,
+          readRelays: config.relays.read,
+          allow: dm.allow.map((peer) => peer.pubkey),
+          since: startedAt,
+          log: (line) => console.log(line),
+        });
+
+        const server = new EveServer({
+          host,
+          transport,
+          reply: values.reply,
+          log: (line) => console.log(line),
+          transcript: {
+            agentPubkey: resolved.pubkey,
+            slug: transcriptConfig.slug,
+            recipients: transcriptConfig.to,
+            store,
+            sink: transport,
+            deltas: transcriptConfig.deltas,
+            log: (line) => console.log(line),
+          },
+        });
+
+        console.log(`npub    ${nip19.npubEncode(resolved.pubkey)}`);
+        console.log(`eve     ${host}`);
+        console.log(
+          `to      ${transcriptConfig.to.map((p) => nip19.npubEncode(p).slice(0, 16) + "…").join(", ")}`,
+        );
+        console.log(
+          `allow   ${dm.allow.map((peer) => nip19.npubEncode(peer.pubkey).slice(0, 16) + "…").join(", ")}`,
+        );
+        console.log(
+          values.reply
+            ? "answering in the conversation as well as publishing the session"
+            : "the session IS the answer — pass --reply to also send it as a message",
+        );
+
+        /**
+         * One turn per message, and a failure is reported rather than fatal.
+         *
+         * A daemon that dies on one bad question stops answering every later one,
+         * which is the failure mode of every bot that has ever gone quiet without
+         * saying why.
+         */
+        const subscription = transport.start().subscribe({
+          next: (inbound) => {
+            if (!inbound.addressesSelf) return;
+            console.log(
+              `[hex] ${inbound.author.slice(0, 8)}… asked: ${inbound.text.slice(0, 80)}`,
+            );
+            void server.handle(inbound).catch((error: unknown) => {
+              console.log(
+                `[hex] the turn failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+          },
+          error: (error: unknown) => {
+            console.log(
+              `[hex] the inbox stopped: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          },
+        });
+
+        console.log(`listening dms on ${config.relays.dm.join(", ")}`);
+
+        await new Promise<void>((resolveRun) => {
+          const shutdown = (signal: string) => {
+            console.log(`\n${signal} — stopping`);
+            resolveRun();
+          };
+          process.once("SIGINT", () => shutdown("SIGINT"));
+          process.once("SIGTERM", () => shutdown("SIGTERM"));
+        });
+
+        subscription.unsubscribe();
+        // Every followed session keeps whatever status Eve last reported: the
+        // follower is leaving, the sessions are not over.
+        await server.close();
+        transport.stop();
         store.close();
         await resolved.close();
         return;

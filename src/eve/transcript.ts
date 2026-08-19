@@ -201,6 +201,38 @@ export class EveTranscript {
     });
   }
 
+  /**
+   * The event that set this session running, on the head as `["e", id, …, "trigger"]`.
+   *
+   * Set from OUTSIDE, because only the caller knows it: a Nostr event id is not
+   * something the runtime has ever heard of. It used to be filled with Eve's
+   * `turnId`, which put a string no relay has ever stored into a tag every reader
+   * treats as an event id — a pointer at nothing, indistinguishable from a pointer
+   * at something deleted.
+   *
+   * This is the link that makes a session findable from the message that caused
+   * it: a client holding the message queries for heads tagging it and lists the
+   * runs underneath, rather than the answer having to carry a pointer back.
+   */
+  set trigger(id: string | undefined) {
+    this.record.trigger = id;
+  }
+
+  get trigger(): string | undefined {
+    return this.record.trigger;
+  }
+
+  /**
+   * The session's address on the wire.
+   *
+   * Kept apart from Eve's own session id, which is Eve's to shape and not
+   * something to hand a relay. Exposed because a message that quotes this session
+   * has to name it.
+   */
+  get nostrId(): string {
+    return this.record.nostrId;
+  }
+
   /** Where to resume Eve's stream. */
   get streamIndex(): number {
     return this.record.streamIndex;
@@ -321,8 +353,6 @@ export class EveTranscript {
 
       case "message.received": {
         const text = stringField(data, "message") ?? "";
-        if (!this.record.trigger)
-          this.record.trigger = stringField(data, "turnId");
         await this.append("user", [{ type: "text", text }], {
           alt: text.slice(0, 200),
         });

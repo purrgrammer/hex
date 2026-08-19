@@ -128,3 +128,8 @@ export {
   type EveFinishReason,
   type EveUsage,
 } from "./eve/types.js";
+export {
+  EveServer,
+  type ServeOptions,
+  type ServeTransport,
+} from "./eve/serve.js";

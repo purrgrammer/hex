@@ -347,8 +347,8 @@ export class Nip17Transport implements Transport {
    * conversation key. Without the self-copy Hex cannot read back what it said —
    * its own inbox is the only record it has.
    */
-  async reply(to: Inbound, text: string): Promise<string> {
-    return this.send(to.room.id, text, to.id);
+  async reply(to: Inbound, text: string, tags?: string[][]): Promise<string> {
+    return this.send(to.room.id, text, to.id, tags);
   }
 
   /**
@@ -359,14 +359,32 @@ export class Nip17Transport implements Transport {
    * separate from `reply` because a `Transport` answers messages, and speaking
    * first is not that.
    */
-  async send(peer: string, text: string, replyToId?: string): Promise<string> {
+  async send(
+    peer: string,
+    text: string,
+    replyToId?: string,
+    /**
+     * Extra tags on the message itself.
+     *
+     * What this exists for: an answer that names the transcript it came out of,
+     * so a reader can open the session rather than take the answer on faith.
+     * Added after the factory has stamped and BEFORE the id is computed — a tag
+     * appended afterwards would leave a rumor whose id does not match its own
+     * content, which every recipient recomputes and rejects.
+     */
+    tags: string[][] = [],
+  ): Promise<string> {
     // Stamped, not signed: a rumor carries a pubkey and an id and no signature.
     // The id is computed here because the session store keys on it, and because
     // both wraps must carry the SAME rumor — one message, two envelopes.
     const draft = WrappedMessageFactory.create(peer, text);
-    const unsigned = await (replyToId ? draft.replyTo(replyToId) : draft).stamp(
+    const stamped = await (replyToId ? draft.replyTo(replyToId) : draft).stamp(
       this.options.signer,
     );
+    const unsigned =
+      tags.length > 0
+        ? { ...stamped, tags: [...stamped.tags, ...tags] }
+        : stamped;
     const rumor = { ...unsigned, id: getEventHash(unsigned) } as Rumor;
 
     const theirInbox = await this.inboxOf(peer);
