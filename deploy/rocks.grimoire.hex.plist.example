@@ -13,7 +13,13 @@
     <string>-i</string>
     <string>-s</string>
     <string>/Users/YOU/.nvm/versions/node/v26.3.1/bin/node</string>
-    <string>/Users/YOU/grimoire/.claude/worktrees/hex-agent/packages/hex/dist/cli.js</string>
+
+    <!-- An installed copy, NOT a path inside a git worktree.
+         `npm run build -w nostr-hex && cp -R packages/hex/dist ~/.hex/dist`
+         A plist pointing into `.claude/worktrees/…` makes that worktree
+         load-bearing: deleting the branch you were developing on stops the
+         agent, and a rebuild mid-conversation swaps the code underneath it. -->
+    <string>/Users/YOU/.hex/dist/cli.js</string>
     <string>run</string>
     <string>/Users/YOU/.hex/hex.config.json</string>
   </array>
@@ -30,8 +36,19 @@
   <key>ThrottleInterval</key>
   <integer>30</integer>
 
+  <!-- The agent's own directory, so nothing it does depends on a checkout. -->
   <key>WorkingDirectory</key>
-  <string>/Users/YOU/grimoire/.claude/worktrees/hex-agent</string>
+  <string>/Users/YOU/.hex</string>
+
+  <!-- launchd hands a process a minimal PATH and no login shell, so a version
+       manager is not on it. Hex puts its own node's directory on the path of
+       anything it runs, which is why `npm` works in a command it was asked to
+       run; this is for the daemon itself. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOU/.nvm/versions/node/v26.3.1/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
 
   <key>StandardOutPath</key>
   <string>/Users/YOU/.hex/hex.out.log</string>
