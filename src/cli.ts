@@ -24,6 +24,7 @@ import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 import { EveServer } from "./eve/serve.js";
+import { ReplyGate } from "./policy.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -570,6 +571,29 @@ async function main(): Promise<void> {
         );
 
         /**
+         * The gate decides, before a single token is spent.
+         *
+         * Not optional and not a nicety. A NIP-17 inbox filter has to reach two
+         * days back — a wrap's timestamp is randomised that far, so a strict
+         * `since` drops messages sent this second — which means every start reads
+         * the BACKLOG. Without the gate, the first run of this command opened an
+         * Eve session for a month of old conversation and queued twenty more:
+         * real money, on questions nobody had just asked.
+         *
+         * `before-start` is the rule that matters here. The rest matter too: its
+         * own messages come back through the same subscription, four relays
+         * deliver the same wrap four times, and one turn per room at a time is
+         * what stops a stall fanning out.
+         */
+        const gate = new ReplyGate({
+          selfPubkey: resolved.pubkey,
+          mentions: config.mentions,
+          startedAt,
+          repliesPerRoomPerHour: config.limits.repliesPerRoomPerHour,
+          now: () => Math.floor(Date.now() / 1000),
+        });
+
+        /**
          * One turn per message, and a failure is reported rather than fatal.
          *
          * A daemon that dies on one bad question stops answering every later one,
@@ -578,15 +602,33 @@ async function main(): Promise<void> {
          */
         const subscription = transport.start().subscribe({
           next: (inbound) => {
-            if (!inbound.addressesSelf) return;
+            const verdict = gate.consider(inbound);
+            if (!verdict.reply) {
+              // Said out loud, because an unanswered message with no explanation
+              // is the hardest kind of bug to be told about.
+              if (
+                verdict.reason !== "own-message" &&
+                verdict.reason !== "duplicate"
+              )
+                console.log(
+                  `[hex] ${inbound.author.slice(0, 8)}… not answered: ${verdict.reason}`,
+                );
+              return;
+            }
+
             console.log(
               `[hex] ${inbound.author.slice(0, 8)}… asked: ${inbound.text.slice(0, 80)}`,
             );
-            void server.handle(inbound).catch((error: unknown) => {
-              console.log(
-                `[hex] the turn failed: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            });
+            gate.begin(inbound);
+            void server
+              .handle(inbound)
+              .then(() => gate.end(inbound, true))
+              .catch((error: unknown) => {
+                gate.end(inbound, false);
+                console.log(
+                  `[hex] the turn failed: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              });
           },
           error: (error: unknown) => {
             console.log(
