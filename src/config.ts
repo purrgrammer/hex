@@ -524,6 +524,7 @@ export function parseConfig(input: unknown): HexConfig {
       "state",
       "transcript",
       "eve",
+      "tools",
       "transports",
     ],
     "config",
