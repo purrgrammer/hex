@@ -153,8 +153,12 @@ export class KnowledgeTools {
             tags: {
               type: "object",
               description:
-                'Single-letter tag filters: {"t": ["nostr"]} for a hashtag, ' +
-                '{"e": ["<hex>"]} for replies to an event.',
+                "Single-letter tag filters, keyed by the bare letter: " +
+                '{"t": ["nostr"]} for a hashtag, {"e": ["<hex>"]} for replies ' +
+                'to an event, {"a": ["30023:<pubkey>:<d>"]} for an addressable ' +
+                "event. A tag on its own is a valid query — you do not need " +
+                "kinds as well. Values are hex ids and pubkeys, never npub or " +
+                "note.",
               additionalProperties: {
                 type: "array",
                 items: { type: "string" },
@@ -320,24 +324,65 @@ export class KnowledgeTools {
     if (typeof args.since === "number") filter.since = Math.floor(args.since);
     if (typeof args.until === "number") filter.until = Math.floor(args.until);
 
+    /**
+     * Tag filters, however the caller spelled them.
+     *
+     * NIP-01 writes them `#e`; this tool's own parameter is a `tags` object
+     * keyed by the bare letter; and a model that knows the protocol writes the
+     * hash in either place. All three now mean the same thing, because the
+     * alternative was what actually happened: a key of `#e` failed the
+     * single-letter test, was dropped WITHOUT A WORD, and the query ran as
+     * `{kinds:[1621]}` — the whole relay instead of the one thread asked for,
+     * answered confidently from a hundred unrelated events.
+     *
+     * A key that cannot be used is now refused rather than ignored. A query
+     * that quietly means something else is worse than no query.
+     */
+    const tagSources: Record<string, unknown>[] = [];
     if (args.tags && typeof args.tags === "object" && !Array.isArray(args.tags))
-      for (const [key, values] of Object.entries(
-        args.tags as Record<string, unknown>,
-      )) {
-        if (!SINGLE_LETTER.test(key) || !Array.isArray(values)) continue;
+      tagSources.push(args.tags as Record<string, unknown>);
+    // Top-level `#e`, the way a filter is written in the spec.
+    tagSources.push(
+      Object.fromEntries(
+        Object.entries(args).filter(([key]) => key.startsWith("#")),
+      ),
+    );
+
+    let tagged = 0;
+    for (const source of tagSources)
+      for (const [rawKey, values] of Object.entries(source)) {
+        const key = rawKey.startsWith("#") ? rawKey.slice(1) : rawKey;
+        if (!SINGLE_LETTER.test(key))
+          return {
+            ok: false,
+            output: `"${rawKey}" is not a tag filter — a tag is one letter, like "e" or "t". Nothing was queried.`,
+          };
+        if (!Array.isArray(values))
+          return {
+            ok: false,
+            output: `the "${rawKey}" tag filter needs an array of values. Nothing was queried.`,
+          };
         const strings = values.filter(
           (value): value is string => typeof value === "string" && value !== "",
         );
-        if (strings.length)
-          (filter as Record<string, unknown>)[`#${key}`] = strings;
+        if (!strings.length)
+          return {
+            ok: false,
+            output: `the "${rawKey}" tag filter had no usable values. Nothing was queried.`,
+          };
+        (filter as Record<string, unknown>)[`#${key}`] = strings;
+        tagged += 1;
       }
 
-    // A filter with no constraint asks a relay for everything it has.
-    if (!filter.ids && !filter.authors && !filter.kinds)
+    // A filter with no constraint asks a relay for everything it has. A tag on
+    // its own IS a constraint — "replies to this event" is one of the most
+    // useful queries there is, and refusing it sent the model to fetch a kind
+    // wholesale and sift it by hand.
+    if (!filter.ids && !filter.authors && !filter.kinds && tagged === 0)
       return {
         ok: false,
         output:
-          "that filter constrains nothing — pass at least ids, authors or kinds",
+          "that filter constrains nothing — pass at least ids, authors, kinds or a tag",
       };
 
     filter.limit = Math.min(

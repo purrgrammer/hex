@@ -195,6 +195,45 @@ describe("nostr.req", () => {
     );
   }
 
+  it("reads a tag filter however it is spelled, and refuses one it cannot", async () => {
+    /**
+     * The live failure: a model wrote `{"tags": {"#e": [...]}}`, the leading hash
+     * failed the single-letter test, the key was dropped WITHOUT A WORD, and the
+     * query ran as a bare `kinds` filter — the whole relay instead of the one
+     * thread asked for, then answered confidently from unrelated events.
+     */
+    const tagged = finalizeEvent(
+      { kind: 1, content: "tagged", created_at: 500, tags: [["t", "nostr"]] },
+      authorKey,
+    );
+    relay = await startMockRelay({ kind: "normal", events: [tagged] });
+    relays = createRelays();
+    const tools = new KnowledgeTools({ relays, readRelays: [relay.url] });
+
+    for (const args of [
+      { tags: { t: ["nostr"] } },
+      { tags: { "#t": ["nostr"] } },
+      { "#t": ["nostr"] },
+    ]) {
+      const result = await tools.call(REQ_TOOL, args);
+      const payload = JSON.parse(result.output) as {
+        filter: Record<string, unknown>;
+        returned: number;
+      };
+      expect(payload.filter["#t"]).toEqual(["nostr"]);
+      // A tag alone is a constraint: "replies to this event" is the query.
+      expect(payload.returned).toBe(1);
+    }
+
+    // And a key that is not a tag stops the query rather than vanishing from it.
+    const refused = await tools.call(REQ_TOOL, {
+      kinds: [1],
+      tags: { hashtag: ["nostr"] },
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.output).toContain("hashtag");
+  });
+
   it("returns the newest up to the limit, and says how many matched", async () => {
     /**
      * `limit` is per relay, so a union across several routinely exceeds it. The
@@ -281,7 +320,12 @@ describe("nostr.req", () => {
     expect(payload.filter.authors).toEqual([author]);
   });
 
-  it("keeps single-letter tag filters and drops the rest", async () => {
+  it("refuses a tag key it cannot use rather than dropping it", async () => {
+    /**
+     * This used to assert the silent drop, which is what shipped the bug: a key
+     * the tool could not read vanished from the filter and the query ran meaning
+     * something else. A model cannot correct a mistake nobody tells it about.
+     */
     relay = await startMockRelay({ kind: "normal", events: [note("tagged")] });
     relays = createRelays();
     const tools = new KnowledgeTools({ relays, readRelays: [relay.url] });
@@ -289,11 +333,8 @@ describe("nostr.req", () => {
       kinds: [1],
       tags: { t: ["nostr"], notaletter: ["x"] },
     });
-    const payload = JSON.parse(result.output) as {
-      filter: Record<string, unknown>;
-    };
-    expect(payload.filter["#t"]).toEqual(["nostr"]);
-    expect(payload.filter["#notaletter"]).toBeUndefined();
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("notaletter");
   });
 
   it("ignores a relay the model invented that is not a websocket URL", async () => {
