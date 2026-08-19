@@ -158,6 +158,37 @@ export class EveServer {
     return run;
   }
 
+  /**
+   * Take a message that arrived while this correspondent's turn was running.
+   *
+   * A private message during a turn means "not that — this": there is nobody
+   * else in the conversation and no other reason to type. So the running turn is
+   * cancelled and this one takes over. Eve steers on its own when a message is
+   * sent into an active turn, but the send cannot happen until the queue drains,
+   * and the queue does not drain until the running turn ends — so the cancel is
+   * asked for FIRST, out of band, and the ordinary path takes it from there.
+   *
+   * Fire and forget: Eve answers `accepted` or `no_active_turn`, both of which
+   * mean "carry on", and a cancel that does not land leaves the message queued
+   * rather than lost.
+   */
+  async interrupt(inbound: Inbound): Promise<void> {
+    const conversation = this.conversations.get(inbound.author);
+    if (conversation)
+      await this.post(
+        `/eve/v1/session/${encodeURIComponent(conversation.sessionId)}/cancel`,
+        {},
+      ).then(
+        () =>
+          this.log(
+            `[hex] ${short(inbound.author)} interrupted their own turn`,
+          ),
+        (error: unknown) =>
+          this.log(`[hex] could not cancel the running turn: ${message(error)}`),
+      );
+    return this.handle(inbound);
+  }
+
   private async turn(inbound: Inbound): Promise<void> {
     const peer = inbound.author;
     let conversation = this.conversations.get(peer) ?? this.resume(peer);

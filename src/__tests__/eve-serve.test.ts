@@ -122,9 +122,9 @@ function fakeEve(
     const path = new URL(String(url)).pathname;
     if (init?.method === "POST") {
       posts.push({ path, body: JSON.parse(String(init.body)) });
-      // Only a CONTINUE appends: creating a session with the first message is
-      // what produced the events already stored.
-      if (path !== "/eve/v1/session") stored.push(...later);
+      // Only a CONTINUE appends. Creating a session with the first message is
+      // what produced the events already stored, and a cancel produces none.
+      if (path === `/eve/v1/session/${session}`) stored.push(...later);
       return {
         ok: true,
         status: 200,
@@ -373,6 +373,31 @@ describe("EveServer", () => {
     await server_.handle(inbound("msg-1", "first"));
     await server_.handle(inbound("msg-2", "second"));
 
+    expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
+  });
+
+  it("cancels the running turn when the same person writes again", async () => {
+    /**
+     * Seen live: writing while Hex was working produced `not answered:
+     * interrupt` and nothing else — the gate said "abandon that and do this",
+     * and nobody was listening. The message was simply lost.
+     *
+     * Eve steers on its own once a message reaches it, but it cannot reach it
+     * while the turn that must be cancelled is still holding the queue, so the
+     * cancel is asked for out of band first.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const bus = transport();
+    const server_ = server(eve, bus, sink().impl);
+
+    await server_.handle(inbound("msg-1", "first"));
+    await server_.interrupt(inbound("msg-2", "never mind — this instead"));
+
+    expect(eve.posts.map((post) => post.path)).toEqual([
+      "/eve/v1/session",
+      `/eve/v1/session/${eve.session}/cancel`,
+      `/eve/v1/session/${eve.session}`,
+    ]);
     expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
   });
 

@@ -647,6 +647,32 @@ async function main(): Promise<void> {
         const subscription = transport.start().subscribe({
           next: (inbound) => {
             const verdict = gate.consider(inbound);
+
+            /**
+             * `interrupt` is the one verdict that asks for an action.
+             *
+             * It used to be logged with the refusals and the message thrown
+             * away, so writing while Hex was working meant not being answered at
+             * all — the worst reading of "not that, this". The running turn is
+             * cancelled and this message takes over.
+             */
+            if (!verdict.reply && verdict.reason === "interrupt") {
+              console.log(
+                `[hex] ${inbound.author.slice(0, 8)}… interrupted: ${inbound.text.slice(0, 80)}`,
+              );
+              gate.begin(inbound);
+              void server
+                .interrupt(inbound)
+                .then(() => gate.end(inbound, true))
+                .catch((error: unknown) => {
+                  gate.end(inbound, false);
+                  console.log(
+                    `[hex] the turn failed: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+              return;
+            }
+
             if (!verdict.reply) {
               // Said out loud, because an unanswered message with no explanation
               // is the hardest kind of bug to be told about.
