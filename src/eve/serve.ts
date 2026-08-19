@@ -266,7 +266,26 @@ export class EveServer {
   async control(control: SessionControl): Promise<void> {
     if (!this.obeyed.admit(control.id)) return;
 
-    const path = `/eve/v1/session/${encodeURIComponent(control.session)}`;
+    /**
+     * The address names the session on the WIRE; the runtime knows its own id.
+     *
+     * Two ids for one session, deliberately: the published one is 32 random
+     * bytes so a runtime's id never becomes a public name. A reader can only
+     * know the published one, so the translation belongs here — and a control
+     * event for a session this process has never published is not ours to act
+     * on, which is also how a stale instruction for a forgotten run is refused.
+     */
+    const record = this.options.transcript.store.transcriptForNostrId(
+      control.session,
+    );
+    if (!record) {
+      this.log(
+        `[hex] a ${control.command} names a session this agent did not publish`,
+      );
+      return;
+    }
+
+    const path = `/eve/v1/session/${encodeURIComponent(record.sessionId)}`;
     const say = (what: string) =>
       this.log(`[hex] ${short(control.operator)} → ${what}`);
 
@@ -320,7 +339,7 @@ export class EveServer {
       // Said out loud rather than thrown: one refused instruction must not take
       // down the reader that would carry the next one.
       this.log(
-        `[hex] could not ${control.command} ${short(control.session)}: ${message(error)}`,
+        `[hex] could not ${control.command} ${record.sessionId}: ${message(error)}`,
       );
     }
   }

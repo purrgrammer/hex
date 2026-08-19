@@ -464,7 +464,10 @@ describe("EveServer", () => {
     await server_.handle(inbound("msg-1", "first"));
     const before = eve.posts.length;
 
-    const base = { id: "", operator: PEER, agent: AGENT, session: eve.session };
+    // A reader knows the WIRE's session id — 32 random bytes — and never the
+    // runtime's. Using the runtime's here would test a path no reader can take.
+    const nostrId = store.transcriptFor(eve.session)!.nostrId;
+    const base = { id: "", operator: PEER, agent: AGENT, session: nostrId };
     await server_.control({ ...base, id: "c1", command: "respond", request: "req_1", option: "approve" });
     await server_.control({ ...base, id: "c2", command: "steer", text: "do the other thing" });
     await server_.control({ ...base, id: "c3", command: "cancel", turn: "turn_0" });
@@ -489,6 +492,29 @@ describe("EveServer", () => {
     expect(sent[2]!.body).toEqual({ turnId: "turn_0" });
   });
 
+  it("refuses an instruction for a session it never published", async () => {
+    /**
+     * The two ids are the point. A reader can only know the published one, and a
+     * control event naming something this agent never published is either a
+     * stale instruction for a forgotten run or somebody guessing — either way
+     * not a session id to hand to a runtime.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.handle(inbound("msg-1", "first"));
+    const before = eve.posts.length;
+
+    await server_.control({
+      id: "c9",
+      operator: PEER,
+      agent: AGENT,
+      session: "f".repeat(64),
+      command: "cancel",
+    });
+
+    expect(eve.posts.slice(before)).toHaveLength(0);
+  });
+
   it("obeys a redelivered command once", async () => {
     // Four relays hand over the same wrap four times. A `cancel` obeyed twice
     // stops a turn that had nothing to do with it.
@@ -501,7 +527,7 @@ describe("EveServer", () => {
       id: "c1",
       operator: PEER,
       agent: AGENT,
-      session: eve.session,
+      session: store.transcriptFor(eve.session)!.nostrId,
       command: "cancel" as const,
     };
     await server_.control(twice);

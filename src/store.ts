@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   pending     TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
+CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
 
 CREATE TABLE IF NOT EXISTS conversations (
   peer       TEXT PRIMARY KEY,
@@ -229,6 +230,22 @@ export class HexStore {
       cost: row.cost == null ? undefined : String(row.cost),
       pending: parsePending(row.pending),
     };
+  }
+
+  /**
+   * The run behind a published session id.
+   *
+   * Two ids name one session and neither side knows the other's: the runtime has
+   * its own, and the wire carries 32 random bytes chosen here so that a runtime's
+   * id — which may be guessable, or meaningful — never becomes a public name. An
+   * instruction arriving from a reader names the wire's, and the runtime must be
+   * addressed by its own, so the translation happens here.
+   */
+  transcriptForNostrId(nostrId: string): StoredTranscript | undefined {
+    const row = this.db
+      .prepare(`SELECT session_id FROM transcripts WHERE nostr_id = ?`)
+      .get(nostrId) as { session_id: string } | undefined;
+    return row ? this.transcriptFor(String(row.session_id)) : undefined;
   }
 
   /** Sessions whose head never reached a terminal status. */
