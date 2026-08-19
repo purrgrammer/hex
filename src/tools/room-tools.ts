@@ -12,11 +12,14 @@
 
 import type { Inbound, Transport } from "../transports/types.js";
 import type { KnowledgeTools } from "./knowledge.js";
+import { nip19 } from "nostr-tools";
+
 import {
   canonicalId,
   filterTools,
   REACT_TOOL,
   RESPOND_TOOL,
+  WHO_TOOL,
   type ToolCall,
   type ToolHost,
   type ToolResult,
@@ -163,6 +166,20 @@ export class RoomTools implements ToolHost {
           " not an answer.",
       });
 
+    specs.push({
+      name: WHO_TOOL,
+      description:
+        "Who you are talking to and where. Returns their npub, which " +
+        "`nostr.resolve` turns into their profile and `nostr.req` takes as an " +
+        "author. Call it before answering anything about \"me\", \"my\" or " +
+        "\"mine\" — you are not told who they are otherwise.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      prompt:
+        "`chat.who` names the person you are speaking with. Anything about" +
+        " their notes, their zaps or their profile starts there — never guess" +
+        " a pubkey, and never answer about \"my posts\" from an unfiltered query.",
+    });
+
     // Whatever else the runtime can do, offered alongside speaking — and only
     // what this channel was granted. Speaking itself is never filtered.
     const optional: ToolSpec[] = [];
@@ -204,6 +221,8 @@ export class RoomTools implements ToolHost {
         return this.respond(call.arguments);
       case REACT_TOOL:
         return this.react(call.arguments);
+      case WHO_TOOL:
+        return this.who();
       default:
         // Named back, because a model that guessed a tool name can correct itself.
         return {
@@ -265,6 +284,32 @@ export class RoomTools implements ToolHost {
         }`,
       };
     }
+  }
+
+  /**
+   * The correspondent, from the message rather than from the model.
+   *
+   * `requestedBy` is set by the transport that delivered the message and cannot
+   * be influenced by anything the model says — which is the point. An identity
+   * the model could assert is an identity it could get wrong, or be talked into.
+   */
+  private who(): ToolResult {
+    const pubkey = this.requestedBy;
+    const room = this.room;
+    return {
+      ok: true,
+      output: JSON.stringify({
+        pubkey,
+        npub: nip19.npubEncode(pubkey),
+        room: {
+          transport: room.transport,
+          id: room.id,
+          ...(room.relay ? { relay: room.relay } : {}),
+          ...(room.label ? { label: room.label } : {}),
+        },
+        note: "Resolve the npub for their profile; use the hex pubkey as an author in a filter.",
+      }),
+    };
   }
 
   private async react(args: Record<string, unknown>): Promise<ToolResult> {

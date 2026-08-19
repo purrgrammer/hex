@@ -55,6 +55,15 @@ export interface ToolHost {
 export const RESPOND_TOOL = "chat.respond";
 /** Optional: a transport with no reactions simply does not offer it. */
 export const REACT_TOOL = "chat.react";
+/**
+ * Who is being spoken to, and where.
+ *
+ * A runtime is handed a message with no idea whose it is, so "check my recent
+ * posts" sent it to fetch kind 1 from the whole network and summarise strangers.
+ * The answer is one npub, which every other tool here already knows how to turn
+ * into a person.
+ */
+export const WHO_TOOL = "chat.who";
 /** NIPs, kinds — grimoire's own documentation, fetched rather than recalled. */
 export const HELP_TOOL = "grimoire.help";
 /** A REQ against relays. Read-only. */
@@ -71,6 +80,7 @@ export const RESOLVE_TOOL = "nostr.resolve";
 export const KNOWN_TOOLS: readonly string[] = [
   RESPOND_TOOL,
   REACT_TOOL,
+  WHO_TOOL,
   HELP_TOOL,
   REQ_TOOL,
   RESOLVE_TOOL,

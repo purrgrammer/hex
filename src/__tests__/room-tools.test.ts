@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import type { NostrEvent } from "nostr-tools";
 import { RoomTools } from "../tools/room-tools.js";
-import { REACT_TOOL, RESPOND_TOOL } from "../tools/types.js";
+import { nip19 } from "nostr-tools";
+
+import { REACT_TOOL, RESPOND_TOOL, WHO_TOOL } from "../tools/types.js";
 import type { Inbound, Room, Transport } from "../transports/types.js";
 
 const ROOM: Room = {
@@ -57,6 +59,7 @@ describe("RoomTools.list", () => {
     expect(withReact.list().map((spec) => spec.name)).toEqual([
       RESPOND_TOOL,
       REACT_TOOL,
+      WHO_TOOL,
     ]);
 
     // A protocol without reactions simply does not advertise one.
@@ -66,7 +69,25 @@ describe("RoomTools.list", () => {
     });
     expect(withoutReact.list().map((spec) => spec.name)).toEqual([
       RESPOND_TOOL,
+      WHO_TOOL,
     ]);
+  });
+
+  it("names the correspondent from the message, not from the model", async () => {
+    /**
+     * The runtime is told nothing about whose message it is, so "check my recent
+     * posts" became a query for kind 1 across the whole network, answered from
+     * strangers. `requestedBy` comes from the transport that delivered the
+     * message: an identity the model could assert is one it could get wrong, or
+     * be talked into.
+     */
+    const tools = new RoomTools({ transport: transport(), incoming: INBOUND });
+    const result = await tools.call({ name: "chat_who", arguments: {} });
+    const who = JSON.parse(result.output) as { pubkey: string; npub: string };
+
+    expect(result.ok).toBe(true);
+    expect(who.pubkey).toBe(INBOUND.author);
+    expect(who.npub).toBe(nip19.npubEncode(INBOUND.author));
   });
 });
 

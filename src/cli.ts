@@ -743,7 +743,7 @@ async function main(): Promise<void> {
 
         if (bridge)
           console.log(
-            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, grimoire.help, nostr.req, nostr.resolve`,
+            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.who, grimoire.help, nostr.req, nostr.resolve`,
           );
         console.log(`listening dms on ${config.relays.dm.join(", ")}`);
 
