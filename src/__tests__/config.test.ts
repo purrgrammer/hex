@@ -3,7 +3,6 @@ import { parseConfig, parseConfigText, ConfigError } from "../config.js";
 
 const minimal = {
   identity: { signer: { type: "nsec", env: "HEX_NSEC" } },
-  brain: { type: "echo" },
   relays: {
     read: ["wss://read.example"],
     publish: ["wss://write.example"],
@@ -17,7 +16,6 @@ const minimal = {
 describe("parseConfig", () => {
   it("accepts a minimal config and fills the optional defaults", () => {
     const config = parseConfig(minimal);
-    expect(config.context.messages).toBe(40);
     expect(config.limits.repliesPerRoomPerHour).toBe(20);
     expect(config.mentions).toEqual([]);
     // No profile means Hex never touches its own metadata.
@@ -31,12 +29,6 @@ describe("parseConfig", () => {
     expect(() => parseConfig({ ...minimal, mention: ["hex"] })).toThrow(
       ConfigError,
     );
-  });
-
-  it("refuses a config with no brain", () => {
-    const { brain, ...withoutBrain } = minimal;
-    void brain;
-    expect(() => parseConfig(withoutBrain)).toThrow(/brain/);
   });
 
   it("refuses an inline secret key", () => {
@@ -183,14 +175,6 @@ describe("parseConfig", () => {
         transports: [{ type: "nip-17", allow: ["alice@example.com"] }],
       }),
     ).toThrow(/npub or a 64-character hex pubkey/);
-  });
-
-  it("takes repos as data, since the channel link lives elsewhere", () => {
-    const config = parseConfig({
-      ...minimal,
-      repos: [{ name: "grimoire", path: "/Users/x/grimoire" }],
-    });
-    expect(config.repos[0]!.name).toBe("grimoire");
   });
 
   it("refuses profile.publish with no profile fields", () => {

@@ -7,13 +7,6 @@
   },
   "instructions": "./instructions.md",
   "mentions": ["hex", "@hex"],
-  "brain": {
-    "type": "openai-compatible",
-    "baseUrl": "https://example.invalid/v1",
-    "model": "your-model",
-    "apiKeyEnv": "HEX_API_KEY",
-    "maxSteps": 40
-  },
   "relays": {
     "read": ["wss://relay.example.invalid"],
     "publish": ["wss://relay.example.invalid"],
@@ -28,38 +21,24 @@
     "nip05": "hex@grimoire.rocks",
     "website": "https://grimoire.rocks"
   },
-  "context": {
-    "messages": 40
-  },
   "state": {
-    "home": "~/.hex",
-    "sessionIdleMinutes": 30
+    "home": "~/.hex"
   },
   "limits": {
     "repliesPerRoomPerHour": 20
   },
-  "repos": [
-    {
-      "name": "grimoire",
-      "path": "/absolute/path/to/your/clone"
-    }
-  ],
-  "toolsets": {
-    "reader": {
-      "tools": ["grimoire.*", "nostr.*"]
-    },
-    "coder": {
-      "tools": ["grimoire.*", "nostr.*", "repo.*"],
-      "repos": ["grimoire"],
-      "isolation": "container",
-      "execTimeoutMinutes": 15
-    }
+  "eve": {
+    "host": "http://127.0.0.1:2000"
+  },
+  "transcript": {
+    "to": ["npub1..."],
+    "slug": "hex",
+    "deltas": true
   },
   "transports": [
     {
       "type": "nip-29",
       "autoJoin": false,
-      "toolset": "reader",
       "groups": [
         {
           "relay": "wss://groups.example.invalid",
@@ -71,17 +50,9 @@
       "type": "nip-17",
       "allow": [
         {
-          "pubkey": "npub1...",
-          "toolset": "coder"
+          "pubkey": "npub1..."
         }
       ]
     }
-  ],
-  "container": {
-    "runtime": "docker",
-    "image": "node:26-bookworm",
-    "network": "open",
-    "memory": "4g",
-    "pidsLimit": 512
-  }
+  ]
 }

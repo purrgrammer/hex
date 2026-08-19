@@ -3,19 +3,17 @@
  *
  * Built fresh per turn, because every call is scoped to the message that
  * prompted it: `respond` answers THAT message, in THAT room, via the transport
- * that delivered it. A brain holding a stale host cannot reach a different room.
+ * that delivered it. A runtime holding a stale host cannot reach a different room.
  *
- * `dryRun` swaps the delivery for a log line and nothing else changes — the brain
+ * `dryRun` swaps the delivery for a log line and nothing else changes — the caller
  * still calls the same tool and still learns whether it "worked", so a dry run
  * exercises the real path.
  */
 
 import type { Inbound, Transport } from "../transports/types.js";
 import type { KnowledgeTools } from "./knowledge.js";
-import type { RepoTools } from "./repo-tools.js";
 import {
   canonicalId,
-  EXEC_TOOL,
   filterTools,
   REACT_TOOL,
   RESPOND_TOOL,
@@ -36,33 +34,23 @@ export interface RoomToolsOptions {
   /**
    * The read tools — NIPs, kinds, REQs, bech32.
    *
-   * Composed in rather than built here: they belong to no room, and the same set
-   * serves `hex ask`. Optional, so a room can be served without them.
+   * Composed in rather than built here: they belong to no room. Optional, so a
+   * room can be served without them.
    */
   knowledge?: KnowledgeTools;
-  /**
-   * Running commands, if this channel was granted it.
-   *
-   * Absent for every channel that was not — which is the authorization, and the
-   * reason it is a constructor argument rather than a check inside a tool. A
-   * model is never offered a tool it may not call, so it never spends a turn
-   * being refused, and a room's grant is decided once by whoever built the host.
-   */
-  repo?: RepoTools;
   /**
    * Which tools this channel gets, as ids or `namespace.*`.
    *
    * `chat.*` is exempt — a channel Hex listens to must be one it can answer in.
    * Undefined means everything composed in is offered, which is what a channel
-   * with no toolset in config gets.
+   * that names no grants gets.
    */
   grants?: string[];
   /**
    * The turn was abandoned.
    *
-   * Speaking is refused once it fires — a reply that lands after the cancel
-   * notice answers a question the person already withdrew — and it is handed to
-   * the repo tools so a running command actually dies.
+   * Speaking is refused once it fires: a reply that lands after the cancel
+   * notice answers a question the person already withdrew.
    */
   signal?: AbortSignal;
 }
@@ -71,17 +59,14 @@ export interface RoomToolsOptions {
  * One answer per turn by default.
  *
  * A model that calls `respond` three times has misunderstood, and a room is worse
- * off for hearing all three. The cap is refused loudly so the brain can read the
+ * off for hearing all three. The cap is refused loudly so the caller can read the
  * refusal and stop rather than retry.
  */
 const DEFAULT_MAX_RESPONSES = 1;
 
 /** The one detail worth keeping per call, for the cancel notice. */
-function describeCall(
-  name: string,
-  args: Record<string, unknown>,
-): string | undefined {
-  const field = name === EXEC_TOOL ? args.command : args.path;
+function describeCall(args: Record<string, unknown>): string | undefined {
+  const field = args.command ?? args.path;
   if (typeof field !== "string") return undefined;
   return field.length > 120 ? `${field.slice(0, 120)}…` : field;
 }
@@ -161,7 +146,6 @@ export class RoomTools implements ToolHost {
     // what this channel was granted. Speaking itself is never filtered.
     const optional: ToolSpec[] = [];
     if (this.options.knowledge) optional.push(...this.options.knowledge.list());
-    if (this.options.repo) optional.push(...this.options.repo.list());
 
     specs.push(
       ...(this.options.grants
@@ -189,10 +173,7 @@ export class RoomTools implements ToolHost {
           .join(", ")}`,
       };
 
-    this.activity.push({ name, detail: describeCall(name, call.arguments) });
-
-    if (this.options.repo?.handles(name))
-      return this.options.repo.call(name, call.arguments, this.options.signal);
+    this.activity.push({ name, detail: describeCall(call.arguments) });
 
     if (this.options.knowledge?.handles(name))
       return this.options.knowledge.call(name, call.arguments);
@@ -254,7 +235,7 @@ export class RoomTools implements ToolHost {
       this.deliveredText.set(id, text);
       return { ok: true, output: `delivered as ${id}` };
     } catch (error) {
-      // The brain is told the truth: it was not heard. Whether it tries again is
+      // The caller is told the truth: it was not heard. Whether it tries again is
       // its business, and the per-turn cap bounds that either way.
       return {
         ok: false,

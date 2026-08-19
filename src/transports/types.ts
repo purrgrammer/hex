@@ -39,7 +39,7 @@ export interface Inbound {
    * how its protocol threads.
    */
   replyToId?: string;
-  /** The raw event, for verification and for a richer brain context later. */
+  /** The raw event, for verification and for whatever context a runtime wants. */
   event: NostrEvent;
 }
 

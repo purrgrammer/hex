@@ -8,29 +8,11 @@
  */
 
 import { nip19 } from "nostr-tools";
-import { grantCovers, KNOWN_TOOLS } from "./tools/types.js";
 
 export type SignerConfig =
   | { type: "nsec"; env: string }
   | { type: "nsec"; file: string }
   | { type: "bunker"; uri: string; stateDir: string };
-
-export interface BrainConfig {
-  type: "openai-compatible" | "echo";
-  /** e.g. `https://api.openai.com/v1`. Any chat-completions endpoint. */
-  baseUrl?: string;
-  model?: string;
-  /** Name of the env var holding the key — never the key itself. */
-  apiKeyEnv?: string;
-  /** Extra headers, values read from env by name. */
-  headerEnv?: Record<string, string>;
-  maxTokens?: number;
-  temperature?: number;
-  /** Round trips the model gets per turn, including the one that answers. */
-  maxSteps?: number;
-  /** `required` makes the model call a tool rather than answering in prose. */
-  toolChoice?: "auto" | "required";
-}
 
 export interface RelayRoles {
   /** Lookups: kind 0, metadata, anything Hex reads that is not a transport. */
@@ -61,89 +43,14 @@ export interface ProfileConfig {
   lud16?: string;
 }
 
-/**
- * Where a channel's work actually runs.
- *
- * Only one value today, and it is named rather than implied so that a config
- * asking for something stronger fails loudly instead of quietly getting less
- * than it asked for. `host-worktree` runs commands as the user who started the
- * daemon, in a git worktree of the named repo: fast, shares the operator's
- * toolchain, and offers no protection — anything it runs can read the daemon's
- * own secrets off disk. That is the trade, made deliberately.
- */
-export type Isolation = "host-worktree" | "container";
-
-/** Isolation values a config may name, so the error can list them. */
-export const ISOLATIONS: readonly Isolation[] = ["host-worktree", "container"];
-
-/**
- * What a container may reach.
- *
- * Required, with no default, because it is the decision that matters: `open`
- * lets `npm install` work and lets an injected model fetch a payload; `none` is
- * kernel-enforced and breaks installs. There is deliberately no domain
- * allowlist — with a container CLI alone that is convention, not enforcement,
- * since anything can connect by IP. The honest version is an internal network
- * plus a proxy that allowlists CONNECT, which is its own piece of work.
- */
-export type ContainerNetwork = "none" | "open";
-
-export const CONTAINER_NETWORKS: readonly ContainerNetwork[] = ["none", "open"];
-
-/** Runtimes that speak enough of the Docker CLI for what this uses. */
-export const CONTAINER_RUNTIMES = ["docker", "podman", "nerdctl"] as const;
-
-export interface ContainerConfig {
-  /** `docker` | `podman` | `nerdctl`, or an absolute path to the binary. */
-  runtime: string;
-  /**
-   * Required, and never built by Hex.
-   *
-   * `node:26-bookworm` matches this repo's `.nvmrc` and already carries git and
-   * a build toolchain — the `-slim` tags do not have git. Building from a shipped
-   * Dockerfile would make image builds a subsystem Hex has to own, and would pay
-   * for it at the first command of a conversation.
-   */
-  image: string;
-  network: ContainerNetwork;
-  /** `--memory`, e.g. `4g`. */
-  memory?: string;
-  /** `--cpus`, e.g. `2`. */
-  cpus?: string;
-  pidsLimit?: number;
-}
-
-/**
- * What one channel is allowed to do.
- *
- * Named at the top level and referenced by channels, because the interesting
- * property is that two channels share a set — "these rooms get the read tools,
- * this one DM gets the coding tools" — and a set spelled out twice drifts.
- */
-export interface ToolsetConfig {
-  /** The key it was declared under, for error messages and logs. */
-  name: string;
-  /** Tool ids or whole namespaces (`nostr.*`). `chat.*` is always present. */
-  tools: string[];
-  /** Repos this channel may work in, by `repos[].name`. */
-  repos: string[];
-  isolation?: Isolation;
-  /** Wall-clock ceiling for one command. */
-  execTimeoutMinutes?: number;
-}
-
 export interface Nip29GroupConfig {
   relay: string;
   id: string;
-  /** Overrides the transport's, for this group only. */
-  toolset?: string;
 }
 
-/** Someone allowed to DM Hex, and what they may ask it to do. */
+/** Someone allowed to DM Hex. */
 export interface Nip17PeerConfig {
   pubkey: string;
-  /** Overrides the transport's, for this person only. */
-  toolset?: string;
 }
 
 /**
@@ -184,8 +91,6 @@ export type TransportConfig =
       type: "nip-29";
       groups: Nip29GroupConfig[];
       autoJoin: boolean;
-      /** Default for every group that does not name its own. */
-      toolset?: string;
     }
   | {
       type: "nip-17";
@@ -198,36 +103,16 @@ export type TransportConfig =
        * be run.
        */
       allow: Nip17PeerConfig[];
-      /** Default for every peer that does not name their own. */
-      toolset?: string;
     };
-
-/**
- * A repository Hex can work in.
- *
- * Named in config for now: the channel-to-repo link lives elsewhere and this
- * package does not read it yet.
- */
-export interface RepoConfig {
-  /** What people call it: `grimoire`. */
-  name: string;
-  /** An existing clone on this machine, worked in through git worktrees. */
-  path: string;
-  /** Branch new work starts from. Defaults to the clone's current HEAD. */
-  baseRef?: string;
-}
 
 export interface StateConfig {
   /**
    * Where agents keep their homes. Defaults to `~/.hex`.
    *
-   * Each agent gets `<home>/<pubkey>/` with its own `data.db` and `worktrees/`,
-   * so two agents on one machine share nothing and two configs for one key share
-   * a memory.
+   * Each agent gets `<home>/<pubkey>/` with its own `data.db`, so two agents on
+   * one machine share nothing and two configs for one key share a memory.
    */
   home?: string;
-  /** How long a conversation stays open to a follow-up that is not a reply. */
-  sessionIdleMinutes?: number;
 }
 
 export interface HexConfig {
@@ -236,19 +121,12 @@ export interface HexConfig {
   instructions?: string;
   /** Names Hex answers to, beyond a p-tag. */
   mentions: string[];
-  brain: BrainConfig;
   relays: RelayRoles;
   profile: ProfileConfig;
-  context: { messages: number };
   limits: { repliesPerRoomPerHour: number };
   state: StateConfig;
   transcript?: TranscriptConfig;
   eve?: EveConfig;
-  repos: RepoConfig[];
-  /** Named grants, by the key each was declared under. */
-  toolsets: Map<string, ToolsetConfig>;
-  /** How `isolation: "container"` runs things. Absent unless a toolset asks. */
-  container?: ContainerConfig;
   transports: TransportConfig[];
 }
 
@@ -259,7 +137,6 @@ export class ConfigError extends Error {
   }
 }
 
-const DEFAULT_CONTEXT_MESSAGES = 40;
 const DEFAULT_REPLIES_PER_HOUR = 20;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -353,92 +230,6 @@ function parseSigner(value: unknown): SignerConfig {
 
   throw new ConfigError(
     `identity.signer.type must be "nsec" or "bunker" (got ${JSON.stringify(type)})`,
-  );
-}
-
-function parseBrain(value: unknown): BrainConfig {
-  const brain = requireRecord(value, "brain");
-  const type = requireString(brain.type, "brain.type");
-
-  if (type === "echo") {
-    rejectUnknown(brain, ["type"], "brain");
-    return { type: "echo" };
-  }
-
-  if (type === "openai-compatible") {
-    // Checked before the generic unknown-key error, because this particular
-    // mistake — a key pasted into the config — deserves to be named.
-    if (brain.apiKey !== undefined)
-      throw new ConfigError(
-        "brain.apiKey is not an option — name an env var with brain.apiKeyEnv instead, so the key stays out of the config file",
-      );
-    rejectUnknown(
-      brain,
-      [
-        "type",
-        "baseUrl",
-        "model",
-        "apiKeyEnv",
-        "headerEnv",
-        "maxTokens",
-        "temperature",
-        "maxSteps",
-        "toolChoice",
-      ],
-      "brain",
-    );
-    const headerEnvRaw = brain.headerEnv;
-    let headerEnv: Record<string, string> | undefined;
-    if (headerEnvRaw !== undefined) {
-      const record = requireRecord(headerEnvRaw, "brain.headerEnv");
-      headerEnv = {};
-      for (const [header, envName] of Object.entries(record))
-        headerEnv[header] = requireString(envName, `brain.headerEnv.${header}`);
-    }
-    const baseUrl = requireString(brain.baseUrl, "brain.baseUrl");
-    try {
-      const parsed = new URL(baseUrl);
-      if (parsed.protocol !== "https:" && parsed.protocol !== "http:")
-        throw new Error("not http(s)");
-    } catch {
-      throw new ConfigError(`brain.baseUrl must be an http(s) URL: ${baseUrl}`);
-    }
-
-    // Rejected rather than coerced: a typo here silently changes whether the
-    // model is obliged to use the tool at all.
-    let toolChoice: "auto" | "required" | undefined;
-    if (brain.toolChoice !== undefined) {
-      if (brain.toolChoice !== "auto" && brain.toolChoice !== "required")
-        throw new ConfigError('brain.toolChoice must be "auto" or "required"');
-      toolChoice = brain.toolChoice;
-    }
-
-    if (brain.temperature !== undefined) {
-      if (typeof brain.temperature !== "number" || brain.temperature < 0)
-        throw new ConfigError("brain.temperature must be a number ≥ 0");
-    }
-
-    return {
-      type: "openai-compatible",
-      baseUrl,
-      model: requireString(brain.model, "brain.model"),
-      apiKeyEnv: optionalString(brain.apiKeyEnv, "brain.apiKeyEnv"),
-      headerEnv,
-      maxTokens:
-        brain.maxTokens === undefined
-          ? undefined
-          : requirePositiveInt(brain.maxTokens, "brain.maxTokens"),
-      maxSteps:
-        brain.maxSteps === undefined
-          ? undefined
-          : requirePositiveInt(brain.maxSteps, "brain.maxSteps"),
-      toolChoice,
-      temperature: brain.temperature as number | undefined,
-    };
-  }
-
-  throw new ConfigError(
-    `brain.type must be "openai-compatible" or "echo" (got ${JSON.stringify(type)})`,
   );
 }
 
@@ -548,201 +339,9 @@ function parseEve(value: unknown): EveConfig | undefined {
   return { host };
 }
 
-function parseRepos(value: unknown): RepoConfig[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new ConfigError("repos must be an array");
-  return value.map((entry, index) => {
-    const path = `repos[${index}]`;
-    const repo = requireRecord(entry, path);
-    rejectUnknown(repo, ["name", "path", "baseRef"], path);
-    return {
-      name: requireString(repo.name, `${path}.name`),
-      path: requireString(repo.path, `${path}.path`),
-      baseRef: optionalString(repo.baseRef, `${path}.baseRef`),
-    };
-  });
-}
-
-function parseContainer(value: unknown): ContainerConfig | undefined {
-  if (value === undefined) return undefined;
-  const raw = requireRecord(value, "container");
-  rejectUnknown(
-    raw,
-    ["runtime", "image", "network", "memory", "cpus", "pidsLimit"],
-    "container",
-  );
-
-  const runtime = optionalString(raw.runtime, "container.runtime") ?? "docker";
-  // An absolute path is accepted so an operator can name a runtime this does not
-  // know about — and so a test can point at one that does not exist and watch it
-  // fail loudly without needing a container runtime installed.
-  if (
-    !CONTAINER_RUNTIMES.includes(
-      runtime as (typeof CONTAINER_RUNTIMES)[number],
-    ) &&
-    !runtime.startsWith("/")
-  )
-    throw new ConfigError(
-      `container.runtime must be one of ${CONTAINER_RUNTIMES.join(", ")} or an absolute path (got ${JSON.stringify(runtime)})`,
-    );
-
-  const network = requireString(raw.network, "container.network");
-  if (!CONTAINER_NETWORKS.includes(network as ContainerNetwork))
-    throw new ConfigError(
-      `container.network must be one of ${CONTAINER_NETWORKS.join(", ")} — there is no domain allowlist, because a container CLI cannot enforce one (got ${JSON.stringify(network)})`,
-    );
-
-  return {
-    runtime,
-    image: requireString(raw.image, "container.image"),
-    network: network as ContainerNetwork,
-    memory: optionalString(raw.memory, "container.memory"),
-    cpus: optionalString(raw.cpus, "container.cpus"),
-    pidsLimit:
-      raw.pidsLimit === undefined
-        ? undefined
-        : requirePositiveInt(raw.pidsLimit, "container.pidsLimit"),
-  };
-}
-
-/** Does this grant list reach any `repo.*` tool? */
-function grantsExecution(toolset: ToolsetConfig): boolean {
-  return toolset.tools.some((grant) =>
-    KNOWN_TOOLS.filter((id) => id.startsWith("repo.")).some((id) =>
-      grantCovers(grant, id),
-    ),
-  );
-}
-
-function parseToolsets(
-  value: unknown,
-  repos: RepoConfig[],
-): Map<string, ToolsetConfig> {
-  const toolsets = new Map<string, ToolsetConfig>();
-  if (value === undefined) return toolsets;
-  const record = requireRecord(value, "toolsets");
-
-  for (const [name, entry] of Object.entries(record)) {
-    const path = `toolsets.${name}`;
-    const raw = requireRecord(entry, path);
-    rejectUnknown(
-      raw,
-      ["tools", "repos", "isolation", "execTimeoutMinutes"],
-      path,
-    );
-
-    const toolsRaw = raw.tools;
-    if (!Array.isArray(toolsRaw))
-      throw new ConfigError(`${path}.tools must be an array of tool ids`);
-    const tools = toolsRaw.map((tool, index) => {
-      const grant = requireString(tool, `${path}.tools[${index}]`);
-      // A grant that matches no tool that exists is a typo, and a typo here
-      // reads at runtime as a model that will not use its tools.
-      if (!KNOWN_TOOLS.some((id) => grantCovers(grant, id)))
-        throw new ConfigError(
-          `${path}.tools[${index}]: no tool matches ${JSON.stringify(grant)} — known tools are ${KNOWN_TOOLS.join(", ")}`,
-        );
-      return grant;
-    });
-
-    const isolationRaw = optionalString(raw.isolation, `${path}.isolation`);
-    if (
-      isolationRaw !== undefined &&
-      !ISOLATIONS.includes(isolationRaw as Isolation)
-    )
-      throw new ConfigError(
-        `${path}.isolation must be one of ${ISOLATIONS.join(", ")} (got ${JSON.stringify(isolationRaw)})`,
-      );
-    const isolation = isolationRaw as Isolation | undefined;
-
-    const reposRaw = raw.repos;
-    if (reposRaw !== undefined && !Array.isArray(reposRaw))
-      throw new ConfigError(`${path}.repos must be an array of repo names`);
-    const repoNames = (reposRaw ?? []).map((repo, index) => {
-      const repoName = requireString(repo, `${path}.repos[${index}]`);
-      if (!repos.some((declared) => declared.name === repoName))
-        throw new ConfigError(
-          `${path}.repos[${index}]: no repo named ${JSON.stringify(repoName)} is declared under \`repos\``,
-        );
-      return repoName;
-    });
-
-    const toolset: ToolsetConfig = {
-      name,
-      tools,
-      repos: repoNames,
-      isolation,
-      execTimeoutMinutes:
-        raw.execTimeoutMinutes === undefined
-          ? undefined
-          : requirePositiveInt(
-              raw.execTimeoutMinutes,
-              `${path}.execTimeoutMinutes`,
-            ),
-    };
-
-    // Running commands needs somewhere to run them and something to run them
-    // on. Both missing is the config that looks like it grants coding and
-    // grants a tool that refuses every call.
-    if (grantsExecution(toolset)) {
-      if (!toolset.isolation)
-        throw new ConfigError(
-          `${path} grants repo tools but names no \`isolation\` — say where the commands run`,
-        );
-      if (toolset.repos.length === 0)
-        throw new ConfigError(
-          `${path} grants repo tools but lists no \`repos\` — say what they may be run on`,
-        );
-    } else if (toolset.isolation || toolset.repos.length > 0) {
-      throw new ConfigError(
-        `${path} sets \`isolation\`/\`repos\` but grants no repo tools — add "repo.*" to \`tools\` or drop them`,
-      );
-    }
-
-    toolsets.set(name, toolset);
-  }
-
-  return toolsets;
-}
-
-/** The toolset a channel named, checked against what was declared. */
-function parseToolsetRef(
-  value: unknown,
-  path: string,
-  toolsets: Map<string, ToolsetConfig>,
-): string | undefined {
-  const name = optionalString(value, path);
-  if (name === undefined) return undefined;
-  if (!toolsets.has(name))
-    throw new ConfigError(
-      `${path}: no toolset named ${JSON.stringify(name)} is declared under \`toolsets\``,
-    );
-  return name;
-}
-
-function parseTransports(
-  value: unknown,
-  toolsets: Map<string, ToolsetConfig>,
-): TransportConfig[] {
+function parseTransports(value: unknown): TransportConfig[] {
   if (!Array.isArray(value) || value.length === 0)
     throw new ConfigError("transports must be a non-empty array");
-
-  /**
-   * Coding tools are private mail only.
-   *
-   * A NIP-29 group is whoever the relay lets in, and its membership can change
-   * without Hex hearing about it — so a room is not a set of people the way an
-   * allow-list is. Refused here rather than at the call, because a config that
-   * parses and then silently declines every command is the harder bug.
-   */
-  const refuseExecution = (name: string | undefined, path: string) => {
-    if (!name) return;
-    const toolset = toolsets.get(name);
-    if (toolset && grantsExecution(toolset))
-      throw new ConfigError(
-        `${path}: toolset ${JSON.stringify(name)} grants repo tools, which are NIP-17 only — a relay group's membership is the relay's to change`,
-      );
-  };
 
   return value.map((entry, index) => {
     const path = `transports[${index}]`;
@@ -750,7 +349,7 @@ function parseTransports(
     const type = requireString(transport.type, `${path}.type`);
 
     if (type === "nip-17") {
-      rejectUnknown(transport, ["type", "allow", "toolset"], path);
+      rejectUnknown(transport, ["type", "allow"], path);
       const allowRaw = transport.allow;
       if (!Array.isArray(allowRaw) || allowRaw.length === 0)
         throw new ConfigError(
@@ -758,27 +357,13 @@ function parseTransports(
         );
       return {
         type: "nip-17" as const,
-        toolset: parseToolsetRef(
-          transport.toolset,
-          `${path}.toolset`,
-          toolsets,
-        ),
         allow: allowRaw.map((who, i) => {
           const wherePeer = `${path}.allow[${i}]`;
-          // A bare pubkey is still the common case, and still means "this
-          // person, with whatever the transport grants".
           if (typeof who === "string")
             return { pubkey: parsePubkey(who, wherePeer) };
           const peer = requireRecord(who, wherePeer);
-          rejectUnknown(peer, ["pubkey", "toolset"], wherePeer);
-          return {
-            pubkey: parsePubkey(peer.pubkey, `${wherePeer}.pubkey`),
-            toolset: parseToolsetRef(
-              peer.toolset,
-              `${wherePeer}.toolset`,
-              toolsets,
-            ),
-          };
+          rejectUnknown(peer, ["pubkey"], wherePeer);
+          return { pubkey: parsePubkey(peer.pubkey, `${wherePeer}.pubkey`) };
         }),
       };
     }
@@ -787,13 +372,7 @@ function parseTransports(
       throw new ConfigError(
         `${path}.type must be "nip-29" or "nip-17" (got ${JSON.stringify(type)})`,
       );
-    rejectUnknown(transport, ["type", "groups", "autoJoin", "toolset"], path);
-    const groupDefault = parseToolsetRef(
-      transport.toolset,
-      `${path}.toolset`,
-      toolsets,
-    );
-    refuseExecution(groupDefault, `${path}.toolset`);
+    rejectUnknown(transport, ["type", "groups", "autoJoin"], path);
 
     const groupsRaw = transport.groups;
     if (!Array.isArray(groupsRaw) || groupsRaw.length === 0)
@@ -802,19 +381,12 @@ function parseTransports(
     const groups = groupsRaw.map((groupRaw, groupIndex) => {
       const groupPath = `${path}.groups[${groupIndex}]`;
       const group = requireRecord(groupRaw, groupPath);
-      rejectUnknown(group, ["relay", "id", "toolset"], groupPath);
-      const toolset = parseToolsetRef(
-        group.toolset,
-        `${groupPath}.toolset`,
-        toolsets,
-      );
-      refuseExecution(toolset, `${groupPath}.toolset`);
+      rejectUnknown(group, ["relay", "id"], groupPath);
       // A group id is only unique within its relay, so both are required and
       // the pair travels together everywhere downstream.
       return {
         relay: parseRelayList([group.relay], `${groupPath}.relay`)[0],
         id: requireString(group.id, `${groupPath}.id`),
-        toolset,
       };
     });
 
@@ -822,7 +394,7 @@ function parseTransports(
     if (typeof autoJoin !== "boolean")
       throw new ConfigError(`${path}.autoJoin must be a boolean`);
 
-    return { type: "nip-29" as const, groups, autoJoin, toolset: groupDefault };
+    return { type: "nip-29" as const, groups, autoJoin };
   });
 }
 
@@ -844,17 +416,12 @@ export function parseConfig(input: unknown): HexConfig {
       "identity",
       "instructions",
       "mentions",
-      "brain",
       "relays",
       "profile",
-      "context",
       "limits",
       "state",
       "transcript",
       "eve",
-      "repos",
-      "toolsets",
-      "container",
       "transports",
     ],
     "config",
@@ -862,21 +429,6 @@ export function parseConfig(input: unknown): HexConfig {
 
   const identity = requireRecord(raw.identity, "identity");
   rejectUnknown(identity, ["signer"], "identity");
-
-  const contextRaw = raw.context;
-  const context =
-    contextRaw === undefined
-      ? { messages: DEFAULT_CONTEXT_MESSAGES }
-      : (() => {
-          const record = requireRecord(contextRaw, "context");
-          rejectUnknown(record, ["messages"], "context");
-          return {
-            messages:
-              record.messages === undefined
-                ? DEFAULT_CONTEXT_MESSAGES
-                : requirePositiveInt(record.messages, "context.messages"),
-          };
-        })();
 
   const limitsRaw = raw.limits;
   const limits =
@@ -900,50 +452,21 @@ export function parseConfig(input: unknown): HexConfig {
   let state: StateConfig = {};
   if (stateRaw !== undefined) {
     const record = requireRecord(stateRaw, "state");
-    rejectUnknown(record, ["home", "sessionIdleMinutes"], "state");
-    state = {
-      home: optionalString(record.home, "state.home"),
-      sessionIdleMinutes:
-        record.sessionIdleMinutes === undefined
-          ? undefined
-          : requirePositiveInt(
-              record.sessionIdleMinutes,
-              "state.sessionIdleMinutes",
-            ),
-    };
+    rejectUnknown(record, ["home"], "state");
+    state = { home: optionalString(record.home, "state.home") };
   }
-
-  // Repos first: a toolset names them, and a toolset that names one that does
-  // not exist should say so rather than failing on the first command.
-  const repos = parseRepos(raw.repos);
-  const toolsets = parseToolsets(raw.toolsets, repos);
-  const container = parseContainer(raw.container);
-
-  // A toolset that names an isolation with nothing configured for it would parse
-  // and then fail every command — the same class of silent misconfiguration as a
-  // typo'd tool id, and caught in the same place.
-  for (const toolset of toolsets.values())
-    if (toolset.isolation === "container" && !container)
-      throw new ConfigError(
-        `toolsets.${toolset.name} asks for container isolation but there is no top-level \`container\` section — name the image it runs in`,
-      );
 
   const config: HexConfig = {
     identity: { signer: parseSigner(identity.signer) },
     instructions: optionalString(raw.instructions, "instructions"),
     mentions: parseMentions(raw.mentions),
-    brain: parseBrain(raw.brain),
     relays: parseRelays(raw.relays),
     profile: parseProfile(raw.profile),
-    context,
     limits,
     state,
     transcript: parseTranscript(raw.transcript),
     eve: parseEve(raw.eve),
-    repos,
-    toolsets,
-    container,
-    transports: parseTransports(raw.transports, toolsets),
+    transports: parseTransports(raw.transports),
   };
 
   // `relays.publish` cannot be empty — `parseRelayList` already refused that —

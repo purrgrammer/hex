@@ -279,6 +279,27 @@ describe("EveTranscript", () => {
     second.close();
   });
 
+  it("does not ship the same head twice", async () => {
+    // Eve announces one state from more than one direction — `session.started`
+    // then `turn.started`, `session.completed` then the close on the way out —
+    // and a head is addressable, so a republished duplicate changes nothing a
+    // reader can see and costs a seal and a wrap per recipient.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    for (const event of RUN) await pub.handle(event, ++index);
+    await pub.close("done");
+
+    const heads = sent
+      .filter((s) => s.rumor.kind === 31777)
+      .map((s) => JSON.stringify(s.rumor.tags));
+    expect(new Set(heads).size).toBe(heads.length);
+
+    store.close();
+  });
+
   it("ignores an event type it has never heard of", async () => {
     const store = HexStore.open(agentHome(home, AGENT).db);
     const { impl, sent } = sink();

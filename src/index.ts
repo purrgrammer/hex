@@ -4,7 +4,6 @@ export {
   ConfigError,
   type HexConfig,
   type SignerConfig,
-  type BrainConfig,
   type RelayRoles,
   type ProfileConfig,
   type TransportConfig,
@@ -57,13 +56,6 @@ export {
   type Inbound,
   type Transport,
 } from "./transports/types.js";
-export type {
-  Brain,
-  BrainRequest,
-  ContextMessage,
-  TurnOutcome,
-} from "./brain/types.js";
-export { EchoBrain } from "./brain/echo.js";
 export {
   RESPOND_TOOL,
   REACT_TOOL,
@@ -86,39 +78,16 @@ export {
   MAX_QUERY_LIMIT,
   type KnowledgeOptions,
 } from "./tools/knowledge.js";
-export { buildSystemPrompt } from "./prompt.js";
 export {
   HexStore,
   agentHome,
   expandHome,
   DEFAULT_HOME,
   type AgentHome,
-  type StoredSession,
-  type StoredMessage,
+  type StoredTranscript,
 } from "./store.js";
-export {
-  SessionTracker,
-  DEFAULT_SESSION_IDLE_SECS,
-  type SessionOptions,
-} from "./sessions.js";
 export { RoomTools, type RoomToolsOptions } from "./tools/room-tools.js";
-export { ConsoleTools } from "./tools/console-tools.js";
-export { createBrain, type CreateBrainOptions } from "./brain/create.js";
-export {
-  OpenAICompatibleBrain,
-  completionsUrl,
-  buildMessages,
-  BRAIN_TIMEOUT_MS,
-  type OpenAICompatibleOptions,
-} from "./brain/openai-compatible.js";
 export { loadEnvFile, type EnvFileResult } from "./env-file.js";
-export {
-  runAgent,
-  ACK_EMOJI,
-  type AgentOptions,
-  type RunningAgent,
-} from "./agent.js";
-export { RoomContext, type ContextOptions } from "./context.js";
 export {
   Nip17Transport,
   KIND_GIFT_WRAP,

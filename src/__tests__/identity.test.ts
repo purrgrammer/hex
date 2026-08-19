@@ -11,7 +11,6 @@ import { parseConfig } from "../config.js";
 
 const config = parseConfig({
   identity: { signer: { type: "nsec", env: "HEX_NSEC" } },
-  brain: { type: "echo" },
   relays: {
     read: ["wss://read.example/", "wss://both.example/"],
     publish: ["wss://both.example/", "wss://write.example/"],

@@ -1,10 +1,10 @@
 /**
- * What a brain is allowed to DO, as opposed to what it returns.
+ * What a runtime is allowed to DO, as opposed to what it returns.
  *
- * Delivery is a tool call. The brain decides to speak by calling `chat.respond`;
- * the runtime binds that call to the room the message came from and hands it to
+ * Delivery is a tool call. A runtime decides to speak by calling `chat.respond`;
+ * this package binds that call to the room the message came from and hands it to
  * whichever transport owns that room. Neither side knows the other's protocol —
- * the brain never sees a relay, and the transport never sees a model.
+ * the runtime never sees a relay, and the transport never sees a model.
  *
  * Tools are named `<namespace>.<action>`, matching the in-app assistant's
  * registry: `grimoire.*` acts on the application and its docs, `nostr.*` on the
@@ -12,14 +12,13 @@
  * published agent definition names tools by them — so renaming one breaks
  * anything that referred to it.
  *
- * The seam matters beyond tidiness: it is how a sandboxed coding agent will get
- * to run anything later, so every call is attributable to a room and a requesting
- * pubkey, and bounded, from the start.
+ * The seam matters beyond tidiness: every call is attributable to a room and a
+ * requesting pubkey, so a runtime driving these tools cannot act unattributably.
  */
 
 import type { Room } from "../transports/types.js";
 
-export type ToolNamespace = "chat" | "grimoire" | "nostr" | "repo";
+export type ToolNamespace = "chat" | "grimoire" | "nostr";
 
 export interface ToolSpec {
   /** Canonical id, `<namespace>.<action>`. */
@@ -38,7 +37,7 @@ export interface ToolCall {
 
 export interface ToolResult {
   ok: boolean;
-  /** What the brain is told came of it. Fed back as the tool's result. */
+  /** What the caller is told came of it. Fed back as the tool's result. */
   output: string;
 }
 
@@ -62,11 +61,6 @@ export const HELP_TOOL = "grimoire.help";
 export const REQ_TOOL = "nostr.req";
 /** A bech32 entity turned into the person or event it names. */
 export const RESOLVE_TOOL = "nostr.resolve";
-/** A command, in this session's worktree. Writes, builds, runs tests. */
-export const EXEC_TOOL = "repo.exec";
-/** A whole file, written in one call — a shell heredoc is a bad text editor. */
-export const WRITE_TOOL = "repo.write";
-
 /**
  * Every tool id that exists, so config can refuse one that does not.
  *
@@ -80,8 +74,6 @@ export const KNOWN_TOOLS: readonly string[] = [
   HELP_TOOL,
   REQ_TOOL,
   RESOLVE_TOOL,
-  EXEC_TOOL,
-  WRITE_TOOL,
 ];
 
 /**

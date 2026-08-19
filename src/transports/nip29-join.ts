@@ -2,7 +2,7 @@
  * Joining a NIP-29 group.
  *
  * Split out from the transport because it is the one part of NIP-29 that writes
- * before Hex has read anything: `hex run` calls it at startup for every group
+ * before Hex has read anything: `hex join --auto` does it for every group
  * configured with `autoJoin`, and `hex join` calls it on its own.
  *
  * Everything here is addressed to ONE relay — the group's own. A kind 9021 sent

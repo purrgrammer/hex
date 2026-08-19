@@ -180,7 +180,7 @@ export class ReplyGate {
   }
 
   /**
-   * Release the room. `published` is false when the brain stayed silent or the
+   * Release the room. `published` is false when the runtime stayed silent or the
    * send failed — a reply that never landed does not spend the rate limit.
    */
   end(inbound: Inbound, published: boolean): void {

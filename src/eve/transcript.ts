@@ -157,15 +157,13 @@ export class EveTranscript {
 
     switch (event.type) {
       case "session.started":
-        this.record.status = "active";
-        await this.head();
+        await this.status("active");
         break;
 
       case "turn.started":
         this.record.turn += 1;
         this.coalescer.startTurn(this.record.turn);
-        this.record.status = "active";
-        await this.head();
+        await this.status("active");
         break;
 
       case "message.received": {
@@ -393,11 +391,21 @@ export class EveTranscript {
   private async status(status: SessionStatus): Promise<void> {
     const terminal =
       status === "done" || status === "error" || status === "aborted";
-    if (this.record.status === status && !terminal) return;
     this.record.status = status;
     this.record.endedAt = terminal ? Math.floor(Date.now() / 1000) : undefined;
     await this.head();
   }
+
+  /**
+   * The last head actually published, as its tags.
+   *
+   * A head is addressable, so republishing an identical one changes nothing a
+   * reader can see and costs a seal, a wrap and a relay round trip per recipient.
+   * Eve announces the same state from more than one direction — `session.started`
+   * then `turn.started`, `session.completed` then a close on the way out — so
+   * without this every session ships its head twice.
+   */
+  private lastHead?: string;
 
   private async head(title?: string): Promise<void> {
     this.options.store.saveTranscript(this.record);
@@ -432,6 +440,10 @@ export class EveTranscript {
         alt: `Agent session: ${title ?? this.sessionId} (${this.record.status}, ${this.record.seq} turns)`,
       },
     );
+
+    const fingerprint = JSON.stringify(rumor.tags);
+    if (fingerprint === this.lastHead) return;
+    this.lastHead = fingerprint;
     await this.send(rumor, "head");
   }
 

@@ -229,12 +229,12 @@ describe("RoomTools.call", () => {
  * another conversation, or invented it — must not reach the thing behind it.
  */
 describe("grants at the call, not just the listing", () => {
-  /** A repo host that would happily run something if it were ever reached. */
+  /** A read host that would happily answer if it were ever reached. */
   const reachable = {
     list: () => [
-      { name: "repo.exec", description: "run", parameters: {}, prompt: "" },
+      { name: "nostr.req", description: "query", parameters: {}, prompt: "" },
     ],
-    handles: (name: string) => name === "repo.exec",
+    handles: (name: string) => name === "nostr.req",
     call: async () => ({ ok: true, output: "RAN" }),
   };
 
@@ -242,27 +242,27 @@ describe("grants at the call, not just the listing", () => {
     const tools = new RoomTools({
       transport: transport(),
       incoming: INBOUND,
-      repo: reachable as never,
+      knowledge: reachable as never,
       grants: ["grimoire.*"],
     });
 
-    expect(tools.list().map((spec) => spec.name)).not.toContain("repo.exec");
-    const result = await tools.call({ name: "repo.exec", arguments: {} });
+    expect(tools.list().map((spec) => spec.name)).not.toContain("nostr.req");
+    const result = await tools.call({ name: "nostr.req", arguments: {} });
     expect(result.ok).toBe(false);
     expect(result.output).not.toContain("RAN");
     expect(result.output).toMatch(/no tool called/);
   });
 
   it("refuses it by wire name too", async () => {
-    // `repo_exec` is what a provider actually sends; resolving the dot back
-    // must not be a way around the grant.
+    // `nostr_req` is what a provider actually sends; resolving the dot back must
+    // not be a way around the grant.
     const tools = new RoomTools({
       transport: transport(),
       incoming: INBOUND,
-      repo: reachable as never,
+      knowledge: reachable as never,
       grants: [],
     });
-    const result = await tools.call({ name: "repo_exec", arguments: {} });
+    const result = await tools.call({ name: "nostr_req", arguments: {} });
     expect(result.ok).toBe(false);
     expect(result.output).not.toContain("RAN");
   });
@@ -287,10 +287,10 @@ describe("grants at the call, not just the listing", () => {
     const tools = new RoomTools({
       transport: transport(),
       incoming: INBOUND,
-      repo: reachable as never,
-      grants: ["repo.*"],
+      knowledge: reachable as never,
+      grants: ["nostr.*"],
     });
-    const result = await tools.call({ name: "repo.exec", arguments: {} });
+    const result = await tools.call({ name: "nostr.req", arguments: {} });
     expect(result.output).toBe("RAN");
   });
 });

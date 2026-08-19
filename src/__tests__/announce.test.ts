@@ -18,7 +18,6 @@ const signer = PrivateKeySigner.fromKey(key);
 function configFor(url: string, about = "grimoire assistant") {
   return parseConfig({
     identity: { signer: { type: "nsec", env: "HEX_NSEC" } },
-    brain: { type: "echo" },
     relays: { read: [url], publish: [url], dm: [url] },
     profile: { publish: true, name: "Hex", about },
     transports: [{ type: "nip-29", groups: [{ relay: url, id: "dev" }] }],
@@ -120,7 +119,6 @@ describe("announceIdentity", () => {
     // First run announces to `stale` alone.
     const first = parseConfig({
       identity: { signer: { type: "nsec", env: "HEX_NSEC" } },
-      brain: { type: "echo" },
       relays: { read: [stale.url], publish: [stale.url], dm: [stale.url] },
       profile: { publish: true, name: "Hex" },
       transports: [{ type: "nip-29", groups: [{ relay: stale.url, id: "d" }] }],
@@ -133,7 +131,6 @@ describe("announceIdentity", () => {
     const fresh = await startMockRelay({ kind: "normal" });
     const moved = parseConfig({
       identity: { signer: { type: "nsec", env: "HEX_NSEC" } },
-      brain: { type: "echo" },
       relays: { read: [stale.url], publish: [fresh.url], dm: [fresh.url] },
       profile: { publish: true, name: "Hex" },
       transports: [{ type: "nip-29", groups: [{ relay: fresh.url, id: "d" }] }],
