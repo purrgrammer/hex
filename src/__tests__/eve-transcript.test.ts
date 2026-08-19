@@ -635,6 +635,65 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("counts a step's tokens even when the step publishes nothing", async () => {
+    /**
+     * Seen live: a session reporting 0 in / 0 out and 0.200693 USD. `flush`
+     * returns early when a step produced nothing publishable — its words went
+     * out with an earlier turn — and the usage handed to it was discarded, while
+     * the cost had already been added. Two numbers describing different things.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    // A step that says something, and a step that says nothing new.
+    await pub.handle(
+      { type: "message.completed", data: { message: "hello" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "step.completed",
+        data: {
+          finishReason: "stop",
+          turnId: "turn_0",
+          usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0 },
+        },
+      },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "step.completed",
+        data: {
+          finishReason: "stop",
+          turnId: "turn_0",
+          usage: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 50 },
+        },
+      },
+      ++index,
+    );
+    // The head republishes on a status change, so the totals reach a reader at
+    // the turn boundary rather than after every step.
+    await pub.handle({ type: "turn.completed", data: { turnId: "turn_0" } }, ++index);
+
+    const head = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 31777)
+      .at(-1)!;
+    // Both steps counted, and counted once each.
+    expect(head.tags.find((t) => t[0] === "usage")).toEqual([
+      "usage",
+      "300",
+      "30",
+      "50",
+      "0",
+    ]);
+    store.close();
+  });
+
   it("gives a compaction its own turn rather than folding it into a reply", async () => {
     // It is not something the agent said — it is something that happened to the
     // conversation, and a reader needs to see where it stopped remembering.

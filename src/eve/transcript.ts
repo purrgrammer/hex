@@ -577,6 +577,24 @@ export class EveTranscript {
          * parsing it back to add is exact at six decimal places for any bill a
          * session can run up.
          */
+        /**
+         * The session's totals belong to the STEP, not to the turn that carries
+         * them.
+         *
+         * `flush` returns early when a step produced nothing publishable — its
+         * words already went out with an earlier turn — and the usage handed to
+         * it went in the bin, while the cost a few lines above had already been
+         * added. So a session could report two hundred milli-dollars against
+         * zero tokens, which is not a rounding error but two numbers describing
+         * different things.
+         */
+        if (usage) {
+          this.record.inTokens += usage.input;
+          this.record.outTokens += usage.output;
+          this.record.cacheRead += usage.cacheRead;
+          this.record.cacheWrite += usage.cacheWrite;
+        }
+
         const spent = cost ?? (estimate ? Number(estimate.amount) : undefined);
         if (spent !== undefined) {
           this.record.cost = (Number(this.record.cost ?? "0") + spent).toFixed(
@@ -969,12 +987,9 @@ export class EveTranscript {
 
     this.record.seq = next;
     this.record.prev = rumor.id;
-    if (extra.usage) {
-      this.record.inTokens += extra.usage.input;
-      this.record.outTokens += extra.usage.output;
-      this.record.cacheRead += extra.usage.cacheRead;
-      this.record.cacheWrite += extra.usage.cacheWrite;
-    }
+    // Session totals are accumulated at the step that reported them; a turn
+    // carries its own `usage` tag and adds nothing here, or every step that
+    // published something would be counted twice.
     this.options.store.saveTranscript(this.record);
   }
 
