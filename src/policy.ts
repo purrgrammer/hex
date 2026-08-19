@@ -16,9 +16,20 @@ export type SkipReason =
   | "before-start"
   | "duplicate"
   | "in-flight"
-  | "rate-limited";
+  | "rate-limited"
+  /**
+   * Not a refusal — an instruction to abandon what is running and do this
+   * instead. The only reason that asks the caller to ACT rather than to stop.
+   */
+  | "interrupt";
 
 export type Verdict = { reply: true } | { reply: false; reason: SkipReason };
+
+/** Who is holding a room, and with which message. */
+export interface TurnHolder {
+  id: string;
+  author: string;
+}
 
 export interface ReplyGateOptions {
   selfPubkey: string;
@@ -95,7 +106,8 @@ export class ReplyGate {
     ReplyGateOptions;
   /** Insertion-ordered, so trimming drops the oldest ids first. */
   private readonly seen = new Set<string>();
-  private readonly inFlight = new Set<string>();
+  /** Room key -> who is holding it. The holder's identity decides interrupts. */
+  private readonly inFlight = new Map<string, TurnHolder>();
   /** Room key -> reply timestamps (unix seconds) inside the current hour. */
   private readonly replies = new Map<string, number[]>();
 
@@ -126,7 +138,8 @@ export class ReplyGate {
       return { reply: false, reason: "before-start" };
 
     const key = roomKey(inbound.room);
-    if (this.inFlight.has(key)) return { reply: false, reason: "in-flight" };
+    const holder = this.inFlight.get(key);
+    if (holder) return this.whileBusy(inbound, holder);
 
     if (this.recentReplies(key).length >= this.options.repliesPerRoomPerHour)
       return { reply: false, reason: "rate-limited" };
@@ -134,9 +147,52 @@ export class ReplyGate {
     return { reply: true };
   }
 
+  /**
+   * Someone wrote while a turn was already running.
+   *
+   * In a private message that means "not that — this": there is nobody else in
+   * the conversation and no other reason to type, so the running turn is
+   * abandoned and this message takes over. A relay group is different — it has
+   * other conversations in it, and every mention during a turn is not an
+   * instruction to drop what you are doing — so a group keeps waiting.
+   *
+   * Same author only. `roomKey` covers groups too, and Bob saying hello must
+   * never kill the build Alice asked for.
+   */
+  private whileBusy(inbound: Inbound, holder: TurnHolder): Verdict {
+    const isDm = inbound.room.transport === "nip-17";
+    return isDm && holder.author === inbound.author
+      ? { reply: false, reason: "interrupt" }
+      : { reply: false, reason: "in-flight" };
+  }
+
+  /** Who is working in this room, if anyone. */
+  holderFor(inbound: Inbound): TurnHolder | undefined {
+    return this.inFlight.get(roomKey(inbound.room));
+  }
+
+  /**
+   * Admit a message that has already interrupted a turn.
+   *
+   * It cannot go back through `consider()` — its id is in `seen`, which is
+   * correct and must stay that way, or a second copy from another relay would
+   * cancel twice. The rate limit is deliberately not re-checked either: the turn
+   * this message replaced published nothing, so it spent no budget, and refusing
+   * the message someone just used to stop the agent would lose it in the exact
+   * place this whole mechanism exists to prevent.
+   */
+  steer(inbound: Inbound): Verdict {
+    return this.inFlight.has(roomKey(inbound.room))
+      ? { reply: false, reason: "in-flight" }
+      : { reply: true };
+  }
+
   /** Claim the room. One reply in flight per room, so a stall cannot fan out. */
   begin(inbound: Inbound): void {
-    this.inFlight.add(roomKey(inbound.room));
+    this.inFlight.set(roomKey(inbound.room), {
+      id: inbound.id,
+      author: inbound.author,
+    });
   }
 
   /**

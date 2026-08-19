@@ -15,6 +15,7 @@ import type { KnowledgeTools } from "./knowledge.js";
 import type { RepoTools } from "./repo-tools.js";
 import {
   canonicalId,
+  EXEC_TOOL,
   filterTools,
   REACT_TOOL,
   RESPOND_TOOL,
@@ -56,6 +57,14 @@ export interface RoomToolsOptions {
    * with no toolset in config gets.
    */
   grants?: string[];
+  /**
+   * The turn was abandoned.
+   *
+   * Speaking is refused once it fires — a reply that lands after the cancel
+   * notice answers a question the person already withdrew — and it is handed to
+   * the repo tools so a running command actually dies.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -67,6 +76,16 @@ export interface RoomToolsOptions {
  */
 const DEFAULT_MAX_RESPONSES = 1;
 
+/** The one detail worth keeping per call, for the cancel notice. */
+function describeCall(
+  name: string,
+  args: Record<string, unknown>,
+): string | undefined {
+  const field = name === EXEC_TOOL ? args.command : args.path;
+  if (typeof field !== "string") return undefined;
+  return field.length > 120 ? `${field.slice(0, 120)}…` : field;
+}
+
 export class RoomTools implements ToolHost {
   private responses = 0;
   private didDeliver = false;
@@ -74,6 +93,13 @@ export class RoomTools implements ToolHost {
   readonly deliveredIds: string[] = [];
   /** What was said under each id, for the conversation record. */
   readonly deliveredText = new Map<string, string>();
+  /**
+   * What this turn tried, in order.
+   *
+   * Read by whoever cancels the turn, so the notice can say what was actually
+   * happening rather than asking a model to remember.
+   */
+  readonly activity: { name: string; detail?: string }[] = [];
 
   constructor(private readonly options: RoomToolsOptions) {}
 
@@ -163,8 +189,10 @@ export class RoomTools implements ToolHost {
           .join(", ")}`,
       };
 
+    this.activity.push({ name, detail: describeCall(name, call.arguments) });
+
     if (this.options.repo?.handles(name))
-      return this.options.repo.call(name, call.arguments);
+      return this.options.repo.call(name, call.arguments, this.options.signal);
 
     if (this.options.knowledge?.handles(name))
       return this.options.knowledge.call(name, call.arguments);
@@ -186,6 +214,11 @@ export class RoomTools implements ToolHost {
   }
 
   private async respond(args: Record<string, unknown>): Promise<ToolResult> {
+    // Checked before the transport, not after: a reply that lands once the
+    // cancel notice has gone out answers a question already withdrawn.
+    if (this.options.signal?.aborted)
+      return { ok: false, output: "cancelled — nothing was sent" };
+
     const text = typeof args.text === "string" ? args.text.trim() : "";
     if (!text)
       return {
@@ -233,6 +266,9 @@ export class RoomTools implements ToolHost {
   }
 
   private async react(args: Record<string, unknown>): Promise<ToolResult> {
+    if (this.options.signal?.aborted)
+      return { ok: false, output: "cancelled — nothing was sent" };
+
     const emoji = typeof args.emoji === "string" ? args.emoji.trim() : "";
     if (!emoji) return { ok: false, output: "react needs a non-empty `emoji`" };
     if (!this.options.transport.react)

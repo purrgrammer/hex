@@ -76,6 +76,17 @@ export function completionsUrl(baseUrl: string): string {
   return new URL("chat/completions", base).toString();
 }
 
+/**
+ * One signal from two reasons to stop.
+ *
+ * `AbortSignal.any` is available from Node 20.3 and this package requires ≥24,
+ * so no fallback — but it is wrapped rather than inlined because a request with
+ * no turn signal must keep exactly its old behaviour.
+ */
+function withTurnSignal(timeout: AbortSignal, turn?: AbortSignal): AbortSignal {
+  return turn ? AbortSignal.any([timeout, turn]) : timeout;
+}
+
 interface ToolCallWire {
   id?: string;
   type?: string;
@@ -173,8 +184,24 @@ export class OpenAICompatibleBrain implements Brain {
     const tools = toWireTools(request.tools.list());
     const maxSteps = this.options.maxSteps ?? DEFAULT_MAX_STEPS;
 
+    /** Abandoned mid-turn. Reported as an outcome, never as a failure. */
+    const cancelled = (): TurnOutcome => ({
+      delivered: request.tools.delivered,
+      note: "cancelled",
+    });
+
     for (let step = 0; step < maxSteps; step += 1) {
-      const choice = await this.complete(messages, tools);
+      if (request.signal?.aborted) return cancelled();
+
+      let choice: ChatMessage;
+      try {
+        choice = await this.complete(messages, tools, request.signal);
+      } catch (error) {
+        // An aborted fetch is not a broken provider. Distinguishing them keeps
+        // the agent's FAILED line meaning "something is wrong".
+        if (request.signal?.aborted) return cancelled();
+        throw error;
+      }
       const calls = choice.tool_calls ?? [];
 
       if (calls.length === 0) {
@@ -232,7 +259,13 @@ export class OpenAICompatibleBrain implements Brain {
           tool_call_id: call.id ?? name,
           content: result.output,
         });
+
+        // A model that asked for three things in one step must not get the last
+        // two run after someone said stop.
+        if (request.signal?.aborted) break;
       }
+
+      if (request.signal?.aborted) return cancelled();
 
       // Answering is terminal. Continuing after a delivered reply spends round
       // trips to produce, at best, prose nobody will read — and at worst a second
@@ -253,6 +286,7 @@ export class OpenAICompatibleBrain implements Brain {
   private async complete(
     messages: ChatMessage[],
     tools: ReturnType<typeof toWireTools>,
+    signal?: AbortSignal,
   ): Promise<ChatMessage> {
     const fetchImpl = this.options.fetchImpl ?? fetch;
     const url = completionsUrl(this.options.baseUrl);
@@ -282,7 +316,12 @@ export class OpenAICompatibleBrain implements Brain {
             ? { temperature: this.options.temperature }
             : {}),
         }),
-        signal: AbortSignal.timeout(this.options.timeoutMs ?? BRAIN_TIMEOUT_MS),
+        // The timeout bounds a slow provider; the turn's signal bounds someone
+        // who changed their mind. Either one ends this request.
+        signal: withTurnSignal(
+          AbortSignal.timeout(this.options.timeoutMs ?? BRAIN_TIMEOUT_MS),
+          signal,
+        ),
       });
     } catch (error) {
       // The URL is in the message; the key never is.

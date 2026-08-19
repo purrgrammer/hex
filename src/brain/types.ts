@@ -21,6 +21,14 @@ export interface BrainRequest {
    * relay, a protocol, or a room other than the one it was given.
    */
   tools: ToolHost;
+  /**
+   * The turn was abandoned — stop asking the model and stop calling tools.
+   *
+   * What already reached the room is not undone, and neither is anything a
+   * command already wrote to disk. Cancelling stops future work; it is not a
+   * rollback, and nothing here pretends otherwise.
+   */
+  signal?: AbortSignal;
 }
 
 export interface TurnOutcome {

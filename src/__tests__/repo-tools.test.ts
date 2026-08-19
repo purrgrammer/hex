@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { getEventListeners } from "node:events";
 import { HexStore } from "../store.js";
 import { WorktreeManager, worktreeName } from "../worktree.js";
 import { RepoTools, truncateOutput, scrubEnv } from "../tools/repo-tools.js";
@@ -227,6 +228,73 @@ describe("a worktree deleted by hand", () => {
     expect(result.ok).toBe(true);
     expect(result.output).toContain(worktreeName("gone-1"));
   }, 30_000);
+});
+
+describe("cancelling a command", () => {
+  /**
+   * Without this the 15-minute ceiling makes cancellation cosmetic: the room
+   * would be released while the command carried on burning the machine.
+   */
+  it("kills a running command and its whole process group", async () => {
+    const controller = new AbortController();
+    const marker = join(root, "cancel-survivor.txt");
+    const pending = tools("cancel-1", ["grimoire"], 60_000).call(
+      EXEC_TOOL,
+      { command: `(sleep 2; echo alive > ${marker}) & sleep 60` },
+      controller.signal,
+    );
+
+    // Long enough that the command is genuinely running, short enough that the
+    // backgrounded child has not written yet.
+    await new Promise((done) => setTimeout(done, 400));
+    const started = Date.now();
+    controller.abort();
+    const result = await pending;
+
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(result.ok).toBe(false);
+    expect(result.output).toMatch(/cancelled/);
+    // Said differently from a timeout, and honest about the worktree.
+    expect(result.output).toMatch(/still in the worktree/);
+
+    await new Promise((done) => setTimeout(done, 2_500));
+    expect(existsSync(marker)).toBe(false);
+  }, 30_000);
+
+  it("never spawns anything for a request already withdrawn", async () => {
+    const marker = join(root, "never-ran.txt");
+    const result = await tools("cancel-2").call(
+      EXEC_TOOL,
+      { command: `echo ran > ${marker}` },
+      AbortSignal.abort(),
+    );
+    expect(result.ok).toBe(false);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("refuses a write rather than truncating a file halfway", async () => {
+    const result = await tools("cancel-3").call(
+      WRITE_TOOL,
+      { path: "half.ts", content: "x" },
+      AbortSignal.abort(),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.output).toMatch(/cancelled/);
+    expect(store.worktreeFor("cancel-3", "grimoire")).toBeUndefined();
+  });
+
+  it("leaves no listener on a signal that outlives the command", async () => {
+    // The signal belongs to the turn and outlives every command in it, so one
+    // listener left per call accumulates for the life of the conversation.
+    const controller = new AbortController();
+    for (let i = 0; i < 3; i += 1)
+      await tools("cancel-4").call(
+        EXEC_TOOL,
+        { command: "true" },
+        controller.signal,
+      );
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  }, 20_000);
 });
 
 describe("repo.write", () => {

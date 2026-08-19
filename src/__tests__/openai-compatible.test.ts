@@ -590,3 +590,107 @@ describe("createBrain", () => {
     expect(config.brain.maxSteps).toBe(6);
   });
 });
+
+describe("cancelling a turn", () => {
+  it("stops before asking the model when it is already cancelled", async () => {
+    // No provider is started: reaching the network at all would fail the test.
+    const { tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: "http://127.0.0.1:1/v1",
+      model: "some-model",
+    });
+
+    const outcome = await brain.turn(
+      requestWith(tools, { signal: AbortSignal.abort() }),
+    );
+    expect(outcome.note).toBe("cancelled");
+    expect(outcome.delivered).toBe(false);
+  });
+
+  it("hands the fetch a signal that fires when the turn is cancelled", async () => {
+    // `AbortSignal.any` being constructed is not proof it was wired; this
+    // observes the signal the request actually received.
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      seen = init?.signal ?? undefined;
+      controller.abort();
+      // Reject the way an aborted fetch does, so the loop takes the abort path.
+      throw new Error("aborted");
+    }) as unknown as typeof fetch;
+
+    const { tools } = collector();
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: "http://provider.invalid/v1",
+      model: "some-model",
+      fetchImpl,
+    });
+
+    const outcome = await brain.turn(
+      requestWith(tools, { signal: controller.signal }),
+    );
+    expect(seen?.aborted).toBe(true);
+    // A cancel is reported as an outcome, never as a thrown failure.
+    expect(outcome.note).toBe("cancelled");
+  });
+
+  it("does not run the rest of a batch after a cancel", async () => {
+    // A model can ask for three things in one step. Two of them must not run
+    // after someone said stop.
+    const controller = new AbortController();
+    const ran: string[] = [];
+    const host = {
+      room: ROOM,
+      requestedBy: "b".repeat(64),
+      delivered: false,
+      list: () => [
+        {
+          name: "grimoire.help",
+          description: "d",
+          parameters: {},
+          prompt: "p",
+        },
+      ],
+      call: async (call: { name: string }) => {
+        ran.push(call.name);
+        controller.abort();
+        return { ok: true, output: "done" };
+      },
+    };
+
+    const threeCalls = {
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [1, 2, 3].map((n) => ({
+              id: `c${n}`,
+              type: "function",
+              function: { name: "grimoire_help", arguments: "{}" },
+            })),
+          },
+        },
+      ],
+    };
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify(threeCalls), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    const brain = new OpenAICompatibleBrain({
+      baseUrl: "http://provider.invalid/v1",
+      model: "some-model",
+      fetchImpl,
+    });
+
+    const outcome = await brain.turn(
+      requestWith(host as never, { signal: controller.signal }),
+    );
+    // The wire name, because resolving it back to the canonical id is the
+    // host's job and this fake host is standing in for one.
+    expect(ran).toEqual(["grimoire_help"]);
+    expect(outcome.note).toBe("cancelled");
+  });
+});

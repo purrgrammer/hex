@@ -151,10 +151,14 @@ export class RepoTools {
     return name === EXEC_TOOL || name === WRITE_TOOL;
   }
 
-  async call(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  async call(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
     try {
-      if (name === EXEC_TOOL) return await this.exec(args);
-      if (name === WRITE_TOOL) return await this.write(args);
+      if (name === EXEC_TOOL) return await this.exec(args, signal);
+      if (name === WRITE_TOOL) return await this.write(args, signal);
       return { ok: false, output: `repo tools do not handle ${name}` };
     } catch (error) {
       return {
@@ -174,7 +178,10 @@ export class RepoTools {
     );
   }
 
-  private async exec(args: Record<string, unknown>): Promise<ToolResult> {
+  private async exec(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
     const command = typeof args.command === "string" ? args.command.trim() : "";
     if (!command) return { ok: false, output: "exec needs a `command`" };
 
@@ -196,9 +203,17 @@ export class RepoTools {
     );
 
     const timeout = this.options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
-    const result = await runCommand(command, worktree.path, timeout);
+    const result = await runCommand(command, worktree.path, timeout, signal);
 
     const body = truncateOutput(result.output.trim());
+    // Said differently from a timeout, because it means something different: the
+    // person changed their mind, and whatever the command had already written to
+    // the worktree is still there.
+    if (result.aborted)
+      return {
+        ok: false,
+        output: `cancelled — the command was killed. Anything it already wrote is still in the worktree. Output so far:\n${body}`,
+      };
     if (result.timedOut)
       return {
         ok: false,
@@ -213,7 +228,15 @@ export class RepoTools {
     };
   }
 
-  private async write(args: Record<string, unknown>): Promise<ToolResult> {
+  private async write(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
+    // Refused before it starts, never interrupted midway: aborting a partial
+    // file write is how you corrupt the file the model meant to fix.
+    if (signal?.aborted)
+      return { ok: false, output: "cancelled — nothing was written" };
+
     const relPath = typeof args.path === "string" ? args.path.trim() : "";
     const content = typeof args.content === "string" ? args.content : undefined;
     if (!relPath) return { ok: false, output: "write needs a `path`" };
@@ -258,6 +281,8 @@ export class RepoTools {
 }
 
 interface CommandResult {
+  /** Killed because the caller withdrew the request, not because it hung. */
+  aborted?: boolean;
   code: number;
   output: string;
   timedOut: boolean;
@@ -291,7 +316,17 @@ function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
+  // Nothing is spawned for a request that was already withdrawn.
+  if (signal?.aborted)
+    return Promise.resolve({
+      code: -1,
+      output: "",
+      timedOut: false,
+      aborted: true,
+    });
+
   return new Promise((resolve) => {
     const child = spawn("bash", ["-lc", command], {
       cwd,
@@ -305,6 +340,7 @@ function runCommand(
 
     let output = "";
     let timedOut = false;
+    let aborted = false;
     const append = (chunk: Buffer) => {
       output += chunk.toString();
       // Bounded in memory too, not just on the way out: a runaway loop printing
@@ -328,17 +364,27 @@ function runCommand(
       killGroup();
     }, timeoutMs);
 
+    // The whole point of the signal: a fifteen-minute ceiling makes cancelling
+    // cosmetic unless the command actually dies when someone says stop.
+    const onAbort = () => {
+      aborted = true;
+      killGroup();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
     let settled = false;
     const finish = (code: number) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // The signal outlives the command by design; a listener left on it leaks.
+      signal?.removeEventListener("abort", onAbort);
       // Anything the command backgrounded dies with it, and the pipes are let
       // go so a survivor cannot hold this promise open.
       killGroup();
       child.stdout.destroy();
       child.stderr.destroy();
-      resolve({ code, output, timedOut });
+      resolve({ code, output, timedOut, aborted });
     };
 
     child.on("error", (error) => {

@@ -237,3 +237,97 @@ describe("ReplyGate", () => {
     );
   });
 });
+
+/**
+ * A DM room. Interrupting is deliberately a private-message behaviour: an
+ * allow-listed 1:1 conversation has no other reason for someone to type while
+ * Hex works, and a relay group does.
+ */
+const DM: Room = { transport: "nip-17", id: OTHER };
+
+describe("interrupting", () => {
+  const gate = () =>
+    new ReplyGate({
+      selfPubkey: SELF,
+      mentions: ["hex"],
+      startedAt: 900,
+      repliesPerRoomPerHour: 20,
+      now: () => 1000,
+    });
+
+  it("calls a same-author message in a DM an interrupt, not a refusal", () => {
+    const g = gate();
+    const first = inbound({ id: "a", room: DM });
+    expect(g.consider(first).reply).toBe(true);
+    g.begin(first);
+
+    const verdict = g.consider(inbound({ id: "b", room: DM }));
+    expect(verdict.reply === false && verdict.reason).toBe("interrupt");
+  });
+
+  it("still refuses a group mention while busy", () => {
+    const g = gate();
+    const first = inbound({ id: "a" });
+    expect(g.consider(first).reply).toBe(true);
+    g.begin(first);
+
+    const verdict = g.consider(inbound({ id: "b" }));
+    expect(verdict.reply === false && verdict.reason).toBe("in-flight");
+  });
+
+  it("does not let a second person cancel the first one's turn", () => {
+    // roomKey covers groups too, and one member must never be able to kill
+    // another member's work.
+    const g = gate();
+    const first = inbound({ id: "a", room: DM, author: OTHER });
+    g.consider(first);
+    g.begin(first);
+
+    const verdict = g.consider(
+      inbound({ id: "b", room: DM, author: "c".repeat(64) }),
+    );
+    expect(verdict.reply === false && verdict.reason).toBe("in-flight");
+  });
+
+  it("treats a redelivered interrupt as a duplicate, not a second stop", () => {
+    // The id is entered into `seen` before the in-flight check, deliberately:
+    // several relays deliver the same event, and cancelling twice would abandon
+    // the steering turn the first cancel started.
+    const g = gate();
+    const first = inbound({ id: "a", room: DM });
+    g.consider(first);
+    g.begin(first);
+
+    const copy = inbound({ id: "b", room: DM });
+    expect(g.consider(copy).reply === false && g.consider(copy).reason).toBe(
+      "duplicate",
+    );
+  });
+
+  it("names who is holding the room", () => {
+    const g = gate();
+    const first = inbound({ id: "a", room: DM });
+    expect(g.holderFor(first)).toBeUndefined();
+    g.begin(first);
+    expect(g.holderFor(first)).toEqual({ id: "a", author: OTHER });
+    g.end(first, false);
+    expect(g.holderFor(first)).toBeUndefined();
+  });
+
+  it("admits a steered message once the room is free, without re-checking seen", () => {
+    const g = gate();
+    const first = inbound({ id: "a", room: DM });
+    g.consider(first);
+    g.begin(first);
+
+    const interrupting = inbound({ id: "b", room: DM });
+    g.consider(interrupting);
+    // Still held, so it is not yet admissible.
+    expect(g.steer(interrupting).reply).toBe(false);
+
+    g.end(first, false);
+    // Its id is in `seen`, and `steer` admits it anyway — that is the point.
+    expect(g.steer(interrupting).reply).toBe(true);
+    expect(g.consider(interrupting).reply).toBe(false);
+  });
+});
