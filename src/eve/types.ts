@@ -60,6 +60,15 @@ export function stringField(
   return typeof value === "string" ? value : undefined;
 }
 
+/** A nested object, or nothing — Eve's payloads nest and the fields are loose. */
+export function asRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 /** The same, for a number — `null` is a value Eve sends and means "unknown". */
 export function numberField(
   data: Record<string, unknown>,

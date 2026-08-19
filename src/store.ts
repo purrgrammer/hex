@@ -151,6 +151,24 @@ CREATE TABLE IF NOT EXISTS conversations (
   session_id TEXT NOT NULL,
   last_at    INTEGER NOT NULL
 );
+
+/*
+ * Questions Hex asked in a room, and what answering one resolves.
+ *
+ * Durable, not in memory, and for once the reason is the whole point of the
+ * feature: a parked run waits indefinitely for a person who may answer tomorrow,
+ * and a restart in between is the ordinary case rather than the edge one. Held
+ * in memory, the reply that finally arrives would be read as an ordinary
+ * message — which STEERS the run and leaves the question open, so the agent
+ * asks again and the person answers again, forever.
+ */
+CREATE TABLE IF NOT EXISTS questions (
+  message_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  asked_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS questions_session ON questions (session_id);
 `;
 
 export class HexStore {
@@ -216,6 +234,50 @@ export class HexStore {
            session_id = excluded.session_id, last_at = excluded.last_at`,
       )
       .run(peer, sessionId, at);
+  }
+
+  /**
+   * Remember that this room message asked this request.
+   *
+   * Keyed on the message Hex posted, because that is the only handle the other
+   * side has: they reply to what they can see, and the `e` tag on that reply is
+   * what comes back.
+   */
+  rememberQuestion(
+    messageId: string,
+    sessionId: string,
+    requestId: string,
+    at: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO questions (message_id, session_id, request_id, asked_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(message_id) DO UPDATE SET
+           session_id = excluded.session_id, request_id = excluded.request_id`,
+      )
+      .run(messageId, sessionId, requestId, at);
+  }
+
+  /** What a reply to this message is answering, if anything. */
+  questionAsked(
+    messageId: string,
+  ): { sessionId: string; requestId: string } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT session_id, request_id FROM questions WHERE message_id = ?`,
+      )
+      .get(messageId) as
+      { session_id?: string; request_id?: string } | undefined;
+    if (!row?.session_id || !row.request_id) return undefined;
+    return { sessionId: row.session_id, requestId: row.request_id };
+  }
+
+  /** Forget a session's questions once they are answered or the run is over. */
+  forgetQuestions(sessionId: string): void {
+    this.db
+      .prepare(`DELETE FROM questions WHERE session_id = ?`)
+      .run(sessionId);
   }
 
   transcriptFor(sessionId: string): StoredTranscript | undefined {

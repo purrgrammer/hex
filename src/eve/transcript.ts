@@ -45,6 +45,7 @@ import {
   outputText,
   payload,
   stopFor,
+  asRecord,
   numberField,
   stringField,
   usageFor,
@@ -1334,11 +1335,6 @@ function isTerminal(status: SessionStatus): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
 
 /** The choices offered, keeping only what a reader can actually render. */
 function optionsOf(

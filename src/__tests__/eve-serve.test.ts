@@ -73,6 +73,37 @@ const SECOND_TURN = [
   },
 ];
 
+/**
+ * A turn that stops and asks, which ends exactly like one that answered.
+ *
+ * `session.waiting` carries the hardcoded literal `"next-user-message"` either
+ * way, so nothing at this boundary distinguishes "finished" from "blocked on a
+ * person" — the open request is the only thing that does.
+ */
+const ASKING_TURN = [
+  { type: "turn.started", data: { turnId: "turn_0" }, meta: { id: "evt_1" } },
+  {
+    type: "input.requested",
+    data: {
+      requests: [
+        {
+          requestId: "req_1",
+          prompt: "Which relay should I publish it to?",
+          kind: "question",
+          allowFreeform: true,
+          options: [
+            { id: "opt_a", label: "nos.lol" },
+            { id: "opt_b", label: "relay.ditto.pub" },
+          ],
+        },
+      ],
+    },
+    meta: { id: "evt_2" },
+  },
+  { type: "turn.completed", data: { turnId: "turn_0" }, meta: { id: "evt_3" } },
+  { type: "session.waiting", data: {}, meta: { id: "evt_4" } },
+];
+
 function inbound(id: string, text: string, replyToId?: string): Inbound {
   return {
     id,
@@ -244,6 +275,57 @@ describe("EveServer", () => {
       },
     });
   }
+
+  it("puts a parked run's question to the room, and reads the reply as its answer", async () => {
+    /**
+     * Two failures in one, and the first is the one nobody sees. A run that
+     * stops to ask ends its turn like any other, so without this the
+     * conversation just goes quiet — the agent waits indefinitely on a person
+     * who was never told they were asked.
+     *
+     * The second is what happens when they do reply. Eve resolves a request
+     * through `inputResponses` and NOTHING else: a plain `message` starts a new
+     * turn and leaves the question standing, so the obvious thing to do — type
+     * the answer into the room — is precisely the thing that does not work.
+     */
+    const eve = fakeEve(ASKING_TURN, 0, undefined, SECOND_TURN);
+    const bus = transport();
+    const { impl } = sink();
+    const hex = server(eve, bus, impl);
+
+    await hex.handle(inbound("m1", "publish my note"));
+
+    // Asked out loud, with the options spelled out and a pointer to the session.
+    const question = bus.replies.at(-1)!;
+    expect(question.text).toContain("Which relay should I publish it to?");
+    expect(question.text).toContain("nos.lol");
+    expect(question.text).toContain(`31777:${AGENT}:`);
+
+    // A reply to THAT message resolves the request rather than steering.
+    await hex.handle(inbound("m2", "nos.lol", "reply-id"));
+
+    const answered = eve.posts.filter(
+      (post) =>
+        typeof post.body === "object" &&
+        post.body !== null &&
+        "inputResponses" in post.body,
+    );
+    expect(answered).toHaveLength(1);
+    expect(answered[0]!.body).toEqual({
+      inputResponses: [{ requestId: "req_1", text: "nos.lol" }],
+    });
+
+    // And it did NOT go in as a message, which would have steered the run.
+    expect(
+      eve.posts.some(
+        (post) =>
+          typeof post.body === "object" &&
+          post.body !== null &&
+          "message" in post.body &&
+          (post.body as { message?: string }).message === "nos.lol",
+      ),
+    ).toBe(false);
+  });
 
   it("names the message that started the session on the head", async () => {
     // This is the link the whole design rests on: the SESSION points at the

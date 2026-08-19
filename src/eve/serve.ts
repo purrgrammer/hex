@@ -30,7 +30,7 @@
 
 import { streamSession } from "./stream.js";
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
-import { payload, stringField } from "./types.js";
+import { asRecord, payload, stringField } from "./types.js";
 import { sessionAddress } from "../nostr/encode.js";
 import type { ToolBridge } from "./bridge.js";
 import type { ToolHost } from "../tools/types.js";
@@ -121,6 +121,14 @@ const DEFAULT_DRAIN_QUIET_MS = 1_500;
 interface Boundary {
   last: number;
   finished: Set<string>;
+}
+
+/** A question a run stopped on, reduced to what a chat message needs. */
+interface Asked {
+  requestId: string;
+  prompt: string;
+  options: { id: string; label: string }[];
+  allowFreeform: boolean;
 }
 
 interface Conversation {
@@ -293,7 +301,9 @@ export class EveServer {
       switch (control.command) {
         case "respond": {
           if (!control.request) {
-            this.log("[hex] a respond with no request id names nothing to answer");
+            this.log(
+              "[hex] a respond with no request id names nothing to answer",
+            );
             return;
           }
           await this.post(path, {
@@ -320,8 +330,10 @@ export class EveServer {
         }
 
         case "cancel":
-          await this.post(`${path}/cancel`,
-            control.turn ? { turnId: control.turn } : {});
+          await this.post(
+            `${path}/cancel`,
+            control.turn ? { turnId: control.turn } : {},
+          );
           say("stopped the run");
           break;
 
@@ -366,17 +378,38 @@ export class EveServer {
         {},
       ).then(
         () =>
-          this.log(
-            `[hex] ${short(inbound.author)} interrupted their own turn`,
-          ),
+          this.log(`[hex] ${short(inbound.author)} interrupted their own turn`),
         (error: unknown) =>
-          this.log(`[hex] could not cancel the running turn: ${message(error)}`),
+          this.log(
+            `[hex] could not cancel the running turn: ${message(error)}`,
+          ),
       );
     return this.handle(inbound);
   }
 
   private async turn(inbound: Inbound): Promise<void> {
     const peer = inbound.author;
+
+    /**
+     * A reply to a question Hex asked is an ANSWER, not a new instruction.
+     *
+     * Eve draws the line: `inputResponses` resolves a request and never steers,
+     * a plain `message` steers and never resolves — and with several requests
+     * open it refuses to guess which one bare text meant. So a reply typed into
+     * the room, which is the obvious thing to do when a chat message asks you
+     * something, would start a fresh turn and leave the question standing. The
+     * agent would ask again. Handled here, before any of the session
+     * bookkeeping below, because answering is not a turn of conversation.
+     */
+    if (inbound.replyToId) {
+      const answering = this.options.transcript.store.questionAsked(
+        inbound.replyToId,
+      );
+      if (answering) {
+        await this.answerQuestion(inbound, answering);
+        return;
+      }
+    }
     /**
      * A reply continues the run; a fresh message starts a new one.
      *
@@ -486,13 +519,27 @@ export class EveServer {
       );
     }
 
-    const answer = await this.follow(conversation, inbound, boundary);
+    const asked: Asked[] = [];
+    const answer = await this.follow(conversation, inbound, boundary, asked);
     this.log(
       `[hex] ${short(peer)} ← ${sessionAddress(
         this.options.transcript.agentPubkey,
         conversation.transcript.nostrId,
       )}`,
     );
+
+    /**
+     * A question goes to the room whatever the reply setting says.
+     *
+     * `--no-reply` means "the client renders sessions, so do not narrate the
+     * answer in chat". It cannot mean "do not tell them you are stuck": a run
+     * blocked in silence is not a quieter transcript, it is a conversation that
+     * ended without saying so.
+     */
+    if (asked.length > 0) {
+      await this.ask(conversation, inbound, asked);
+      return;
+    }
 
     if (this.options.reply === false) return;
     /**
@@ -527,11 +574,137 @@ export class EveServer {
    * last of those when it has nothing left to do, which is the only signal that
    * arrives whether the turn succeeded or not.
    */
+  /**
+   * Send a room reply back as the answer to the request it replies to.
+   *
+   * Matched against the options by label as well as by id, because a person
+   * reading "- Approve" in a chat message types `Approve`, not `approve_0`.
+   * Nothing matching is not an error: free text is a legitimate answer to a
+   * question that allowed it, and Eve is the one that decides whether this
+   * request will take one.
+   */
+  private async answerQuestion(
+    inbound: Inbound,
+    answering: { sessionId: string; requestId: string },
+  ): Promise<void> {
+    const path = `/eve/v1/session/${encodeURIComponent(answering.sessionId)}`;
+
+    /**
+     * Read the stream to its current lull BEFORE the answer goes in, exactly as
+     * a continuing message does. Draining afterwards would wait out the very
+     * turn the answer starts, and then follow a stream with nothing left in it —
+     * every turn the answer unblocked published by nobody.
+     */
+    const conversation =
+      this.conversations.get(inbound.author) ?? this.resume(inbound.author);
+    const boundary = conversation ? await this.drain(conversation) : undefined;
+
+    try {
+      await this.post(path, {
+        inputResponses: [
+          { requestId: answering.requestId, text: inbound.text.trim() },
+        ],
+      });
+      this.log(
+        `[hex] ${short(inbound.author)} answered ${answering.requestId} in the room`,
+      );
+      /**
+       * Forgotten once used. A request resolves once, and a second reply to the
+       * same message would otherwise be posted as another answer to a question
+       * Eve has already closed.
+       */
+      this.options.transcript.store.forgetQuestions(answering.sessionId);
+    } catch (error) {
+      this.log(
+        `[hex] could not answer ${answering.requestId}: ${message(error)}`,
+      );
+      return;
+    }
+
+    if (!conversation || !boundary) return;
+    const asked: Asked[] = [];
+    const answer = await this.follow(conversation, inbound, boundary, asked);
+    if (asked.length > 0) {
+      await this.ask(conversation, inbound, asked);
+      return;
+    }
+    if (this.options.reply === false || !answer) return;
+    try {
+      await this.options.transport.reply(inbound, answer);
+    } catch (error) {
+      this.log(
+        `[hex] could not answer ${short(inbound.author)}: ${message(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Post a parked run's question into the room it came from.
+   *
+   * Plain text, and the options spelled out as words rather than a list of
+   * ids, because whoever reads this is reading a chat message and not a form.
+   * The pointer at the end is the session's own address: a client that renders
+   * transcripts opens it and shows the same question with buttons, which is the
+   * better way to answer and the reason the address is there at all.
+   *
+   * Each posted message is remembered against the request it asked, so a reply
+   * to it resolves that request rather than steering the run. Without that the
+   * obvious thing to do — reply in the room — is the one thing that does not
+   * work: Eve treats a bare message as a new instruction and leaves the
+   * question open.
+   */
+  private async ask(
+    conversation: Conversation,
+    inbound: Inbound,
+    asked: Asked[],
+  ): Promise<void> {
+    const address = sessionAddress(
+      this.options.transcript.agentPubkey,
+      conversation.transcript.nostrId,
+    );
+
+    for (const question of asked) {
+      const lines = [question.prompt || "I need an answer before I can go on."];
+      if (question.options.length > 0)
+        lines.push(
+          "",
+          ...question.options.map((option) => `- ${option.label}`),
+          "",
+          "Reply with one of those, or open the session to answer there:",
+        );
+      else lines.push("", "Reply here, or open the session to answer there:");
+      lines.push(address);
+
+      try {
+        const id = await this.options.transport.reply(
+          inbound,
+          lines.join("\n"),
+        );
+        this.options.transcript.store.rememberQuestion(
+          id,
+          conversation.sessionId,
+          question.requestId,
+          Math.floor(Date.now() / 1000),
+        );
+        this.log(
+          `[hex] asked ${short(inbound.author)} ${question.requestId} as ${id.slice(0, 12)}…`,
+        );
+      } catch (error) {
+        // The run stays parked either way; what is lost is the person knowing.
+        this.log(
+          `[hex] could not put ${question.requestId} to ${short(inbound.author)}: ${message(error)}`,
+        );
+      }
+    }
+  }
+
   private async follow(
     conversation: Conversation,
     inbound: Inbound,
     /** Where the pre-message read got to, and which turns had already ended. */
     boundary: Boundary,
+    /** Filled with anything the run stopped to ask, in the order it asked. */
+    asked: Asked[],
   ): Promise<string | undefined> {
     let answer: string | undefined;
     let failed: string | undefined;
@@ -570,6 +743,35 @@ export class EveServer {
 
         if (event.type === "message.completed")
           answer = stringField(data, "message") ?? answer;
+
+        /**
+         * The run stopped to ask something, and nobody in the room knows.
+         *
+         * A parked turn ends exactly like a finished one, so without this the
+         * conversation simply goes quiet: the agent is waiting, indefinitely,
+         * on a person who was never told they were asked. Collected here and
+         * posted after the follow, because the post is a relay round trip and
+         * this loop is reading a live stream.
+         */
+        if (event.type === "input.requested")
+          for (const raw of Array.isArray(data.requests) ? data.requests : []) {
+            const request = asRecord(raw);
+            const requestId = request && stringField(request, "requestId");
+            if (!request || !requestId) continue;
+            asked.push({
+              requestId,
+              prompt: stringField(request, "prompt") ?? "",
+              options: (Array.isArray(request.options) ? request.options : [])
+                .map((option) => asRecord(option))
+                .filter((option): option is Record<string, unknown> => !!option)
+                .map((option) => ({
+                  id: stringField(option, "id") ?? "",
+                  label: stringField(option, "label") ?? "",
+                }))
+                .filter((option) => option.id && option.label),
+              allowFreeform: request.allowFreeform === true,
+            });
+          }
         if (event.type === "turn.failed" || event.type === "session.failed")
           failed = stringField(data, "message") ?? "the turn failed";
 
@@ -585,7 +787,10 @@ export class EveServer {
         // `session.waiting` and `session.failed` name no turn, so they are read
         // as this turn's only once this turn exists. A session waiting before
         // ours began is the one it was already waiting in.
-        if (event.type === "session.waiting" || event.type === "session.failed") {
+        if (
+          event.type === "session.waiting" ||
+          event.type === "session.failed"
+        ) {
           if (ours) break;
           continue;
         }
