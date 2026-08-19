@@ -66,6 +66,14 @@ export interface StoredTranscript {
    */
   pending?: string[];
   /**
+   * The turn whose incoming message has already been published.
+   *
+   * Durable because the duplicate it prevents usually arrives in a different
+   * process: a resumed session re-announces the message that started the turn,
+   * under a new event id, and only the turn id is the same.
+   */
+  saidTurn?: string;
+  /**
    * The running total includes a figure nobody billed.
    *
    * Not persisted: a restart resumes a session whose earlier steps it did not
@@ -132,7 +140,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
   cache_read  INTEGER NOT NULL DEFAULT 0,
   cache_write INTEGER NOT NULL DEFAULT 0,
   cost        TEXT,
-  pending     TEXT
+  pending     TEXT,
+  said_turn   TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
@@ -172,6 +181,8 @@ export class HexStore {
     ).map((column) => column.name);
     if (!columns.includes("pending"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN pending TEXT`);
+    if (!columns.includes("said_turn"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN said_turn TEXT`);
 
     return new HexStore(db);
   }
@@ -229,6 +240,7 @@ export class HexStore {
       cacheWrite: Number(row.cache_write),
       cost: row.cost == null ? undefined : String(row.cost),
       pending: parsePending(row.pending),
+      saidTurn: row.said_turn == null ? undefined : String(row.said_turn),
     };
   }
 
@@ -271,15 +283,16 @@ export class HexStore {
         `INSERT INTO transcripts (
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
-           cost, pending
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           cost, pending, said_turn
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
            status = excluded.status, trigger = excluded.trigger,
            stream_index = excluded.stream_index, ended_at = excluded.ended_at,
            in_tokens = excluded.in_tokens, out_tokens = excluded.out_tokens,
            cache_read = excluded.cache_read, cache_write = excluded.cache_write,
-           cost = excluded.cost, pending = excluded.pending`,
+           cost = excluded.cost, pending = excluded.pending,
+           said_turn = excluded.said_turn`,
       )
       .run(
         transcript.sessionId,
@@ -298,6 +311,7 @@ export class HexStore {
         transcript.cacheWrite,
         transcript.cost ?? null,
         transcript.pending?.length ? JSON.stringify(transcript.pending) : null,
+        transcript.saidTurn ?? null,
       );
   }
 }

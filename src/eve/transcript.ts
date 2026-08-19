@@ -444,7 +444,23 @@ export class EveTranscript {
         break;
       }
 
+      /**
+       * What the person said, published once however many times it is announced.
+       *
+       * The `meta.id` dedupe cannot catch this one: a retried or resumed step is
+       * re-emitted under a NEW id carrying the same `turnId`, and the runtime
+       * says outright that no field records which attempt finished. So a steered
+       * turn republished the person's message as a second user turn one `seq`
+       * later — the same words twice in a transcript, from a reader's point of
+       * view for no reason at all.
+       *
+       * Keyed on the turn, and remembered durably, because the second copy
+       * frequently arrives in a different process from the first.
+       */
       case "message.received": {
+        const turnId = stringField(data, "turnId") ?? `turn-${this.record.turn}`;
+        if (this.record.saidTurn === turnId) break;
+        this.record.saidTurn = turnId;
         const text = stringField(data, "message") ?? "";
         await this.append("user", [{ type: "text", text }], {
           alt: text.slice(0, 200),
@@ -700,11 +716,26 @@ export class EveTranscript {
        * reader of a long transcript otherwise cannot tell why the agent stopped
        * remembering something it was told.
        */
+      /**
+       * The context was summarised out from under the run.
+       *
+       * Its own turn rather than a line folded into the next assistant message,
+       * because it is not something the agent said — it is something that
+       * happened TO the conversation, and a reader scrolling a long transcript
+       * needs to see where the agent stopped being able to remember what came
+       * before. Folded in, it read as the model narrating its own amnesia.
+       */
       case "compaction.completed":
-        this.pending.push({
-          type: "text",
-          text: "[the conversation so far was summarised to fit the context window]",
-        });
+        await this.append(
+          "tool",
+          [
+            {
+              type: "text",
+              text: "The conversation so far was summarised to fit the context window.",
+            },
+          ],
+          { alt: "Context compacted." },
+        );
         break;
 
       case "authorization.required":

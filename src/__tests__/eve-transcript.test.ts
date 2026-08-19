@@ -590,6 +590,71 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("publishes the person's message once, however often it is announced", async () => {
+    /**
+     * Seen in the published transcripts: the same words twice, one `seq` apart.
+     * A retried or resumed step re-emits `message.received` under a NEW event id
+     * carrying the same `turnId`, and the runtime says outright that no field
+     * records which attempt finished — so the id dedupe cannot see it.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    const said = {
+      type: "message.received",
+      data: { message: "do the thing", turnId: "turn_0" },
+    };
+    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle({ ...said, meta: { id: "evt_first" } }, ++index);
+    await pub.handle({ ...said, meta: { id: "evt_replay" } }, ++index);
+
+    const users = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 1777)
+      .filter((r) => r.tags.some((t) => t[0] === "role" && t[1] === "user"));
+    expect(users).toHaveLength(1);
+
+    // A genuinely new turn is not the same message.
+    await pub.handle({ type: "turn.started", data: { turnId: "turn_1" } }, ++index);
+    await pub.handle(
+      {
+        type: "message.received",
+        data: { message: "and again", turnId: "turn_1" },
+        meta: { id: "evt_second" },
+      },
+      ++index,
+    );
+    expect(
+      sent
+        .map((s) => s.rumor)
+        .filter((r) => r.kind === 1777)
+        .filter((r) => r.tags.some((t) => t[0] === "role" && t[1] === "user")),
+    ).toHaveLength(2);
+    store.close();
+  });
+
+  it("gives a compaction its own turn rather than folding it into a reply", async () => {
+    // It is not something the agent said — it is something that happened to the
+    // conversation, and a reader needs to see where it stopped remembering.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle({ type: "compaction.completed", data: {} }, ++index);
+
+    const turn = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 1777)
+      .at(-1)!;
+    expect(turn.tags.find((t) => t[0] === "role")?.[1]).toBe("tool");
+    expect(turn.content).toContain("summarised to fit the context window");
+    store.close();
+  });
+
   it("clears awaiting-authorisation when the sign-in resolves", async () => {
     /**
      * `authorization.required` put the head in `payment-required` and nothing
