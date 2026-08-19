@@ -260,7 +260,12 @@ export class Nip17Transport implements Transport {
       ],
     );
 
-    const opened = await Promise.all(wraps.map((wrap) => this.toInbound(wrap)));
+    // `allSettled`: one wrap that throws on the way open must not take the whole
+    // page of history with it. A rejection here is one message missing from a
+    // backfill, not an empty backfill.
+    const opened = (
+      await Promise.allSettled(wraps.map((wrap) => this.toInbound(wrap)))
+    ).map((result) => (result.status === "fulfilled" ? result.value : null));
     return opened
       .filter((inbound): inbound is Inbound => inbound !== null)
       .filter((inbound) => inbound.room.id === room.id)
@@ -428,70 +433,86 @@ export class Nip17Transport implements Transport {
     const timeout = this.options.publishTimeoutMs ?? 10_000;
 
     try {
-      const outcomes = await Promise.all(
-        relays.map(async (url) => {
-          const relay = pool.relay(url);
-
-          /**
-           * One attempt.
-           *
-           * applesauce turns an `auth-required` rejection into a THROWN
-           * AuthRequiredError rather than a falsy response — with retries off it
-           * reaches us as an exception, so both shapes have to be read or the
-           * retry below never fires and the message is silently lost.
-           */
-          const attempt = async (): Promise<{
-            ok: boolean;
-            reason?: string;
-          }> => {
-            try {
-              const response = await relay.publish(wrap.event, {
-                retries: 0,
-                timeout,
-              });
-              return { ok: response.ok, reason: response.message };
-            } catch (error) {
-              return {
-                ok: false,
-                reason: error instanceof Error ? error.message : String(error),
-              };
-            }
-          };
-
-          let result = await attempt();
-
-          if (!result.ok && needsAuth(result.reason)) {
-            try {
-              const auth = await relay.authenticate(wrap.signer);
-              if (!auth.ok) {
-                this.log(
-                  `[hex] ${url} refused the wrap's own authentication: ${auth.message ?? "no reason given"}`,
-                );
-                return false;
-              }
-            } catch (error) {
-              this.log(
-                `[hex] ${url} would not authenticate the wrap: ${
-                  error instanceof Error ? error.message : String(error)
-                }`,
-              );
-              return false;
-            }
-            this.log(`[hex] ${url} wanted NIP-42; authenticated as the wrap`);
-            result = await attempt();
-          }
-
-          if (!result.ok)
-            this.log(
-              `[hex] ${url} did not take the wrap: ${result.reason ?? "no reason given"}`,
-            );
-          return result.ok;
-        }),
+      // `allSettled`, not `all`: `pool.relay(url)` throws on a URL applesauce
+      // will not take, and one such rejection used to discard every other
+      // relay's ACCEPTED publish — reported as a total failure. For a transcript
+      // turn that is a hole in the chain nobody can fill.
+      const outcomes = await Promise.allSettled(
+        relays.map((url) => this.publishOneWrap(pool, url, wrap, timeout)),
       );
-      return outcomes.some(Boolean);
+      for (const outcome of outcomes)
+        if (outcome.status === "rejected")
+          this.log(
+            `[hex] a relay could not be dialled at all: ${outcome.reason}`,
+          );
+      return outcomes.some(
+        (outcome) => outcome.status === "fulfilled" && outcome.value,
+      );
     } finally {
       pool.close();
     }
+  }
+
+  /** One relay's turn at a wrap, authenticating as the wrap if it insists. */
+  private async publishOneWrap(
+    pool: RelayPool,
+    url: string,
+    wrap: SealedWrap,
+    timeout: number,
+  ): Promise<boolean> {
+    const relay = pool.relay(url);
+
+    /**
+     * One attempt.
+     *
+     * applesauce turns an `auth-required` rejection into a THROWN
+     * AuthRequiredError rather than a falsy response — with retries off it
+     * reaches us as an exception, so both shapes have to be read or the retry
+     * below never fires and the message is silently lost.
+     */
+    const attempt = async (): Promise<{ ok: boolean; reason?: string }> => {
+      try {
+        const response = await relay.publish(wrap.event, {
+          retries: 0,
+          timeout,
+        });
+        return { ok: response.ok, reason: response.message };
+      } catch (error) {
+        return {
+          ok: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    };
+
+    let result = await attempt();
+
+    if (!result.ok && needsAuth(result.reason)) {
+      try {
+        const auth = await relay.authenticate(wrap.signer);
+        if (!auth.ok) {
+          this.log(
+            `[hex] ${url} refused the wrap's own authentication: ${auth.message ?? "no reason given"}`,
+          );
+          return false;
+        }
+      } catch (error) {
+        this.log(
+          `[hex] ${url} would not authenticate the wrap: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return false;
+      }
+      this.log(`[hex] ${url} wanted NIP-42; authenticated as the wrap`);
+      result = await attempt();
+    }
+
+    if (!result.ok)
+      this.log(
+        `[hex] ${url} did not take the wrap: ${result.reason ?? "no reason given"}`,
+      );
+    return result.ok;
   }
 
   /**

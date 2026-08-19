@@ -150,7 +150,10 @@ async function relaysMissing(
   template: EventTemplate,
   timeoutMs?: number,
 ): Promise<string[]> {
-  const checks = await Promise.all(
+  // `allSettled`: a relay that throws on the lookup has not told us it holds a
+  // matching event, so it counts as missing — with `all` the throw aborted the
+  // whole comparison and `announce` republished to relays that were fine.
+  const checks = await Promise.allSettled(
     publishRelays.map(async (url) => {
       const published = await requestNewest(
         relays,
@@ -161,7 +164,11 @@ async function relaysMissing(
       return matchesPublished(template, published) ? null : url;
     }),
   );
-  return checks.filter((url): url is string => url !== null);
+  return checks
+    .map((outcome, index) =>
+      outcome.status === "fulfilled" ? outcome.value : publishRelays[index]!,
+    )
+    .filter((url): url is string => url !== null);
 }
 
 /**

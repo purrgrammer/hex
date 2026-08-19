@@ -284,10 +284,29 @@ export async function checkRelays(
   timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<Map<string, RelayHealth>> {
   const unique = [...new Set(urls)];
-  const checks = await Promise.all(
+  // `allSettled`: one relay that throws where it should have reported is one
+  // ERROR row, not an aborted check of every other relay.
+  const checks = await Promise.allSettled(
     unique.map((url) => checkRelay(relays, url, timeoutMs)),
   );
-  return new Map(unique.map((url, index) => [url, checks[index]!]));
+  return new Map(
+    unique.map((url, index) => {
+      const outcome = checks[index]!;
+      return [
+        url,
+        outcome.status === "fulfilled"
+          ? outcome.value
+          : {
+              relay: url,
+              state: "error" as const,
+              message:
+                outcome.reason instanceof Error
+                  ? outcome.reason.message
+                  : String(outcome.reason),
+            },
+      ];
+    }),
+  );
 }
 
 /** A subscription that only yields events — no EOSE, which v6 pools never emit. */

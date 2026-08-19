@@ -210,6 +210,55 @@ describe("Nip17Transport.reply", () => {
     expect(rumor.pubkey).toBe(hexPubkey);
   });
 
+  it("delivers to the good relay when a bad URL in the list throws", async () => {
+    // `pool.relay(url)` throws on a URL applesauce will not take, and with
+    // `Promise.all` that rejection discarded every other relay's ACCEPTED
+    // publish — reported as undeliverable. For a transcript turn that is a hole
+    // in the chain nobody can fill.
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const bus = new Nip17Transport({
+      relays,
+      signer: hexSigner,
+      pubkey: hexPubkey,
+      inboxRelays: [relay.url],
+      readRelays: [relay.url],
+      allow: [peerPubkey],
+      since: 0,
+      publishTimeoutMs: 1000,
+    });
+    transport = bus;
+
+    const list = finalizeEvent(
+      {
+        kind: KIND_DM_RELAYS,
+        content: "",
+        created_at: 2000,
+        // A relay the pool cannot dial, alongside one it can.
+        tags: [
+          ["relay", "not a url at all"],
+          ["relay", relay.url],
+        ],
+      },
+      peerKey,
+    );
+    const { publishTo } = await import("../relays.js");
+    await publishTo(relays, [relay.url], list);
+    const before = relay.received.length;
+
+    const id = await bus.reply(inboundFrom(), "still delivered");
+
+    expect(id).toBeTruthy();
+    const wraps = relay.received
+      .slice(before)
+      .filter((event) => event.kind === KIND_GIFT_WRAP);
+    expect(
+      wraps.some((wrap) =>
+        wrap.tags.some((tag) => tag[0] === "p" && tag[1] === peerPubkey),
+      ),
+    ).toBe(true);
+  });
+
   it("dates the wrap inside the window a client will ask for", async () => {
     // Randomising two days back is legal and useless: a client subscribes to its
     // inbox with a `since` floor, so a wrap dated yesterday is never fetched. A

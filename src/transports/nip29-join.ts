@@ -134,7 +134,22 @@ export async function joinConfiguredGroups(
   groups: Nip29GroupConfig[],
   options: JoinOptions = {},
 ): Promise<JoinOutcome[]> {
-  return Promise.all(
+  // `allSettled`: a group whose join throws must not stop the others being
+  // joined. Startup joins every configured group, and one bad relay used to
+  // mean none of them.
+  const outcomes = await Promise.allSettled(
     groups.map((group) => joinGroup(relays, signer, pubkey, group, options)),
+  );
+  return outcomes.map((outcome, index) =>
+    outcome.status === "fulfilled"
+      ? outcome.value
+      : {
+          group: `${groups[index]!.relay}'${groups[index]!.id}`,
+          action: "failed" as const,
+          detail:
+            outcome.reason instanceof Error
+              ? outcome.reason.message
+              : String(outcome.reason),
+        },
   );
 }
