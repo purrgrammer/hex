@@ -45,8 +45,6 @@ import type { Inbound, Room, Transport } from "./types.js";
 
 /** NIP-17 kinds. */
 export const KIND_GIFT_WRAP = 1059;
-/** The same envelope a relay must not store, for a payload nobody needs twice. */
-export const KIND_GIFT_WRAP_EPHEMERAL = 21059;
 export const KIND_PRIVATE_MESSAGE = 14;
 /** NIP-25, as a rumor inside a wrap. */
 export const KIND_REACTION = 7;
@@ -142,16 +140,12 @@ export class Nip17Transport implements Transport {
    * The seal is signed by Hex — that is what proves who wrote the message, to
    * the recipient and to nobody else. The wrap is signed by the throwaway.
    */
-  private async wrapFor(
-    recipient: string,
-    rumor: Rumor,
-    ephemeral = false,
-  ): Promise<SealedWrap> {
+  private async wrapFor(recipient: string, rumor: Rumor): Promise<SealedWrap> {
     const seal = await sealRumor(recipient, this.options.signer)(rumor);
     const key = generateSecretKey();
     const event = finalizeEvent(
       {
-        kind: ephemeral ? KIND_GIFT_WRAP_EPHEMERAL : KIND_GIFT_WRAP,
+        kind: KIND_GIFT_WRAP,
         created_at: randomPast(),
         content: nip44Encrypt(
           JSON.stringify(seal),
@@ -492,56 +486,6 @@ export class Nip17Transport implements Transport {
     } finally {
       pool.close();
     }
-  }
-
-  /**
-   * Wrap a rumor Hex did not compose as a message and send it to each recipient.
-   *
-   * The transcript publisher builds its own rumors — a session head, a turn, a
-   * delta — and this is the one door they go out of, so the wrap, the seal and
-   * the unattributed publish stay in the module that owns them. A recipient with
-   * no kind 10050 is reported rather than silently skipped.
-   *
-   * `ephemeral` swaps the outer kind for 21059, which is how a delta is dropped
-   * by the relay along with the wrap that carried it. There is no self-copy for
-   * an ephemeral wrap: it exists to be watched live, and Hex is not watching.
-   */
-  async publishRumor(
-    rumor: Rumor,
-    recipients: string[],
-    options: { ephemeral?: boolean; selfCopy?: boolean } = {},
-  ): Promise<{ delivered: string[]; undeliverable: string[] }> {
-    const ephemeral = options.ephemeral ?? false;
-    const delivered: string[] = [];
-    const undeliverable: string[] = [];
-
-    // Sequential: a signer is one at a time, and NIP-07-shaped ones reject
-    // concurrent calls outright.
-    for (const recipient of recipients) {
-      const inbox = await this.inboxOf(recipient);
-      if (inbox.length === 0) {
-        undeliverable.push(recipient);
-        this.log(
-          `[hex] ${recipient.slice(0, 8)}… publishes no kind 10050, so a transcript has nowhere to go`,
-        );
-        continue;
-      }
-      const wrap = await this.wrapFor(recipient, rumor, ephemeral);
-      if (await this.publishUnattributed(wrap, inbox)) delivered.push(recipient);
-      else undeliverable.push(recipient);
-    }
-
-    if (!ephemeral && (options.selfCopy ?? true)) {
-      const ours = await this.wrapFor(this.options.pubkey, rumor);
-      await publishTo(
-        this.options.relays,
-        this.options.inboxRelays,
-        ours.event,
-        this.options.publishTimeoutMs,
-      );
-    }
-
-    return { delivered, undeliverable };
   }
 
   /** Did Hex write this rumor? Used the same way the group transport does. */

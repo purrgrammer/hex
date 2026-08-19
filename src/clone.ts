@@ -185,34 +185,15 @@ export class CloneManager implements Checkout {
     const repo = this.repo(record.repo);
     if (!repo) return;
     try {
+      // Nothing to move unless there is a commit the operator does not already
+      // have. Checked because this runs after every command and most commands
+      // are a grep — without it every conversation would plant a branch in their
+      // repository for work that never happened.
       const tip = await head(record.path, record.branch);
-      if (!tip) return;
-      const theirs = await head(repo.path, record.branch);
-      // Already in step. Compared by tip rather than by "do they have this
-      // commit": an amend or a reset leaves the operator holding a commit they
-      // certainly have, on a branch pointing somewhere else, and the old check
-      // read that as nothing to do.
-      if (theirs === tip) return;
-      // No branch of ours there yet, and they already have this commit: the
-      // conversation has run commands but committed nothing. Without this every
-      // grep would plant a branch in their repository for work that never
-      // happened.
-      if (!theirs && (await hasCommit(repo.path, tip))) return;
+      if (!tip || (await hasCommit(repo.path, tip))) return;
       await run(
         "git",
-        [
-          "fetch",
-          "--quiet",
-          record.path,
-          // Forced, because the normal review loop rewrites history: Hex commits,
-          // the peer asks for a change, Hex amends — and a fast-forward-only
-          // fetch is refused from then on, leaving the operator a branch that
-          // looks like Hex's work and is the superseded version. `hex/<hash>` is
-          // Hex's own namespace; if the operator committed on it themselves the
-          // reflog still holds it. Fetching into a branch they have checked out
-          // is still refused by git, and still logged below.
-          `+${record.branch}:${record.branch}`,
-        ],
+        ["fetch", "--quiet", record.path, `${record.branch}:${record.branch}`],
         { cwd: repo.path, timeout: GIT_TIMEOUT_MS },
       );
     } catch (error) {

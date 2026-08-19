@@ -11,7 +11,7 @@
 import type { HexConfig, Isolation } from "../config.js";
 import type { HexStore } from "../store.js";
 import { CloneManager, type Checkout } from "../clone.js";
-import { WorktreeManager, worktreeName } from "../worktree.js";
+import { WorktreeManager } from "../worktree.js";
 import type { ExecBackend } from "./exec-backend.js";
 import { HostBackend } from "./exec-host.js";
 import { ContainerBackend } from "./exec-container.js";
@@ -80,11 +80,7 @@ export function createRunner(
       mountFor: (request) => request.cwd,
       // Per workspace, not shared: a shared cache is a small channel between two
       // conversations, and a colder install is the cheaper of the two costs.
-      // Named by digest, like the clone: a room key carries a transport, a relay
-      // URL and a group id, and a `-v` spec is colon-delimited — so putting the
-      // raw key in a host path is a mount the runtime rejects on a message Hex
-      // does not control the shape of.
-      homeFor: (request) => join(caches, worktreeName(request.id), "home"),
+      homeFor: (request) => join(caches, request.id, "home"),
     }),
   };
 }

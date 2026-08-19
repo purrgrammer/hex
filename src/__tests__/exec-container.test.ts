@@ -8,13 +8,6 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { createRunner } from "../tools/backends.js";
-import { HexStore } from "../store.js";
-import type { HexConfig } from "../config.js";
 import {
   buildRunArgs,
   containerName,
@@ -178,109 +171,8 @@ describe("how it is confined", () => {
 describe("naming", () => {
   it("strips whatever a room key contains that a container name may not", () => {
     // Room keys carry `|`, `'` and `#`; a container name allows none of them.
-    expect(containerName("nip-17|abc#def'ghi", 1)).toMatch(/^hex-[\w.-]+$/);
+    expect(containerName("nip-17|abc#def'ghi")).toMatch(/^hex-[\w.-]+$/);
   });
-
-  it("never gives the mount probe the same name as the command it precedes", () => {
-    // It used to, for every real room key: the name was the id truncated to a
-    // legal length, and a key is `nip-17|<64 hex>-<repo>` — so the repo and the
-    // `-probe` suffix both fell off the end and the two names came out identical.
-    // `onFinish` fires `rm -f <name>` without awaiting it, so a shared name is the
-    // probe's removal racing the operator's first command.
-    const id = `nip-17|${"a".repeat(64)}-grimoire`;
-    expect(containerName(id, 1, true)).not.toBe(containerName(id, 2));
-  });
-
-  it("gives two commands in one workspace different names", () => {
-    // Same reason, the sequential case: the previous container's `rm -f` is still
-    // in flight when the next `run --name` starts, and the runtime refuses a name
-    // already in use.
-    const id = `nip-17|${"b".repeat(64)}-grimoire`;
-    expect(containerName(id, 1)).not.toBe(containerName(id, 2));
-  });
-
-  it("still distinguishes two repos in one conversation", () => {
-    // The repo name is past the length a readable name could carry, so it has to
-    // reach the name through the digest or not at all.
-    const workspace = `nip-17|${"c".repeat(64)}`;
-    expect(containerName(`${workspace}-grimoire`, 1)).not.toBe(
-      containerName(`${workspace}-otherrepo`, 1),
-    );
-  });
-});
-
-describe("the container's home", () => {
-  it("exists before it is mounted", async () => {
-    // A `-v` source that does not exist is not an error: the daemon CREATES it,
-    // and on Linux it creates it as root — while the container runs as the
-    // operator's uid, so `/home/hex` comes up unwritable and `npm install` dies
-    // on EACCES against its own cache. Invisible on macOS, where Docker Desktop
-    // creates the path through the file-sharing layer as the user.
-    const root = await mkdtemp(join(tmpdir(), "hex-home-"));
-    const home = join(root, "caches", "deadbeef", "home");
-    const backend = new ContainerBackend({
-      config: { ...CONFIG, runtime: "/nonexistent/docker" },
-      agent: AGENT,
-      mountFor: () => WORK,
-      homeFor: () => home,
-    });
-    try {
-      // Past the mount probe, so the missing runtime is the only thing that
-      // fails — and it fails after the directory is made, which is the point.
-      await backend.run(
-        {
-          id: "nip-17|peer-grimoire",
-          command: "true",
-          cwd: WORK,
-          timeoutMs: 5_000,
-        },
-        { skipMountCheck: true },
-      );
-      expect(existsSync(home)).toBe(true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  it("is named by digest, so no room key reaches a host path", async () => {
-    // A room key carries a transport, a relay URL and a group id, and a `-v` spec
-    // is colon-delimited with at most three fields — so `wss://…` in the source
-    // path is a mount the runtime rejects. `checkMount` would then report it as a
-    // file-sharing problem with the checkout, which mounts fine. Coding tools are
-    // refused outside NIP-17 at parse time, so this is the belt to that brace: the
-    // path is built from a key whose shape Hex does not choose.
-    const root = await mkdtemp(join(tmpdir(), "hex-runner-"));
-    const store = HexStore.open(join(root, "data.db"));
-    try {
-      const runner = createRunner("container", {
-        config: {
-          container: CONFIG,
-          repos: [{ name: "grimoire", path: join(root, "repo") }],
-        } as unknown as HexConfig,
-        store,
-        home: { dir: root, worktrees: join(root, "worktrees") },
-        agent: AGENT,
-      });
-      await (runner.backend as ContainerBackend).run(
-        {
-          id: "nip-29|wss://groups.example.invalid/|grp-grimoire",
-          command: "true",
-          cwd: WORK,
-          timeoutMs: 5_000,
-        },
-        { skipMountCheck: true },
-      );
-      const caches = join(root, "caches");
-      const made = readdirSync(caches);
-      expect(made).toHaveLength(1);
-      expect(made[0]).not.toContain(":");
-      expect(made[0]).not.toContain("/");
-      expect(existsSync(join(caches, made[0], "home"))).toBe(true);
-    } finally {
-      store.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 30_000);
 });
 
 describe("failing loudly", () => {

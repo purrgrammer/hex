@@ -20,8 +20,6 @@
  */
 
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { ContainerConfig, Isolation } from "../config.js";
 import {
@@ -143,30 +141,15 @@ export function buildRunArgs(
   ];
 }
 
-/**
- * A container name that is unique per call and legal for every runtime.
- *
- * The workspace part is a digest, not the id: a room key is
- * `nip-17|<64 hex>-<repo>`, so truncating the readable form to a legal length
- * dropped everything that distinguished one call from another — the repo name and
- * a `-probe` suffix both fell off the end, and two names came out byte-identical.
- * That matters because `onFinish` fires `rm -f <name>` without awaiting it: a name
- * shared with the next container is a `rm` racing a `run`, which kills a command
- * the operator asked for and looks like "the first command in a new DM sometimes
- * dies". The counter is what makes it per-call rather than per-workspace; nothing
- * depends on the name being stable, because `sweep()` matches on the label.
- */
-export function containerName(id: string, nth: number, probe = false): string {
-  const digest = createHash("sha256").update(id).digest("hex").slice(0, 12);
-  return `hex-${digest}-${nth}${probe ? "-probe" : ""}`;
+/** A container name that is unique per call and legal for every runtime. */
+export function containerName(id: string): string {
+  return `hex-${id.replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 48)}`;
 }
 
 export class ContainerBackend implements ExecBackend {
   readonly isolation: Isolation = "container";
   /** Workspaces whose mount has been shown to arrive. Checked once each. */
   private readonly mountChecked = new Set<string>();
-  /** Bumped per container, so no two ever share a name. See `containerName`. */
-  private calls = 0;
 
   constructor(private readonly options: ContainerBackendOptions) {}
 
@@ -233,23 +216,13 @@ export class ContainerBackend implements ExecBackend {
     const work = this.options.mountFor(request);
     if (!options.skipMountCheck) await this.checkMount(request, work);
 
-    // `-v` with a source that does not exist does not fail: the daemon CREATES
-    // it, and on Linux it creates it as root — while the container runs as the
-    // operator's uid, so `/home/hex` comes up unwritable and `npm install` dies
-    // on EACCES against its own cache. Made here rather than by the caller so
-    // the mount probe is covered by the same line.
-    const home = this.options.homeFor(request);
-    await mkdir(home, { recursive: true });
-
     const name = containerName(
-      request.id,
-      ++this.calls,
-      options.skipMountCheck,
+      options.skipMountCheck ? `${request.id}-probe` : request.id,
     );
     const args = buildRunArgs(config, {
       name,
       work,
-      home,
+      home: this.options.homeFor(request),
       agent: this.options.agent,
       workspace: request.id,
       command: request.command,
@@ -271,23 +244,6 @@ export class ContainerBackend implements ExecBackend {
         });
       },
     });
-  }
-
-  /**
-   * How many leftovers there are, without removing them.
-   *
-   * `hex check` reports; the daemon sweeps. A check that quietly killed a
-   * container belonging to a conversation running in another process would be a
-   * surprising thing for a command called "check" to do.
-   */
-  async leaked(): Promise<number> {
-    const { runtime } = this.options.config;
-    const { stdout } = await run(
-      runtime,
-      ["ps", "-aq", "--filter", `label=hex.agent=${this.options.agent}`],
-      { timeout: PROBE_TIMEOUT_MS },
-    );
-    return stdout.split("\n").filter((line) => line.trim() !== "").length;
   }
 
   /**

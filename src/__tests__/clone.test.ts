@@ -129,55 +129,6 @@ describe("a clone for a container", () => {
     expect(stdout.trim()).toBe("");
   }, 60_000);
 
-  it("keeps bringing work back after the agent rewrites its history", async () => {
-    // The normal review loop: Hex commits, the peer asks for a change, Hex amends.
-    // A fast-forward-only fetch is refused from then on, so the operator was left
-    // holding a branch that looked like Hex's work and was the superseded version
-    // — and the only record was one line in the log.
-    const record = await clones.ensure("room-amend", "grimoire", ["grimoire"]);
-    await writeFile(join(record.path, "draft.md"), "first try\n");
-    await run("git", ["add", "."], { cwd: record.path });
-    await run("git", ["commit", "-qm", "first try"], { cwd: record.path });
-    await clones.afterCommand(record);
-
-    await writeFile(join(record.path, "draft.md"), "second try\n");
-    await run("git", ["add", "."], { cwd: record.path });
-    await run("git", ["commit", "-q", "--amend", "-m", "second try"], {
-      cwd: record.path,
-    });
-    const { stdout: tip } = await run("git", ["rev-parse", "HEAD"], {
-      cwd: record.path,
-    });
-    await clones.afterCommand(record);
-
-    const { stdout: back } = await run("git", ["rev-parse", record.branch], {
-      cwd: repo,
-    });
-    expect(back.trim()).toBe(tip.trim());
-  }, 60_000);
-
-  it("corrects the branch after the agent throws a commit away", async () => {
-    // A reset leaves the tip at a commit the operator certainly has, which the
-    // old "do they have this commit?" guard read as nothing to do — so their
-    // branch kept pointing at work Hex had deliberately dropped.
-    const record = await clones.ensure("room-reset", "grimoire", ["grimoire"]);
-    await writeFile(join(record.path, "wrong.md"), "wrong\n");
-    await run("git", ["add", "."], { cwd: record.path });
-    await run("git", ["commit", "-qm", "wrong turn"], { cwd: record.path });
-    await clones.afterCommand(record);
-
-    await run("git", ["reset", "-q", "--hard", "HEAD~1"], { cwd: record.path });
-    const { stdout: tip } = await run("git", ["rev-parse", "HEAD"], {
-      cwd: record.path,
-    });
-    await clones.afterCommand(record);
-
-    const { stdout: back } = await run("git", ["rev-parse", record.branch], {
-      cwd: repo,
-    });
-    expect(back.trim()).toBe(tip.trim());
-  }, 60_000);
-
   it("rebuilds a clone someone deleted by hand", async () => {
     const first = await clones.ensure("room-f", "grimoire", ["grimoire"]);
     await rm(first.path, { recursive: true, force: true });
@@ -205,23 +156,5 @@ describe("a clone for a container", () => {
     await expect(
       clones.ensure("room-h", "grimoire", ["grimoire"]),
     ).rejects.toThrow(/made for host-worktree/);
-  }, 60_000);
-
-  it("refuses in the other direction too, which is the one people take", async () => {
-    // Flipping a toolset back to `host-worktree` is the obvious move when the
-    // container runtime breaks — and the daemon now hard-fails preflight in that
-    // case, so it is the move an operator makes under pressure. Without this the
-    // host backend ran `bash -lc` inside the container's clone, where nothing
-    // fetches the work back and no line says so.
-    const worktrees = new WorktreeManager({
-      store,
-      root: join(root, "worktrees"),
-      repos: [{ name: "grimoire", path: repo }],
-    });
-    await clones.ensure("room-flip", "grimoire", ["grimoire"]);
-
-    await expect(
-      worktrees.ensure("room-flip", "grimoire", ["grimoire"]),
-    ).rejects.toThrow(/made for container/);
   }, 60_000);
 });

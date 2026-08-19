@@ -9,7 +9,6 @@
  */
 
 import { parseArgs } from "node:util";
-import { join } from "node:path";
 import { nip19 } from "nostr-tools";
 import { loadConfig } from "./config-file.js";
 import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
@@ -21,7 +20,6 @@ import type { Isolation, TransportConfig } from "./config.js";
 import { createBrain } from "./brain/create.js";
 import { Nip29Transport } from "./transports/nip29.js";
 import { Nip17Transport } from "./transports/nip17.js";
-import { TranscriptPublisher } from "./transcript.js";
 import type { Transport } from "./transports/types.js";
 import { RoomContext } from "./context.js";
 import { ReplyGate } from "./policy.js";
@@ -31,7 +29,6 @@ import { KnowledgeTools } from "./tools/knowledge.js";
 import { RepoTools } from "./tools/repo-tools.js";
 import { createRunner, type Runner } from "./tools/backends.js";
 import { ContainerBackend } from "./tools/exec-container.js";
-import type { ExecBackend } from "./tools/exec-backend.js";
 import { toolsetFor } from "./grants.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { SessionTracker } from "./sessions.js";
@@ -232,40 +229,15 @@ async function main(): Promise<void> {
               : "  network   open — full egress; on a cloud host the instance metadata endpoint is reachable",
           );
 
-          // Built the way the daemon builds it, rather than with a hand-rolled
-          // pair of mount callbacks: a check that constructs something else can
-          // only report on something the daemon does not run.
-          const home = agentHome(
-            config.state.home
-              ? expandHome(config.state.home, loaded.baseDir)
-              : DEFAULT_HOME,
-            resolved.pubkey,
-          );
-          const store = HexStore.open(home.db);
-          let backend: ExecBackend;
-          try {
-            backend = createRunner("container", {
-              config,
-              store,
-              home,
-              agent: resolved.pubkey,
-            }).backend;
-          } finally {
-            store.close();
-          }
-          console.log(`  clones    ${join(home.dir, "clones")}`);
-          console.log(`  caches    ${join(home.dir, "caches")}`);
+          const backend = new ContainerBackend({
+            config: config.container,
+            agent: resolved.pubkey,
+            mountFor: (request) => request.cwd,
+            homeFor: (request) => request.cwd,
+          });
           try {
             await backend.preflight();
             console.log("  ready     yes");
-            if (backend instanceof ContainerBackend) {
-              const leaked = await backend.leaked();
-              console.log(
-                leaked === 0
-                  ? "  leftover  none"
-                  : `  leftover  ${leaked} container(s) from a previous run — the daemon removes these at startup`,
-              );
-            }
           } catch (error) {
             console.log(
               `  ready     NO — ${error instanceof Error ? error.message : String(error)}`,
@@ -629,19 +601,19 @@ async function main(): Promise<void> {
         // Private messages, if the config opened that door — and it only opens
         // to the pubkeys it names, because a DM needs no mention to be addressed.
         const dm = dmTransport(config.transports);
-        let dmTransportInstance: Nip17Transport | undefined;
         if (dm) {
-          dmTransportInstance = new Nip17Transport({
-            relays,
-            signer: resolved.signer,
-            pubkey: resolved.pubkey,
-            inboxRelays: config.relays.dm,
-            readRelays: config.relays.read,
-            allow: dm.allow.map((peer) => peer.pubkey),
-            since: startedAt,
-            log: (line) => console.log(line),
-          });
-          transports.push(dmTransportInstance);
+          transports.push(
+            new Nip17Transport({
+              relays,
+              signer: resolved.signer,
+              pubkey: resolved.pubkey,
+              inboxRelays: config.relays.dm,
+              readRelays: config.relays.read,
+              allow: dm.allow.map((peer) => peer.pubkey),
+              since: startedAt,
+              log: (line) => console.log(line),
+            }),
+          );
           console.log(
             `dm      ${dm.allow.length} allowed: ${dm.allow
               .map(
@@ -682,57 +654,8 @@ async function main(): Promise<void> {
           runners.set(toolset.isolation, runner);
         }
 
-        /**
-         * The transcript, if the config asked for one.
-         *
-         * It rides the DM transport because that is the only wrap path Hex has,
-         * so a transcript needs private messages configured even when the agent
-         * is answering in a group. Saying so here beats a publisher that silently
-         * writes nothing.
-         */
-        let transcript: TranscriptPublisher | undefined;
-        if (config.transcript) {
-          if (!dmTransportInstance) {
-            console.log(
-              "transcript: configured, but there is no nip-17 transport to wrap it — add one, or remove the section",
-            );
-          } else {
-            transcript = new TranscriptPublisher({
-              agentPubkey: resolved.pubkey,
-              slug: config.transcript.slug,
-              recipients: config.transcript.to,
-              store,
-              sink: dmTransportInstance,
-              deltas: config.transcript.deltas,
-              model: config.brain.model
-                ? { id: config.brain.model, provider: config.brain.type }
-                : undefined,
-              log: (line) => console.log(line),
-            });
-
-            // Anything a previous process left mid-run: its head still claims to
-            // be active on the relay, and only this process knows better.
-            await transcript.closeAll("aborted");
-
-            if (config.transcript.announce)
-              await transcript.announce({
-                name: config.profile.name ?? "hex",
-                about: config.profile.about,
-                picture: config.profile.picture,
-                instructions: loaded.instructions,
-              });
-
-            console.log(
-              `transcript ${config.transcript.to.length} recipient(s), deltas ${
-                config.transcript.deltas ? "on" : "off"
-              }`,
-            );
-          }
-        }
-
         const agent = runAgent({
           transports,
-          transcript,
           /**
            * What this message's channel may do.
            *
@@ -807,9 +730,6 @@ async function main(): Promise<void> {
         });
 
         await agent.idle();
-        // Every open head says `active`; leaving them that way would tell a
-        // reader the agent is still working when the process is gone.
-        if (transcript) await transcript.closeAll("done");
         // Every write already committed as it happened; this just releases the
         // file handle so a supervisor's restart is not racing a WAL checkpoint.
         store.close();

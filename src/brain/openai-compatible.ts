@@ -170,20 +170,6 @@ function parseArguments(raw: string | undefined): {
   }
 }
 
-/**
- * Tell a listener something, and never let it break the turn.
- *
- * An observer is a bystander: a transcript publisher, a log. If one throws, the
- * work it was watching must still finish.
- */
-function safely(report: () => void): void {
-  try {
-    report();
-  } catch {
-    // A listener's problem is not the turn's problem.
-  }
-}
-
 export class OpenAICompatibleBrain implements Brain {
   readonly name = "openai-compatible";
 
@@ -218,11 +204,6 @@ export class OpenAICompatibleBrain implements Brain {
       }
       const calls = choice.tool_calls ?? [];
 
-      // Whatever prose this step produced is the model reasoning, not what it
-      // says to the room — that only ever happens through a tool.
-      const prose = (choice.content ?? "").trim();
-      if (prose) safely(() => request.observer?.thinking?.(prose));
-
       if (calls.length === 0) {
         const text = (choice.content ?? "").trim();
         if (!text)
@@ -241,13 +222,6 @@ export class OpenAICompatibleBrain implements Brain {
 
         log(
           "[hex] the model answered without calling respond — delivering its text anyway",
-        );
-        safely(() =>
-          request.observer?.toolCall?.({
-            id: RESPOND_TOOL,
-            name: RESPOND_TOOL,
-            arguments: { text },
-          }),
         );
         const result = await request.tools.call({
           name: RESPOND_TOOL,
@@ -269,22 +243,10 @@ export class OpenAICompatibleBrain implements Brain {
 
       for (const call of calls) {
         const name = call.function?.name ?? "";
-        const id = call.id ?? name;
         const { args, error } = parseArguments(call.function?.arguments);
-        safely(() =>
-          request.observer?.toolCall?.({ id, name, arguments: args ?? null }),
-        );
         const result = error
           ? { ok: false, output: error }
           : await request.tools.call({ name, arguments: args });
-        safely(() =>
-          request.observer?.toolResult?.({
-            id,
-            name,
-            ok: result.ok,
-            output: result.output,
-          }),
-        );
 
         // One line per call, so "did it look anything up?" is answerable from the
         // log rather than by inference from the answer's quality.
