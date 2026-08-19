@@ -195,6 +195,40 @@ describe("nostr.req", () => {
     );
   }
 
+  it("returns the newest up to the limit, and says how many matched", async () => {
+    /**
+     * `limit` is per relay, so a union across several routinely exceeds it. The
+     * tool used to report the union's size and show only the first `limit` — a
+     * model told "99 events" and handed fifty summarised the fifty as if they
+     * were the ninety-nine. And the first fifty of an unsorted union are whoever
+     * answered fastest, not the recent ones.
+     */
+    const older = finalizeEvent(
+      { kind: 1, content: "older", created_at: 100, tags: [] },
+      authorKey,
+    );
+    const newer = finalizeEvent(
+      { kind: 1, content: "newer", created_at: 900, tags: [] },
+      authorKey,
+    );
+    relay = await startMockRelay({ kind: "normal", events: [older, newer] });
+    relays = createRelays();
+    const tools = new KnowledgeTools({ relays, readRelays: [relay.url] });
+
+    const result = await tools.call(REQ_TOOL, { kinds: [1], limit: 1 });
+    const payload = JSON.parse(result.output) as {
+      matched: number;
+      returned: number;
+      note?: string;
+      events: { content: string }[];
+    };
+
+    expect(payload.matched).toBe(2);
+    expect(payload.returned).toBe(1);
+    expect(payload.note).toContain("2 events matched");
+    expect(payload.events[0]!.content).toBe("newer");
+  });
+
   it("reads from the configured relays and returns quotable entities", async () => {
     relay = await startMockRelay({ kind: "normal", events: [note("hello")] });
     relays = createRelays();
@@ -202,11 +236,13 @@ describe("nostr.req", () => {
 
     const result = await tools.call(REQ_TOOL, { kinds: [1] });
     const payload = JSON.parse(result.output) as {
-      count: number;
+      matched: number;
+      returned: number;
       events: { npub: string; nevent: string; content: string }[];
     };
 
-    expect(payload.count).toBe(1);
+    expect(payload.matched).toBe(1);
+    expect(payload.returned).toBe(1);
     // Supplied, not left to the model: one handed only hex writes an npub with a
     // bad checksum, and grimoire renders that as dead text.
     expect(payload.events[0]!.npub).toBe(nip19.npubEncode(author));

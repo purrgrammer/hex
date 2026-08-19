@@ -73,11 +73,12 @@ const SECOND_TURN = [
   },
 ];
 
-function inbound(id: string, text: string): Inbound {
+function inbound(id: string, text: string, replyToId?: string): Inbound {
   return {
     id,
     author: PEER,
     text,
+    replyToId,
     createdAt: 1000,
     room: { transport: "nip-17", id: PEER },
     addressesSelf: true,
@@ -117,6 +118,8 @@ function fakeEve(
   const encoder = new TextEncoder();
   const session = sessionId ?? `wrun_TEST_${(hostCounter += 1)}`;
   const stored = [...events];
+  /** Every create mints a new id, as a real host does. */
+  const created: string[] = [];
 
   const impl = (async (url: string | URL, init?: RequestInit) => {
     const path = new URL(String(url)).pathname;
@@ -124,12 +127,20 @@ function fakeEve(
       posts.push({ path, body: JSON.parse(String(init.body)) });
       // Only a CONTINUE appends. Creating a session with the first message is
       // what produced the events already stored, and a cancel produces none.
-      if (path === `/eve/v1/session/${session}`) stored.push(...later);
+      if (path.startsWith("/eve/v1/session/") && !path.endsWith("/cancel"))
+        stored.push(...later);
+      const isCreate = path === "/eve/v1/session";
+      if (isCreate) created.push(session);
       return {
         ok: true,
         status: 200,
         statusText: "OK",
-        json: async () => ({ ok: true, sessionId: session }),
+        json: async () => ({
+          ok: true,
+          // The first create is the session everything else refers to; a second
+          // one is a second session, and it must not be mistaken for the first.
+          sessionId: created.length > 1 ? `${session}_${created.length}` : session,
+        }),
       };
     }
     return {
@@ -310,7 +321,7 @@ describe("EveServer", () => {
     const server_ = server(eve, bus, out.impl);
 
     await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "second"));
+    await server_.handle(inbound("msg-2", "second", "msg-1"));
 
     expect(eve.posts.map((p) => p.path)).toEqual([
       "/eve/v1/session",
@@ -340,7 +351,7 @@ describe("EveServer", () => {
     const server_ = server(eve, bus, sink().impl);
 
     await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "second"));
+    await server_.handle(inbound("msg-2", "second", "msg-1"));
 
     expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
   });
@@ -371,7 +382,7 @@ describe("EveServer", () => {
     const server_ = server(eve, bus, sink().impl);
 
     await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "second"));
+    await server_.handle(inbound("msg-2", "second", "msg-1"));
 
     expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
   });
@@ -391,7 +402,7 @@ describe("EveServer", () => {
     const server_ = server(eve, bus, sink().impl);
 
     await server_.handle(inbound("msg-1", "first"));
-    await server_.interrupt(inbound("msg-2", "never mind — this instead"));
+    await server_.interrupt(inbound("msg-2", "never mind — this instead", "msg-1"));
 
     expect(eve.posts.map((post) => post.path)).toEqual([
       "/eve/v1/session",
@@ -399,6 +410,28 @@ describe("EveServer", () => {
       `/eve/v1/session/${eve.session}`,
     ]);
     expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
+  });
+
+  it("starts a new session for a message that threads onto nothing", async () => {
+    /**
+     * One session per correspondent forever meant a new subject inherited an
+     * hour of unrelated work, and the reader was handed one endless transcript
+     * rather than one run per thing they asked for.
+     *
+     * The protocol says which it is: an `e` tag means "about this", and its
+     * absence means a new subject.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+
+    await server_.handle(inbound("msg-1", "first"));
+    await server_.handle(inbound("msg-2", "an unrelated question"));
+
+    // Two creates, no continue: the second message opened its own run.
+    expect(eve.posts.map((post) => post.path)).toEqual([
+      "/eve/v1/session",
+      "/eve/v1/session",
+    ]);
   });
 
   it("picks up the conversation a previous process was having", async () => {
@@ -418,7 +451,7 @@ describe("EveServer", () => {
     // process, same disk, same Eve.
     const second = fakeEve(FIRST_TURN, 8, first.session, SECOND_TURN);
     await server(second, transport(), sink().impl).handle(
-      inbound("msg-2", "second"),
+      inbound("msg-2", "second", "msg-1"),
     );
     expect(second.posts.map((p) => p.path)).toEqual([
       `/eve/v1/session/${first.session}`,

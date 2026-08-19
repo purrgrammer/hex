@@ -117,13 +117,21 @@ export class RoomTools implements ToolHost {
       {
         name: RESPOND_TOOL,
         description:
-          "Say something in the room, as a reply to the message you were given. This is the only way to be heard; anything you write outside this tool is private thinking.",
+          "Say something in the room, as a reply to the message you were given. " +
+          "This is the only way to be heard; anything you write outside this tool " +
+          "is private thinking. PLAIN TEXT ONLY — no markdown. A chat message is " +
+          "not a document: asterisks, backticks and heading marks arrive as " +
+          "literal characters in most Nostr clients.",
         parameters: {
           type: "object",
           properties: {
             text: {
               type: "string",
-              description: "What to say. Plain text, as a chat message.",
+              description:
+                "What to say, as a chat message. Plain text: no markdown, no " +
+                "bold, no bullet characters, no code fences. Use line breaks " +
+                "and ordinary sentences, and `nostr:` bech32 entities to refer " +
+                "to people and events.",
             },
           },
           required: ["text"],
@@ -131,7 +139,8 @@ export class RoomTools implements ToolHost {
         },
         prompt:
           "`chat.respond` is how you speak: call it once with what you want to" +
-          " say, and nothing else you write is heard.",
+          " say, in PLAIN TEXT with no markdown, and nothing else you write is" +
+          " heard.",
       },
     ];
 

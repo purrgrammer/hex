@@ -362,14 +362,35 @@ export class KnowledgeTools {
       timeoutMs: this.options.requestTimeoutMs,
     });
 
+    /**
+     * `limit` is per relay, and this asked several.
+     *
+     * Four relays each honouring `limit: 50` is up to two hundred events, so the
+     * union routinely came back three times the size of the limit — and the tool
+     * reported that number while showing only the first fifty. A model told "99
+     * events" and shown fifty summarised the fifty as if they were the ninety-nine.
+     *
+     * NEWEST first before the cut, because the first fifty of an unsorted union
+     * are whichever relay answered fastest. "The recent ones" has to mean the
+     * recent ones.
+     */
+    const newest = [...events].sort((a, b) => b.created_at - a.created_at);
+    const kept = newest.slice(0, filter.limit);
+
     return {
       ok: true,
       output: JSON.stringify({
         // The filter as sent: the model can see why a query came back empty.
         filter,
         relays,
-        count: events.length,
-        events: events.slice(0, filter.limit).map(describeEvent),
+        matched: events.length,
+        returned: kept.length,
+        ...(events.length > kept.length
+          ? {
+              note: `${events.length} events matched across ${relays.length} relays; the ${kept.length} newest are below`,
+            }
+          : {}),
+        events: kept.map(describeEvent),
       }),
     };
   }

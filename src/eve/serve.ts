@@ -191,7 +191,26 @@ export class EveServer {
 
   private async turn(inbound: Inbound): Promise<void> {
     const peer = inbound.author;
-    let conversation = this.conversations.get(peer) ?? this.resume(peer);
+    /**
+     * A reply continues the run; a fresh message starts a new one.
+     *
+     * One session per correspondent, forever, meant every question a person ever
+     * asked landed in the same ever-growing context — a new subject inherited an
+     * hour of unrelated work, and the reader was shown one endless transcript
+     * instead of one run per thing asked for.
+     *
+     * The protocol already says which it is. A DM carrying an `e` tag is threaded
+     * onto something, and that is the reader saying "about this"; a message with
+     * no thread is a new subject. Hex does not have to guess, and does not get to.
+     */
+    let conversation = inbound.replyToId
+      ? (this.conversations.get(peer) ?? this.resume(peer))
+      : undefined;
+    if (!conversation && inbound.replyToId)
+      this.log(
+        `[hex] ${short(peer)} replied to something with no session behind it — starting one`,
+      );
+    if (!inbound.replyToId) this.conversations.delete(peer);
 
     /**
      * Say "seen" before doing anything slow.
