@@ -243,7 +243,12 @@ a real `.git` directory, one bind mount, nothing shared. `--no-hardlinks` is
 mandatory — a local clone hardlinks packfiles and the container runs as the host
 uid, so writing through a shared inode would corrupt the operator's repository.
 Committed work is fetched back onto `hex/<hash>` in their clone; a command that
-only read something moves nothing.
+only read something moves nothing. The fetch is forced, because the review loop
+rewrites history — Hex commits, the peer asks for a change, Hex amends — and a
+fast-forward-only fetch would be refused from then on, leaving a branch that
+looks like the work and is the superseded version. `hex/<hash>` is Hex's own
+namespace, so forcing it overwrites nothing of the operator's; if they did commit
+on that branch themselves, their reflog still holds it.
 
 The image is named in config and never built by Hex. `node:26-bookworm` matches
 this repo's `.nvmrc` and already has git — the `-slim` tags do not.

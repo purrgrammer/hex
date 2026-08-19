@@ -299,7 +299,9 @@ describe("interrupting", () => {
     g.begin(first);
 
     const copy = inbound({ id: "b", room: DM });
-    expect(g.consider(copy).reply === false && g.consider(copy).reason).toBe(
+    expect(g.consider(copy).reply).toBe(false);
+    const second = g.consider(copy);
+    expect(second.reply === false ? second.reason : undefined).toBe(
       "duplicate",
     );
   });

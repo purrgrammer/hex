@@ -46,6 +46,37 @@ export interface StoredSession {
 }
 
 /** A checkout one conversation works in, so a restart finds it again. */
+/**
+ * Where a published transcript stands.
+ *
+ * Two cursors, and both have to be durable. `stream_index` is how far into Eve's
+ * event stream this publisher has read, so a restart resumes instead of
+ * republishing. `seq` and `prev` are the chain on the wire: resuming at `seq` 1
+ * would publish a second chain under one session id, which every conforming
+ * reader is required to read as a FORK rather than a continuation.
+ *
+ * `nostr_id` is the 32-byte session id the wire uses, kept apart from Eve's own
+ * session id — which is Eve's to shape and not something to hand a relay.
+ */
+export interface StoredTranscript {
+  sessionId: string;
+  nostrId: string;
+  seq: number;
+  prev?: string;
+  turn: number;
+  status: string;
+  /** The event that started this run, kept so a republished head still names it. */
+  trigger?: string;
+  streamIndex: number;
+  startedAt: number;
+  endedAt?: number;
+  inTokens: number;
+  outTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost?: string;
+}
+
 export interface StoredWorktree {
   /** The room the checkout belongs to. See `RepoToolsOptions.workspace`. */
   workspace: string;
@@ -128,6 +159,25 @@ CREATE TABLE IF NOT EXISTS participants (
   PRIMARY KEY (session_id, pubkey)
 );
 CREATE INDEX IF NOT EXISTS participants_pubkey ON participants (pubkey);
+
+CREATE TABLE IF NOT EXISTS transcripts (
+  session_id  TEXT PRIMARY KEY,
+  nostr_id    TEXT NOT NULL,
+  seq         INTEGER NOT NULL,
+  prev        TEXT,
+  turn        INTEGER NOT NULL,
+  status      TEXT NOT NULL,
+  trigger     TEXT,
+  stream_index INTEGER NOT NULL DEFAULT 0,
+  started_at  INTEGER NOT NULL,
+  ended_at    INTEGER,
+  in_tokens   INTEGER NOT NULL DEFAULT 0,
+  out_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_read  INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  cost        TEXT
+);
+CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 
 CREATE TABLE IF NOT EXISTS worktrees (
   workspace  TEXT NOT NULL,
@@ -229,6 +279,79 @@ export class HexStore {
         worktree.branch,
         worktree.createdAt,
         worktree.isolation ?? "host-worktree",
+      );
+  }
+
+  transcriptFor(sessionId: string): StoredTranscript | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM transcripts WHERE session_id = ?`)
+      .get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      sessionId: String(row.session_id),
+      nostrId: String(row.nostr_id),
+      seq: Number(row.seq),
+      prev: row.prev == null ? undefined : String(row.prev),
+      turn: Number(row.turn),
+      status: String(row.status),
+      trigger: row.trigger == null ? undefined : String(row.trigger),
+      streamIndex: Number(row.stream_index),
+      startedAt: Number(row.started_at),
+      endedAt: row.ended_at == null ? undefined : Number(row.ended_at),
+      inTokens: Number(row.in_tokens),
+      outTokens: Number(row.out_tokens),
+      cacheRead: Number(row.cache_read),
+      cacheWrite: Number(row.cache_write),
+      cost: row.cost == null ? undefined : String(row.cost),
+    };
+  }
+
+  /** Sessions whose head never reached a terminal status. */
+  openTranscripts(): StoredTranscript[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT session_id FROM transcripts WHERE status NOT IN ('done', 'error', 'aborted')`,
+        )
+        .all() as { session_id: string }[]
+    )
+      .map((row) => this.transcriptFor(row.session_id))
+      .filter((t): t is StoredTranscript => !!t);
+  }
+
+  /** Write both cursors. Called after every publish, so a crash loses one event. */
+  saveTranscript(transcript: StoredTranscript): void {
+    this.db
+      .prepare(
+        `INSERT INTO transcripts (
+           session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
+           started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
+           cost
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
+           status = excluded.status, trigger = excluded.trigger,
+           stream_index = excluded.stream_index, ended_at = excluded.ended_at,
+           in_tokens = excluded.in_tokens, out_tokens = excluded.out_tokens,
+           cache_read = excluded.cache_read, cache_write = excluded.cache_write,
+           cost = excluded.cost`,
+      )
+      .run(
+        transcript.sessionId,
+        transcript.nostrId,
+        transcript.seq,
+        transcript.prev ?? null,
+        transcript.turn,
+        transcript.status,
+        transcript.trigger ?? null,
+        transcript.streamIndex,
+        transcript.startedAt,
+        transcript.endedAt ?? null,
+        transcript.inTokens,
+        transcript.outTokens,
+        transcript.cacheRead,
+        transcript.cacheWrite,
+        transcript.cost ?? null,
       );
   }
 
