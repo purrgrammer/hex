@@ -108,11 +108,17 @@ function sink() {
 
 function transport() {
   const replies: { to: string; text: string; tags?: string[][] }[] = [];
+  const reactions: { to: string; emoji: string }[] = [];
   return {
     replies,
+    reactions,
     reply: async (to: Inbound, text: string, tags?: string[][]) => {
       replies.push({ to: to.id, text, tags });
       return "reply-id";
+    },
+    react: async (to: Inbound, emoji: string) => {
+      reactions.push({ to: to.id, emoji });
+      return "reaction-id";
     },
   };
 }
@@ -138,7 +144,7 @@ describe("EveServer", () => {
     eve: ReturnType<typeof fakeEve>,
     bus: ReturnType<typeof transport>,
     sinkImpl: RumorSink,
-    reply = false,
+    reply = true,
   ) {
     return new EveServer({
       host: HOST,
@@ -193,22 +199,33 @@ describe("EveServer", () => {
     expect(eve.posts[0]?.path).toBe("/eve/v1/session");
   });
 
-  it("says nothing in the conversation unless asked to", async () => {
+  it("answers in the conversation, and can be told not to", async () => {
+    // A DM is a conversation. One that goes quiet while something invisible
+    // happens elsewhere reads as broken to everyone whose client knows nothing
+    // about transcripts — so the reply is the default and the session is what
+    // makes it checkable.
     const eve = fakeEve();
     const bus = transport();
-    const out = sink();
-
-    await server(eve, bus, out.impl).handle(inbound("msg-1", "hello"));
-    expect(bus.replies).toHaveLength(0);
+    await server(eve, bus, sink().impl).handle(inbound("msg-1", "hello"));
+    expect(bus.replies).toEqual([
+      { to: "msg-1", text: "41 of them.", tags: undefined },
+    ]);
 
     const eve2 = fakeEve();
     const bus2 = transport();
-    await server(eve2, bus2, sink().impl, true).handle(
+    await server(eve2, bus2, sink().impl, false).handle(
       inbound("msg-2", "hello"),
     );
-    expect(bus2.replies).toEqual([
-      { to: "msg-2", text: "41 of them.", tags: undefined },
-    ]);
+    expect(bus2.replies).toHaveLength(0);
+  });
+
+  it("acknowledges the message before doing anything slow", async () => {
+    // A model takes seconds and a tool can take minutes; without this there is no
+    // difference a reader can see between "working on it" and "ignored you".
+    const eve = fakeEve();
+    const bus = transport();
+    await server(eve, bus, sink().impl).handle(inbound("msg-1", "hello"));
+    expect(bus.reactions).toEqual([{ to: "msg-1", emoji: "👀" }]);
   });
 
   it("continues one session for a follow-up rather than starting another", async () => {

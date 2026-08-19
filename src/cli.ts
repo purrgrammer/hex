@@ -36,7 +36,7 @@ Usage:
   hex dm       [config] <npub> "message"   send a private message, unprompted
   hex eve      [config] <session-id> [--host <url>] [--dry-run]
                                    follow an Eve session, publish it as events
-  hex serve    [config] [--host <url>] [--reply]
+  hex serve    [config] [--host <url>] [--no-reply]
                                    answer DMs by running them through Eve
 
 Config defaults to ./hex.config.json.
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
       auto: { type: "boolean", default: false },
       "env-file": { type: "string" },
       host: { type: "string" },
-      reply: { type: "boolean", default: false },
+      "no-reply": { type: "boolean", default: false },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -543,7 +543,7 @@ async function main(): Promise<void> {
         const server = new EveServer({
           host,
           transport,
-          reply: values.reply,
+          reply: !values["no-reply"],
           log: (line) => console.log(line),
           transcript: {
             agentPubkey: resolved.pubkey,
@@ -565,9 +565,9 @@ async function main(): Promise<void> {
           `allow   ${dm.allow.map((peer) => nip19.npubEncode(peer.pubkey).slice(0, 16) + "…").join(", ")}`,
         );
         console.log(
-          values.reply
-            ? "answering in the conversation as well as publishing the session"
-            : "the session IS the answer — pass --reply to also send it as a message",
+          values["no-reply"]
+            ? "publishing sessions only — nothing will be said in the conversation"
+            : "answering in the conversation, with the session published alongside",
         );
 
         /**

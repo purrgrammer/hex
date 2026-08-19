@@ -30,9 +30,16 @@ import { payload, stringField } from "./types.js";
 import { sessionAddress } from "../nostr/encode.js";
 import type { Inbound } from "../transports/types.js";
 
-/** What this needs of a transport: hear a message, answer it. */
+/** What this needs of a transport: answer a message, and acknowledge one. */
 export interface ServeTransport {
   reply(to: Inbound, text: string, tags?: string[][]): Promise<string>;
+  /**
+   * Optional, because not every protocol has a reaction.
+   *
+   * A model takes seconds and a tool can take minutes; without this there is no
+   * difference a reader can see between "working on it" and "ignored you".
+   */
+  react?(to: Inbound, emoji: string): Promise<string>;
 }
 
 export interface ServeOptions {
@@ -40,13 +47,17 @@ export interface ServeOptions {
   host: string;
   transport: ServeTransport;
   /**
-   * Also send the answer as an ordinary message.
+   * Also send the answer as an ordinary message. On unless told otherwise.
    *
-   * Off by default: the session already carries it, and a client that renders
-   * sessions would show the same words twice. On for correspondents whose client
-   * knows nothing about transcripts.
+   * The session carries the answer either way, and a client that renders sessions
+   * shows it there — but a DM is a CONVERSATION, and one that goes quiet while
+   * something invisible happens elsewhere reads as broken to everyone whose client
+   * does not know about transcripts. So the reply is the default and the transcript
+   * is what makes it checkable.
    */
   reply?: boolean;
+  /** What to react with while working. Empty string for no reaction. */
+  ackEmoji?: string;
   /** Everything a transcript needs except the session, which is per correspondent. */
   transcript: Omit<EveTranscriptOptions, "sink"> & {
     sink: EveTranscriptOptions["sink"];
@@ -110,6 +121,23 @@ export class EveServer {
     const peer = inbound.author;
     let conversation = this.conversations.get(peer);
 
+    /**
+     * Say "seen" before doing anything slow.
+     *
+     * Sent first and never awaited into the turn's critical path: a relay that
+     * will not take a reaction must not stop the work. A failed ack is logged and
+     * the turn goes on.
+     */
+    const emoji = this.options.ackEmoji ?? "👀";
+    if (emoji && this.options.transport.react)
+      void this.options.transport
+        .react(inbound, emoji)
+        .catch((error: unknown) =>
+          this.log(
+            `[hex] could not acknowledge ${short(peer)}: ${message(error)}`,
+          ),
+        );
+
     if (!conversation) {
       const sessionId = await this.createSession(inbound.text);
       const transcript = new EveTranscript(
@@ -143,7 +171,7 @@ export class EveServer {
       )}`,
     );
 
-    if (!this.options.reply) return;
+    if (this.options.reply === false) return;
     if (!answer) {
       this.log(`[hex] the turn for ${short(peer)} produced no answer to send`);
       return;
