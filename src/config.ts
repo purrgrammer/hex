@@ -84,6 +84,15 @@ export interface TranscriptConfig {
  */
 export interface EveConfig {
   host: string;
+  /**
+   * The loopback port Hex offers its own tools on, for the runtime to call back.
+   *
+   * Off unless set: an agent with no bridge answers with whatever tools its
+   * runtime ships with, which is a working configuration and the one that runs
+   * with no shared secret lying around. The token is read from the environment
+   * rather than written here, like every other secret in this config.
+   */
+  bridge?: { port: number; tokenEnv: string };
 }
 
 export type TransportConfig =
@@ -336,7 +345,16 @@ function parseEve(value: unknown): EveConfig | undefined {
   } catch {
     throw new ConfigError(`eve.host must be a URL, not "${host}"`);
   }
-  return { host };
+  return { host, bridge: parseBridge(record.bridge) };
+}
+
+function parseBridge(value: unknown): EveConfig["bridge"] {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, "eve.bridge");
+  const port = record.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 0)
+    throw new ConfigError("eve.bridge.port must be a port number");
+  return { port, tokenEnv: requireString(record.tokenEnv, "eve.bridge.tokenEnv") };
 }
 
 function parseTransports(value: unknown): TransportConfig[] {

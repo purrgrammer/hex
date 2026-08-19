@@ -24,6 +24,9 @@ import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 import { EveServer } from "./eve/serve.js";
+import { ToolBridge } from "./eve/bridge.js";
+import { KnowledgeTools } from "./tools/knowledge.js";
+import { RoomTools } from "./tools/room-tools.js";
 import { ReplyGate } from "./policy.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
@@ -540,10 +543,51 @@ async function main(): Promise<void> {
           log: (line) => console.log(line),
         });
 
+        /**
+         * Hex's own tools, if the config opened a bridge for them.
+         *
+         * The runtime does the thinking and this process does the Nostr: reading
+         * relays, resolving bech32, and — the one that matters — speaking. Set
+         * up here rather than inside `EveServer` because these are the operator's
+         * tools, bound to the operator's relays and key, and the server's job is
+         * to run turns, not to decide what an agent may do.
+         */
+        const bridgeConfig = config.eve?.bridge;
+        let bridge: ToolBridge | undefined;
+        if (bridgeConfig) {
+          const token = process.env[bridgeConfig.tokenEnv];
+          if (!token)
+            fail(
+              `eve.bridge.tokenEnv names $${bridgeConfig.tokenEnv}, which is not set — the bridge will not open without a shared token`,
+            );
+          bridge = new ToolBridge({
+            port: bridgeConfig.port,
+            token,
+            log: (line) => console.log(line),
+          });
+          await bridge.start();
+        }
+        const knowledge = bridge
+          ? new KnowledgeTools({ relays, readRelays: config.relays.read })
+          : undefined;
+
         const server = new EveServer({
           host,
           transport,
           reply: !values["no-reply"],
+          tools:
+            bridge && knowledge
+              ? {
+                  bridge,
+                  host: (inbound) =>
+                    new RoomTools({
+                      transport,
+                      incoming: inbound,
+                      knowledge,
+                      log: (line) => console.log(line),
+                    }),
+                }
+              : undefined,
           log: (line) => console.log(line),
           transcript: {
             agentPubkey: resolved.pubkey,
@@ -637,6 +681,10 @@ async function main(): Promise<void> {
           },
         });
 
+        if (bridge)
+          console.log(
+            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, grimoire.help, nostr.req, nostr.resolve`,
+          );
         console.log(`listening dms on ${config.relays.dm.join(", ")}`);
 
         await new Promise<void>((resolveRun) => {
@@ -652,6 +700,7 @@ async function main(): Promise<void> {
         // Every followed session keeps whatever status Eve last reported: the
         // follower is leaving, the sessions are not over.
         await server.close();
+        bridge?.stop();
         transport.stop();
         store.close();
         await resolved.close();

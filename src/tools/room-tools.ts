@@ -23,8 +23,20 @@ import {
   type ToolSpec,
 } from "./types.js";
 
+/**
+ * All a room's tools need of a transport: speak, and maybe react.
+ *
+ * Narrower than `Transport` on purpose. The bridge binds these tools to whatever
+ * is answering a message — a full transport under `serve`, a two-method shim in a
+ * test — and requiring `start`/`history`/`stop` here would mean a runtime seam
+ * that only one implementation can pass through.
+ */
+export type RoomToolsTransport = Pick<Transport, "reply"> & {
+  react?: Transport["react"];
+};
+
 export interface RoomToolsOptions {
-  transport: Transport;
+  transport: RoomToolsTransport;
   incoming: Inbound;
   /** Log instead of publishing. */
   dryRun?: boolean;

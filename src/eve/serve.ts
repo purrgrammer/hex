@@ -32,6 +32,8 @@ import { streamSession } from "./stream.js";
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
 import { payload, stringField } from "./types.js";
 import { sessionAddress } from "../nostr/encode.js";
+import type { ToolBridge } from "./bridge.js";
+import type { ToolHost } from "../tools/types.js";
 import type { Inbound } from "../transports/types.js";
 
 /** What this needs of a transport: answer a message, and acknowledge one. */
@@ -65,6 +67,19 @@ export interface ServeOptions {
   /** Everything a transcript needs except the session, which is per correspondent. */
   transcript: Omit<EveTranscriptOptions, "sink"> & {
     sink: EveTranscriptOptions["sink"];
+  };
+  /**
+   * Hex's own tools, offered to the runtime through the loopback bridge.
+   *
+   * Optional: without it the agent has only whatever tools its runtime ships
+   * with, and the answer is scraped from the last message of the turn. With it,
+   * speaking is a tool call like any other — which is the only way an answer can
+   * carry a room, a reply target and a transport the runtime has never heard of.
+   */
+  tools?: {
+    bridge: ToolBridge;
+    /** A fresh host per turn, bound to the message being answered. */
+    host: (inbound: Inbound) => ToolHost;
   };
   log?: (line: string) => void;
   fetchImpl?: typeof fetch;
@@ -149,6 +164,15 @@ export class EveServer {
      * follow-up does, and the value is where the stream stood before the message
      * went in.
      */
+    /**
+     * The tools for THIS message, bound for the length of the turn.
+     *
+     * Fresh per turn because every cap in a room's tools is per-turn — one
+     * answer, nothing at all once cancelled — and because `respond` answers the
+     * message it was built with. A stale host would answer the previous question.
+     */
+    const host = this.options.tools?.host(inbound);
+
     let after: number;
     if (!conversation) {
       const sessionId = await this.createSession(inbound.text);
@@ -174,6 +198,10 @@ export class EveServer {
       );
       this.log(`[hex] ${short(peer)} → eve session ${sessionId}`);
       after = -1;
+      // Bound as soon as the id exists. The runtime cannot call a tool before it
+      // has thought, so a round trip's head start is enough — and a call that
+      // does arrive first is refused politely rather than misrouted.
+      if (host) this.options.tools?.bridge.bind(sessionId, host);
     } else {
       /**
        * Where the stream stood BEFORE the message was sent.
@@ -186,6 +214,7 @@ export class EveServer {
        * is skipped; only the answer is required to come from after the question.
        */
       after = await this.tailIndex(conversation.sessionId);
+      if (host) this.options.tools?.bridge.bind(conversation.sessionId, host);
       await this.sendMessage(conversation.sessionId, inbound.text);
       this.log(
         `[hex] ${short(peer)} → continuing eve session ${conversation.sessionId}`,
@@ -201,6 +230,16 @@ export class EveServer {
     );
 
     if (this.options.reply === false) return;
+    /**
+     * The agent already spoke, so Hex does not speak for it.
+     *
+     * `chat.respond` is the answer when the runtime has it: it went out mid-turn,
+     * in the room, threaded onto the message. Sending the scraped last message on
+     * top of it says everything twice. The scrape stays as the fallback for a
+     * model that never called the tool, which is the case the reply default was
+     * turned on for.
+     */
+    if (host?.delivered) return;
     if (!answer) {
       this.log(`[hex] the turn for ${short(peer)} produced no answer to send`);
       return;
