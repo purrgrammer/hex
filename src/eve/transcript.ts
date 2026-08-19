@@ -761,9 +761,22 @@ export class EveTranscript {
         await this.status("idle");
         break;
 
+      /**
+       * A stopped turn is not a stopped session.
+       *
+       * This set `aborted`, which is TERMINAL — and the `session.waiting` that
+       * always follows then set `idle` over the top, so the terminal flag was
+       * written and unwritten within a millisecond. Had the order ever differed,
+       * stopping one turn would have marked a perfectly usable session as ended
+       * for good.
+       *
+       * The runtime is explicit that cancelling is not a failure and the session
+       * accepts the next message normally, so the turn is closed and the status
+       * is left to the boundary event that follows. `aborted` is for a run
+       * nobody is coming back to.
+       */
       case "turn.cancelled":
-        await this.flush("assistant");
-        await this.status("aborted");
+        await this.flush("assistant", { stop: "error" });
         break;
 
       case "turn.failed":
