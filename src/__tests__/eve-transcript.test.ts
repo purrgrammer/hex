@@ -284,6 +284,64 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("answers an approval once, whichever of Eve's two events lands first", async () => {
+    /**
+     * Eve emits `approval.settled` AND `input.resolved` for one approval, and
+     * nothing in the protocol fixes their order. Publishing both put the same
+     * decision in the chain twice — the duplication that a person reading their
+     * own transcript notices immediately and no type can catch.
+     */
+    for (const order of [
+      ["approval.settled", "input.resolved"],
+      ["input.resolved", "approval.settled"],
+    ]) {
+      const store = HexStore.open(agentHome(home, AGENT).db);
+      const { impl, sent } = sink();
+      const pub = publisher(store, impl);
+
+      await pub.handle({ type: "session.started", data: {} }, 1);
+      await pub.handle(
+        {
+          type: "input.requested",
+          data: {
+            requests: [
+              { requestId: "req_1", prompt: "Run it?", kind: "tool-approval" },
+            ],
+          },
+        },
+        2,
+      );
+
+      let index = 3;
+      for (const type of order) {
+        await pub.handle(
+          type === "approval.settled"
+            ? { type, data: { requestId: "req_1", outcome: "approved" } }
+            : {
+                type,
+                data: { resolutions: [{ requestId: "req_1", outcome: "answered" }] },
+              },
+          index++,
+        );
+      }
+
+      const answers = sent
+        .filter((s) => s.rumor.kind === 1777)
+        .flatMap((s) => parts(s.rumor))
+        .filter((part) => part.type === "input_resolved");
+      expect(answers).toHaveLength(1);
+      expect(answers[0]!.requestId).toBe("req_1");
+
+      // And the head moved off the block, so the run is not left looking parked.
+      expect(
+        tag(sent.filter((s) => s.rumor.kind === 31777).at(-1)!.rumor, "status"),
+      ).toBe("active");
+
+      await pub.close();
+      store.close();
+    }
+  });
+
   it("holds awaiting-input on the head, which no turn can say", async () => {
     const store = HexStore.open(agentHome(home, AGENT).db);
     const { impl, sent } = sink();

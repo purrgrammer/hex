@@ -60,6 +60,17 @@ export function stringField(
   return typeof value === "string" ? value : undefined;
 }
 
+/** The same, for a number — `null` is a value Eve sends and means "unknown". */
+export function numberField(
+  data: Record<string, unknown>,
+  name: string,
+): number | undefined {
+  const value = data[name];
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
 /**
  * Eve's finish reason, as this NIP's `stop`.
  *

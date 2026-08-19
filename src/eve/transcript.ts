@@ -45,6 +45,7 @@ import {
   outputText,
   payload,
   stopFor,
+  numberField,
   stringField,
   usageFor,
   type EveActionRequest,
@@ -182,6 +183,15 @@ export class EveTranscript {
 
   /** Tool calls seen this step, so a result can name the tool it answers. */
   private readonly calls = new Map<string, string>();
+
+  /** How full the window was when compaction was asked for, until it completes. */
+  private compactingAt?: number;
+
+  /** Children already mentioned in the log, so each is mentioned once. */
+  private readonly watchedChildren = new Set<string>();
+
+  /** Event types already reported as unmapped, so each is reported once. */
+  private readonly unknownTypes = new Set<string>();
 
   constructor(
     private readonly options: EveTranscriptOptions,
@@ -458,7 +468,8 @@ export class EveTranscript {
        * frequently arrives in a different process from the first.
        */
       case "message.received": {
-        const turnId = stringField(data, "turnId") ?? `turn-${this.record.turn}`;
+        const turnId =
+          stringField(data, "turnId") ?? `turn-${this.record.turn}`;
         if (this.record.saidTurn === turnId) break;
         this.record.saidTurn = turnId;
         const text = stringField(data, "message") ?? "";
@@ -673,6 +684,16 @@ export class EveTranscript {
           const resolution = asRecord(raw);
           const requestId = resolution && stringField(resolution, "requestId");
           if (!resolution || !requestId) continue;
+          /**
+           * Whichever twin arrives first wins.
+           *
+           * Eve emits `approval.settled` and `input.resolved` for one approval
+           * and nothing fixes their order, so publishing both unconditionally
+           * put the same answer in the chain twice. Gated on the request still
+           * being open, ordering stops mattering: the second one finds nothing
+           * to close and says nothing.
+           */
+          if (!this.openRequests.has(requestId)) continue;
           this.openRequests.delete(requestId);
           const response = asRecord(resolution.response);
           parts.push({
@@ -730,31 +751,151 @@ export class EveTranscript {
       /**
        * The context was summarised out from under the run.
        *
-       * Not a status — the session is neither blocked nor finished — but a
-       * reader of a long transcript otherwise cannot tell why the agent stopped
-       * remembering something it was told.
-       */
-      /**
-       * The context was summarised out from under the run.
-       *
        * Its own turn rather than a line folded into the next assistant message,
        * because it is not something the agent said — it is something that
        * happened TO the conversation, and a reader scrolling a long transcript
        * needs to see where the agent stopped being able to remember what came
        * before. Folded in, it read as the model narrating its own amnesia.
        */
-      case "compaction.completed":
+      /**
+       * Compaction is about to happen, and this is the only event that says how
+       * full the window was when it did. Held rather than published: the pair
+       * describes one occurrence, and two turns for it would read as the
+       * context having been summarised twice.
+       */
+      case "compaction.requested":
+        this.compactingAt = numberField(data, "usageInputTokens") ?? undefined;
+        break;
+
+      case "compaction.completed": {
+        const at = this.compactingAt;
+        this.compactingAt = undefined;
         await this.append(
           "tool",
           [
             {
               type: "text",
-              text: "The conversation so far was summarised to fit the context window.",
+              text: at
+                ? `The conversation so far was summarised to fit the context window, at ${at} input tokens.`
+                : "The conversation so far was summarised to fit the context window.",
             },
           ],
           { alt: "Context compacted." },
         );
         break;
+      }
+
+      /**
+       * The context was thrown away rather than summarised.
+       *
+       * Its own turn for the same reason compaction gets one, and a distinct
+       * sentence because the difference matters to anyone reading upwards: a
+       * compacted conversation still knows what it decided, a cleared one does
+       * not.
+       */
+      case "context.cleared":
+        await this.append(
+          "tool",
+          [
+            {
+              type: "text",
+              text: "The conversation so far was cleared. Nothing above this point is still in the agent's context.",
+            },
+          ],
+          { alt: "Context cleared." },
+        );
+        break;
+
+      /**
+       * An approval reached its verdict.
+       *
+       * Eve emits this alongside `input.resolved` for the approval flavour of a
+       * request, so the two describe one decision and publishing both would put
+       * the same answer in the transcript twice. `input.resolved` is the richer
+       * of the pair — it carries the option that was picked and any free text —
+       * so this one only closes the request when it arrives without its twin,
+       * which is what happens when an approval settles through a channel that
+       * never opened an input request here.
+       */
+      case "approval.settled": {
+        const requestId = stringField(data, "requestId");
+        if (!requestId || !this.openRequests.has(requestId)) break;
+        this.openRequests.delete(requestId);
+        await this.append(
+          "user",
+          [
+            {
+              type: "input_resolved",
+              requestId,
+              /**
+               * The outcome, and no `response`. Eve's word here is `approved`
+               * or `cancelled`, while the option the person clicked was
+               * `approve` or `cancel` — close enough to look right in a log and
+               * wrong enough that a reader correlating it against the published
+               * options matches neither.
+               */
+              outcome:
+                stringField(data, "outcome") === "approved"
+                  ? "answered"
+                  : "cancelled",
+            },
+          ],
+          { alt: "Answered." },
+        );
+        await this.status("active");
+        break;
+      }
+
+      /**
+       * One approver's vote, before the votes are counted.
+       *
+       * Deliberately dropped. It exists for policies that need several
+       * principals to agree, and until one is configured every candidate is
+       * immediately followed by the `approval.settled` that repeats it. A
+       * transcript that published both would show a decision being made twice.
+       */
+      case "approval.candidate":
+        break;
+
+      /**
+       * A tool's output so far, mid-execution.
+       *
+       * Deliberately dropped. `action.result` carries the whole output a moment
+       * later and is what the turn publishes; a partial is the same bytes
+       * again, and appending both would double every long tool result in the
+       * record. The live view of a running tool is the delta stream's job, not
+       * the chain's.
+       */
+      case "action.partial":
+        break;
+
+      /**
+       * The child's entire stream, wrapped one event at a time.
+       *
+       * An inline subagent does not run somewhere else — every event it emits
+       * arrives here under `data.event`, tagged with the `callId` that spawned
+       * it. So following children needs no second connection to anything; it
+       * needs a second transcript, its own chain and head, and a parent tag
+       * pointing at the child's WIRE id rather than Eve's. That is the
+       * follow-children feature, and it is not this.
+       *
+       * Until then the delegated work is still in the record: `subagent.called`
+       * names the child on the turn that spawned it and `subagent.completed`
+       * lands what it came back with. What is missing is watching it work.
+       *
+       * Logged once per child, not once per event: this fires for every token
+       * the child reasons.
+       */
+      case "subagent.event": {
+        const callId = stringField(data, "callId");
+        if (callId && !this.watchedChildren.has(callId)) {
+          this.watchedChildren.add(callId);
+          this.options.log?.(
+            `[hex] ${stringField(data, "subagentName") ?? "a subagent"} is streaming into this session; its own transcript is not published`,
+          );
+        }
+        break;
+      }
 
       case "authorization.required":
         await this.status("payment-required");
@@ -813,8 +954,25 @@ export class EveTranscript {
         await this.status("done");
         break;
 
-      default:
+      /**
+       * An event this version of hex has never heard of.
+       *
+       * Said once per type, because a new Eve emits thousands of a new event
+       * per turn and a line each would bury the stream. Said at all because the
+       * alternative is a runtime upgrade quietly dropping something the
+       * transcript should have carried, which is exactly how `subagent.started`
+       * went unmapped — absent from Eve's own docs table, present in its types.
+       */
+      default: {
+        const unknown = event.type;
+        if (typeof unknown === "string" && !this.unknownTypes.has(unknown)) {
+          this.unknownTypes.add(unknown);
+          this.options.log?.(
+            `[hex] eve sent \`${unknown}\`, which this version does not map`,
+          );
+        }
         break;
+      }
     }
 
     /**
@@ -1185,7 +1343,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 /** The choices offered, keeping only what a reader can actually render. */
 function optionsOf(
   value: unknown,
-): { id: string; label: string; description?: string; style?: string }[] | undefined {
+):
+  | { id: string; label: string; description?: string; style?: string }[]
+  | undefined {
   if (!Array.isArray(value)) return undefined;
   const options = value
     .map((raw) => asRecord(raw))
