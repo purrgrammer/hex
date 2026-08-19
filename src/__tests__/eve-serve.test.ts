@@ -434,6 +434,30 @@ describe("EveServer", () => {
     ]);
   });
 
+  it("settles a head left saying active by a process that died", async () => {
+    /**
+     * Seen live: `serve` was killed mid-turn, the run carried on and finished,
+     * and the head said `active` forever — a lie no reader can detect and one
+     * that never expires. Only the reading stopped.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const first = server(eve, transport(), sink().impl);
+    await first.handle(inbound("msg-1", "first"));
+
+    // Rewind the cursor to mid-turn and reopen the head, the way a kill does.
+    const record = store.transcriptFor(eve.session)!;
+    store.saveTranscript({ ...record, status: "active", streamIndex: 3 });
+
+    const out = sink();
+    const resumed = server(eve, transport(), out.impl);
+    await resumed.catchUp();
+
+    expect(store.transcriptFor(eve.session)!.status).toBe("idle");
+    // And it published the turns nobody had published, rather than silently
+    // moving a cursor past them.
+    expect(out.sent.some((rumor) => rumor.kind === 1777)).toBe(true);
+  });
+
   it("picks up the conversation a previous process was having", async () => {
     /**
      * Seen live: `serve` restarted, the peer-to-session map was in memory, and the

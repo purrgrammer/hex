@@ -770,6 +770,14 @@ async function main(): Promise<void> {
           console.log(
             `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.who, chat.history, grimoire.help, nostr.req, nostr.resolve${publishing ? ` + nostr.publish, nostr.sign${publishConfig?.dryRun ? " (dry run)" : ""}` : ""}`,
           );
+        /**
+         * Settle anything the last run left mid-flight before taking new work.
+         *
+         * A head that says `active` because a process was killed is a lie no
+         * reader can detect, and it never expires on its own.
+         */
+        await server.catchUp();
+
         console.log(`listening dms on ${config.relays.dm.join(", ")}`);
 
         await new Promise<void>((resolveRun) => {

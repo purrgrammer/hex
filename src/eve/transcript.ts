@@ -267,6 +267,11 @@ export class EveTranscript {
     return this.record.streamIndex;
   }
 
+  /** What the head currently says, for a caller reporting on a catch-up. */
+  get headStatus(): string {
+    return this.record.status;
+  }
+
   private log(line: string): void {
     this.options.log?.(line);
   }

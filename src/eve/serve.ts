@@ -159,6 +159,51 @@ export class EveServer {
   }
 
   /**
+   * Publish what happened while nobody was watching.
+   *
+   * A follower that stops mid-turn — a restart, a crash, a Ctrl-C — leaves the
+   * head saying `active`, and it says that forever. The run itself carried on
+   * and finished; only the reading of it stopped, and a reader has no way to
+   * tell "this agent is working" from "nobody has looked since Tuesday".
+   *
+   * Every non-terminal transcript is therefore read from its cursor to silence
+   * at startup. The turns nobody published get published, and the head lands on
+   * whatever Eve last said — usually `idle`, because the run finished long ago.
+   * A session that really is still running simply drains to its current lull and
+   * stays `active`, which is then true.
+   */
+  async catchUp(): Promise<void> {
+    const open = this.options.transcript.store.openTranscripts();
+    if (open.length === 0) return;
+    this.log(
+      `[hex] catching up ${open.length} session(s) nobody was following`,
+    );
+
+    for (const record of open) {
+      const conversation: Conversation = {
+        sessionId: record.sessionId,
+        transcript: new EveTranscript(
+          { ...this.options.transcript },
+          record.sessionId,
+        ),
+        finished: new Set(),
+      };
+      try {
+        const boundary = await this.drain(conversation);
+        this.log(
+          `[hex] ${record.sessionId} caught up to ${boundary.last} (${conversation.transcript.headStatus})`,
+        );
+      } catch (error) {
+        // One unreachable session must not stop the others, or a single dead
+        // stream keeps every stale head stale.
+        this.log(
+          `[hex] could not catch up ${record.sessionId}: ${message(error)}`,
+        );
+      }
+    }
+  }
+
+  /**
    * Take a message that arrived while this correspondent's turn was running.
    *
    * A private message during a turn means "not that — this": there is nobody
