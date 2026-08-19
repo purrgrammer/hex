@@ -71,10 +71,47 @@ export interface ProfileConfig {
  * toolchain, and offers no protection — anything it runs can read the daemon's
  * own secrets off disk. That is the trade, made deliberately.
  */
-export type Isolation = "host-worktree";
+export type Isolation = "host-worktree" | "container";
 
 /** Isolation values a config may name, so the error can list them. */
-export const ISOLATIONS: readonly Isolation[] = ["host-worktree"];
+export const ISOLATIONS: readonly Isolation[] = ["host-worktree", "container"];
+
+/**
+ * What a container may reach.
+ *
+ * Required, with no default, because it is the decision that matters: `open`
+ * lets `npm install` work and lets an injected model fetch a payload; `none` is
+ * kernel-enforced and breaks installs. There is deliberately no domain
+ * allowlist — with a container CLI alone that is convention, not enforcement,
+ * since anything can connect by IP. The honest version is an internal network
+ * plus a proxy that allowlists CONNECT, which is its own piece of work.
+ */
+export type ContainerNetwork = "none" | "open";
+
+export const CONTAINER_NETWORKS: readonly ContainerNetwork[] = ["none", "open"];
+
+/** Runtimes that speak enough of the Docker CLI for what this uses. */
+export const CONTAINER_RUNTIMES = ["docker", "podman", "nerdctl"] as const;
+
+export interface ContainerConfig {
+  /** `docker` | `podman` | `nerdctl`, or an absolute path to the binary. */
+  runtime: string;
+  /**
+   * Required, and never built by Hex.
+   *
+   * `node:26-bookworm` matches this repo's `.nvmrc` and already carries git and
+   * a build toolchain — the `-slim` tags do not have git. Building from a shipped
+   * Dockerfile would make image builds a subsystem Hex has to own, and would pay
+   * for it at the first command of a conversation.
+   */
+  image: string;
+  network: ContainerNetwork;
+  /** `--memory`, e.g. `4g`. */
+  memory?: string;
+  /** `--cpus`, e.g. `2`. */
+  cpus?: string;
+  pidsLimit?: number;
+}
 
 /**
  * What one channel is allowed to do.
@@ -175,6 +212,8 @@ export interface HexConfig {
   repos: RepoConfig[];
   /** Named grants, by the key each was declared under. */
   toolsets: Map<string, ToolsetConfig>;
+  /** How `isolation: "container"` runs things. Absent unless a toolset asks. */
+  container?: ContainerConfig;
   transports: TransportConfig[];
 }
 
@@ -456,6 +495,48 @@ function parseRepos(value: unknown): RepoConfig[] {
   });
 }
 
+function parseContainer(value: unknown): ContainerConfig | undefined {
+  if (value === undefined) return undefined;
+  const raw = requireRecord(value, "container");
+  rejectUnknown(
+    raw,
+    ["runtime", "image", "network", "memory", "cpus", "pidsLimit"],
+    "container",
+  );
+
+  const runtime = optionalString(raw.runtime, "container.runtime") ?? "docker";
+  // An absolute path is accepted so an operator can name a runtime this does not
+  // know about — and so a test can point at one that does not exist and watch it
+  // fail loudly without needing a container runtime installed.
+  if (
+    !CONTAINER_RUNTIMES.includes(
+      runtime as (typeof CONTAINER_RUNTIMES)[number],
+    ) &&
+    !runtime.startsWith("/")
+  )
+    throw new ConfigError(
+      `container.runtime must be one of ${CONTAINER_RUNTIMES.join(", ")} or an absolute path (got ${JSON.stringify(runtime)})`,
+    );
+
+  const network = requireString(raw.network, "container.network");
+  if (!CONTAINER_NETWORKS.includes(network as ContainerNetwork))
+    throw new ConfigError(
+      `container.network must be one of ${CONTAINER_NETWORKS.join(", ")} — there is no domain allowlist, because a container CLI cannot enforce one (got ${JSON.stringify(network)})`,
+    );
+
+  return {
+    runtime,
+    image: requireString(raw.image, "container.image"),
+    network: network as ContainerNetwork,
+    memory: optionalString(raw.memory, "container.memory"),
+    cpus: optionalString(raw.cpus, "container.cpus"),
+    pidsLimit:
+      raw.pidsLimit === undefined
+        ? undefined
+        : requirePositiveInt(raw.pidsLimit, "container.pidsLimit"),
+  };
+}
+
 /** Does this grant list reach any `repo.*` tool? */
 function grantsExecution(toolset: ToolsetConfig): boolean {
   return toolset.tools.some((grant) =>
@@ -703,6 +784,7 @@ export function parseConfig(input: unknown): HexConfig {
       "state",
       "repos",
       "toolsets",
+      "container",
       "transports",
     ],
     "config",
@@ -765,6 +847,16 @@ export function parseConfig(input: unknown): HexConfig {
   // not exist should say so rather than failing on the first command.
   const repos = parseRepos(raw.repos);
   const toolsets = parseToolsets(raw.toolsets, repos);
+  const container = parseContainer(raw.container);
+
+  // A toolset that names an isolation with nothing configured for it would parse
+  // and then fail every command — the same class of silent misconfiguration as a
+  // typo'd tool id, and caught in the same place.
+  for (const toolset of toolsets.values())
+    if (toolset.isolation === "container" && !container)
+      throw new ConfigError(
+        `toolsets.${toolset.name} asks for container isolation but there is no top-level \`container\` section — name the image it runs in`,
+      );
 
   const config: HexConfig = {
     identity: { signer: parseSigner(identity.signer) },
@@ -778,6 +870,7 @@ export function parseConfig(input: unknown): HexConfig {
     state,
     repos,
     toolsets,
+    container,
     transports: parseTransports(raw.transports, toolsets),
   };
 

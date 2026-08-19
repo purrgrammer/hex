@@ -16,7 +16,7 @@ import { resolveSigner } from "./signer.js";
 import { announceIdentity } from "./identity.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
-import type { TransportConfig } from "./config.js";
+import type { Isolation, TransportConfig } from "./config.js";
 import { createBrain } from "./brain/create.js";
 import { Nip29Transport } from "./transports/nip29.js";
 import { Nip17Transport } from "./transports/nip17.js";
@@ -27,7 +27,8 @@ import { runAgent } from "./agent.js";
 import { ConsoleTools } from "./tools/console-tools.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
 import { RepoTools } from "./tools/repo-tools.js";
-import { WorktreeManager } from "./worktree.js";
+import { createRunner, type Runner } from "./tools/backends.js";
+import { ContainerBackend } from "./tools/exec-container.js";
 import { toolsetFor } from "./grants.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { SessionTracker } from "./sessions.js";
@@ -204,6 +205,47 @@ async function main(): Promise<void> {
           }
         }
 
+        /**
+         * The container, checked rather than described.
+         *
+         * An operator has to be able to see the boundary without knowing the
+         * runtime's CLI, and a missing image has to fail here rather than at the
+         * first command someone asks for.
+         */
+        if (config.container) {
+          const used = [...config.toolsets.values()].some(
+            (toolset) => toolset.isolation === "container",
+          );
+          console.log("\ncontainer:");
+          if (!used) {
+            // A section nobody reads is a typo'd `isolation` somewhere.
+            console.log("  configured but no toolset uses it");
+          }
+          console.log(`  runtime   ${config.container.runtime}`);
+          console.log(`  image     ${config.container.image}`);
+          console.log(
+            config.container.network === "none"
+              ? "  network   none — no egress at all, which also breaks installs"
+              : "  network   open — full egress; on a cloud host the instance metadata endpoint is reachable",
+          );
+
+          const backend = new ContainerBackend({
+            config: config.container,
+            agent: resolved.pubkey,
+            mountFor: (request) => request.cwd,
+            homeFor: (request) => request.cwd,
+          });
+          try {
+            await backend.preflight();
+            console.log("  ready     yes");
+          } catch (error) {
+            console.log(
+              `  ready     NO — ${error instanceof Error ? error.message : String(error)}`,
+            );
+            process.exitCode = 1;
+          }
+        }
+
         await resolved.close();
         if (unhealthy > 0) {
           console.error(`\n${unhealthy} relay(s) did not answer cleanly`);
@@ -306,14 +348,21 @@ async function main(): Promise<void> {
           } as Parameters<typeof toolsetFor>[1]);
           console.log(`as      ${asRaw} → ${toolset?.name ?? "(default)"}`);
           askGrants = toolset?.tools;
-          if (toolset?.isolation && toolset.repos.length > 0)
+          if (toolset?.isolation && toolset.repos.length > 0) {
+            const runner = createRunner(toolset.isolation, {
+              config,
+              store,
+              home,
+              agent: resolved.pubkey,
+              log: (line) => console.log(line),
+            });
+            // Fails here rather than at the first command, in the runtime's own
+            // words: a harness that quietly ran on the host would be lying about
+            // what it is checking.
+            await runner.backend.preflight();
             repoTools = new RepoTools({
-              worktrees: new WorktreeManager({
-                store,
-                root: home.worktrees,
-                repos: config.repos,
-                log: (line) => console.log(line),
-              }),
+              worktrees: runner.checkout,
+              backend: runner.backend,
               repos: toolset.repos,
               // Named, so repeated `hex ask` runs share one checkout instead
               // of leaving a worktree behind per question. Deliberately the
@@ -327,6 +376,7 @@ async function main(): Promise<void> {
                 : undefined,
               log: (line) => console.log(line),
             });
+          }
         }
 
         // The same tools a room turn gets: speaking, pointed at stdout, plus the
@@ -578,14 +628,31 @@ async function main(): Promise<void> {
           );
         }
 
-        // One per process; the per-conversation checkouts it hands out are
-        // rows in the same store the sessions live in.
-        const worktrees = new WorktreeManager({
-          store,
-          root: home.worktrees,
-          repos: config.repos,
-          log: (line) => console.log(line),
-        });
+        /**
+         * One runner per isolation, built once and shared by every turn.
+         *
+         * Preflighted before a single relay is subscribed to: a daemon that
+         * boots and then fails every command is indistinguishable from a broken
+         * bot, and launchd's log is the only place the operator will look.
+         */
+        const runners = new Map<Isolation, Runner>();
+        for (const toolset of config.toolsets.values()) {
+          if (!toolset.isolation || runners.has(toolset.isolation)) continue;
+          const runner = createRunner(toolset.isolation, {
+            config,
+            store,
+            home,
+            agent: resolved.pubkey,
+            log: (line) => console.log(line),
+          });
+          await runner.backend.preflight();
+          console.log(`runner  ${toolset.isolation} ready`);
+          // A container left behind by a crash still holds a mount into the
+          // operator's disk, so leftovers are reaped before new ones are made.
+          if (runner.backend instanceof ContainerBackend)
+            await runner.backend.sweep();
+          runners.set(toolset.isolation, runner);
+        }
 
         const agent = runAgent({
           transports,
@@ -603,9 +670,12 @@ async function main(): Promise<void> {
             return {
               grants: toolset.tools,
               repo:
-                toolset.isolation && toolset.repos.length > 0
+                toolset.isolation &&
+                toolset.repos.length > 0 &&
+                runners.has(toolset.isolation)
                   ? new RepoTools({
-                      worktrees,
+                      worktrees: runners.get(toolset.isolation)!.checkout,
+                      backend: runners.get(toolset.isolation)!.backend,
                       repos: toolset.repos,
                       workspace,
                       requestedBy: inbound.author,

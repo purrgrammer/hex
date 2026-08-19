@@ -232,3 +232,125 @@ describe("grants", () => {
     expect(filterTools(specs, []).length).toBe(0);
   });
 });
+
+describe("container isolation in config", () => {
+  const container = {
+    runtime: "docker",
+    image: "node:26-bookworm",
+    network: "open",
+  };
+  const containerCoder = { ...coder, isolation: "container" };
+  const dmOnly = [
+    { type: "nip-17", allow: [{ pubkey: PEER, toolset: "coder" }] },
+  ];
+
+  it("accepts it when there is a container section to run it in", () => {
+    const config = parseConfig({
+      ...coding,
+      container,
+      toolsets: { coder: containerCoder },
+      transports: dmOnly,
+    });
+    expect(config.container?.image).toBe("node:26-bookworm");
+    expect(config.toolsets.get("coder")?.isolation).toBe("container");
+  });
+
+  it("refuses a toolset that asks for a container nobody described", () => {
+    // It would parse and then fail every command — the same silent
+    // misconfiguration as a typo'd tool id, caught in the same place.
+    expect(() =>
+      parseConfig({
+        ...coding,
+        toolsets: { coder: containerCoder },
+        transports: dmOnly,
+      }),
+    ).toThrow(/no top-level `container` section/);
+  });
+
+  it("lists both isolations when one is misspelled", () => {
+    expect(() =>
+      parseConfig({
+        ...coding,
+        container,
+        toolsets: { coder: { ...coder, isolation: "sandbox" } },
+        transports: dmOnly,
+      }),
+    ).toThrow(/host-worktree, container/);
+  });
+
+  it("requires an image, and never invents one", () => {
+    expect(() =>
+      parseConfig({
+        ...coding,
+        container: { runtime: "docker", network: "open" },
+        toolsets: { coder: containerCoder },
+        transports: dmOnly,
+      }),
+    ).toThrow(/container\.image/);
+  });
+
+  it("requires a network decision, with no default", () => {
+    // It decides what the code can reach; a default would make that choice for
+    // the operator in the one place it matters.
+    expect(() =>
+      parseConfig({
+        ...coding,
+        container: { runtime: "docker", image: "node:26" },
+        toolsets: { coder: containerCoder },
+        transports: dmOnly,
+      }),
+    ).toThrow(/container\.network/);
+  });
+
+  it("refuses a network mode it could not actually enforce", () => {
+    // A domain allowlist with a container CLI alone is convention, not
+    // enforcement — anything can connect by IP.
+    expect(() =>
+      parseConfig({
+        ...coding,
+        container: { ...container, network: "allowlist" },
+        toolsets: { coder: containerCoder },
+        transports: dmOnly,
+      }),
+    ).toThrow(/none, open/);
+  });
+
+  it("takes an absolute path as a runtime, so a missing one can be tested", () => {
+    const config = parseConfig({
+      ...coding,
+      container: { ...container, runtime: "/opt/podman/bin/podman" },
+      toolsets: { coder: containerCoder },
+      transports: dmOnly,
+    });
+    expect(config.container?.runtime).toBe("/opt/podman/bin/podman");
+  });
+
+  it("refuses a runtime that is neither known nor a path", () => {
+    expect(() =>
+      parseConfig({
+        ...coding,
+        container: { ...container, runtime: "rocket" },
+        toolsets: { coder: containerCoder },
+        transports: dmOnly,
+      }),
+    ).toThrow(/docker, podman, nerdctl/);
+  });
+
+  it("still refuses coding tools on a relay group, container or not", () => {
+    expect(() =>
+      parseConfig({
+        ...coding,
+        container,
+        toolsets: { coder: containerCoder },
+        transports: [
+          { type: "nip-17", allow: [PEER] },
+          {
+            type: "nip-29",
+            toolset: "coder",
+            groups: [{ relay: "wss://groups.example", id: "dev" }],
+          },
+        ],
+      }),
+    ).toThrow(/NIP-17 only/);
+  });
+});

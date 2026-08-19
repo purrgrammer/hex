@@ -53,6 +53,15 @@ export interface StoredWorktree {
   path: string;
   branch: string;
   createdAt: number;
+  /**
+   * Which backend made it.
+   *
+   * Recorded because the two are not interchangeable: a worktree's `.git` is a
+   * file pointing into the operator's clone, a container's is a real directory,
+   * and handing a conversation the wrong one silently gives it an empty checkout
+   * with its work somewhere else.
+   */
+  isolation?: string;
 }
 
 export interface AgentHome {
@@ -126,6 +135,7 @@ CREATE TABLE IF NOT EXISTS worktrees (
   path       TEXT NOT NULL,
   branch     TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  isolation  TEXT NOT NULL DEFAULT 'host-worktree',
   PRIMARY KEY (workspace, repo)
 );
 `;
@@ -154,6 +164,17 @@ export class HexStore {
       .get("session_id");
     if (legacy) db.exec("DROP TABLE worktrees");
     db.exec(SCHEMA);
+
+    // Additive, and guarded rather than versioned: the table predates the second
+    // backend, and a row with no backend recorded came from the only one there
+    // was. Same one-time cost and same precedent as the drop above.
+    const hasIsolation = db
+      .prepare("SELECT name FROM pragma_table_info('worktrees') WHERE name = ?")
+      .get("isolation");
+    if (!hasIsolation)
+      db.exec(
+        "ALTER TABLE worktrees ADD COLUMN isolation TEXT NOT NULL DEFAULT 'host-worktree'",
+      );
     return new HexStore(db);
   }
 
@@ -179,7 +200,7 @@ export class HexStore {
   worktreeFor(workspace: string, repo: string): StoredWorktree | undefined {
     const row = this.db
       .prepare(
-        "SELECT workspace, repo, path, branch, created_at FROM worktrees WHERE workspace = ? AND repo = ?",
+        "SELECT workspace, repo, path, branch, created_at, isolation FROM worktrees WHERE workspace = ? AND repo = ?",
       )
       .get(workspace, repo) as Record<string, unknown> | undefined;
     if (!row) return undefined;
@@ -189,6 +210,8 @@ export class HexStore {
       path: String(row.path),
       branch: String(row.branch),
       createdAt: Number(row.created_at),
+      isolation:
+        row.isolation === undefined ? undefined : String(row.isolation),
     };
   }
 
@@ -196,8 +219,8 @@ export class HexStore {
   recordWorktree(worktree: StoredWorktree): void {
     this.db
       .prepare(
-        `INSERT INTO worktrees (workspace, repo, path, branch, created_at)
-         VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+        `INSERT INTO worktrees (workspace, repo, path, branch, created_at, isolation)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
       )
       .run(
         worktree.workspace,
@@ -205,6 +228,7 @@ export class HexStore {
         worktree.path,
         worktree.branch,
         worktree.createdAt,
+        worktree.isolation ?? "host-worktree",
       );
   }
 

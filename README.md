@@ -71,8 +71,8 @@ uses, because it is the same Hex:
 | `grimoire.help` | A NIP's text or a kind's definition, from the NIPs repository. |
 | `nostr.req` | A NIP-01 filter against relays. Read-only, capped. |
 | `nostr.resolve` | A bech32 entity turned into the person or event it names. |
-| `repo.exec` | A shell command, in this conversation's git worktree. Granted, never default. |
-| `repo.write` | A whole file in that worktree. Exists because a heredoc is a bad text editor. |
+| `repo.exec` | A shell command, in this conversation's own checkout. Granted, never default. |
+| `repo.write` | A whole file in that checkout. Exists because a heredoc is a bad text editor. |
 
 The ids carry the dot; the wire carries an underscore, since OpenAI-shaped
 function names cannot contain one. Nothing here signs, publishes, spends or
@@ -220,6 +220,59 @@ new work branches from what a fetch just brought down. Without one it branches
 from whatever the clone has checked out, which is however stale the operator
 left it, and the agent will read an old tree while reporting it as current.
 
+## Isolation
+
+Two backends, named rather than implied so a config asking for the stronger one
+fails instead of quietly getting the weaker.
+
+`container` is the one to use. Commands run in a container that mounts exactly two
+directories — this conversation's checkout and its own cache — with an environment
+built from a fixed list rather than filtered for secrets. `~/.hex` is not mounted,
+so the daemon's nsec is not reachable: the boundary is structural, and there is no
+regex to get wrong. One container per command with `--rm`, because a long-lived
+one would weaken the promise `repo.exec` already makes, that nothing survives the
+command.
+
+It does not use `git worktree`, and that is the crux rather than a preference. A
+worktree's `.git` is a *file* pointing into `<main>/.git/worktrees/<name>`, so a
+container with only the worktree mounted gets a directory where every git command
+fails — and mounting the main `.git` writable would hand it `hooks/` in the
+operator's own clone, which is host code execution the next time they run `git
+status`. So each conversation gets a private `git clone --no-hardlinks` instead:
+a real `.git` directory, one bind mount, nothing shared. `--no-hardlinks` is
+mandatory — a local clone hardlinks packfiles and the container runs as the host
+uid, so writing through a shared inode would corrupt the operator's repository.
+Committed work is fetched back onto `hex/<hash>` in their clone; a command that
+only read something moves nothing.
+
+The image is named in config and never built by Hex. `node:26-bookworm` matches
+this repo's `.nvmrc` and already has git — the `-slim` tags do not.
+
+`network` is required with no default. `open` is `--network bridge` and lets
+`npm install` work; `none` is real, kernel-enforced, and does break installs. There
+is deliberately no domain allowlist: with a container CLI alone that is convention
+rather than enforcement, since anything can connect by IP.
+
+**What it does not protect against**, because a container is not a VM:
+
+- On Linux the kernel is shared, so a runtime escape is a host compromise.
+  `--cap-drop ALL`, `no-new-privileges` and a non-root uid raise the bar; they are
+  not a boundary. macOS is stronger here — Docker Desktop puts a real VM in
+  between.
+- The **entire committed history** of the granted repo is inside, including local
+  branches never pushed. Only *other* repositories are out of reach.
+- Secrets committed into the repo itself are exposed by design.
+- With `network: "open"` on a **cloud Linux host** the container reaches
+  `169.254.169.254`, the instance metadata endpoint — the host's cloud
+  credentials. Use `none` there, or drop link-local and RFC1918 on the bridge.
+  This is the sharpest edge in the whole design.
+- `open` also means an injected model can fetch a payload. It can only run it
+  inside the container, but it can run it.
+- Disk is not capped: the checkout is a bind mount, so a `dd` loop fills the
+  operator's disk.
+
+## Running on the host instead
+
 `host-worktree` runs commands as the user who started the daemon. It is named
 rather than implied so a config asking for something stronger fails instead of
 quietly getting less, and it offers no isolation: anything it runs can read the
@@ -233,8 +286,11 @@ operator's decision, not the agent's.
 
 ## Status
 
-NIP-29 and NIP-17 work end to end, with a coding agent on the DM side. Concord
-is the next transport. Known limits: a task in flight cannot be steered or
-cancelled — a follow-up bounces off the in-flight gate until the turn ends — and
-`host-worktree` is the only isolation implemented, with a container backend the
-obvious next rung.
+NIP-29 and NIP-17 work end to end, with a coding agent on the DM side that can be
+interrupted mid-task and isolated in a container. Concord is the next transport.
+
+Known limits: a message from a DIFFERENT author during a turn still waits rather
+than queueing — it is recorded, so it is unanswered rather than lost; the dedupe
+set is in memory, so a restart can re-answer a DM that arrived in the last hour;
+and there is no approval gate, deliberately, because isolation was chosen over
+asking a person to adjudicate every command.

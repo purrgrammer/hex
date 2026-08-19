@@ -1,5 +1,10 @@
 {
-  "identity": { "signer": { "type": "nsec", "env": "HEX_NSEC" } },
+  "identity": {
+    "signer": {
+      "type": "nsec",
+      "env": "HEX_NSEC"
+    }
+  },
   "instructions": "./instructions.md",
   "mentions": ["hex", "@hex"],
   "brain": {
@@ -23,16 +28,30 @@
     "nip05": "hex@grimoire.rocks",
     "website": "https://grimoire.rocks"
   },
-  "context": { "messages": 40 },
-  "state": { "home": "~/.hex", "sessionIdleMinutes": 30 },
-  "limits": { "repliesPerRoomPerHour": 20 },
-  "repos": [{ "name": "grimoire", "path": "/absolute/path/to/your/clone" }],
+  "context": {
+    "messages": 40
+  },
+  "state": {
+    "home": "~/.hex",
+    "sessionIdleMinutes": 30
+  },
+  "limits": {
+    "repliesPerRoomPerHour": 20
+  },
+  "repos": [
+    {
+      "name": "grimoire",
+      "path": "/absolute/path/to/your/clone"
+    }
+  ],
   "toolsets": {
-    "reader": { "tools": ["grimoire.*", "nostr.*"] },
+    "reader": {
+      "tools": ["grimoire.*", "nostr.*"]
+    },
     "coder": {
       "tools": ["grimoire.*", "nostr.*", "repo.*"],
       "repos": ["grimoire"],
-      "isolation": "host-worktree",
+      "isolation": "container",
       "execTimeoutMinutes": 15
     }
   },
@@ -41,11 +60,28 @@
       "type": "nip-29",
       "autoJoin": false,
       "toolset": "reader",
-      "groups": [{ "relay": "wss://groups.example.invalid", "id": "your-group" }]
+      "groups": [
+        {
+          "relay": "wss://groups.example.invalid",
+          "id": "your-group"
+        }
+      ]
     },
     {
       "type": "nip-17",
-      "allow": [{ "pubkey": "npub1...", "toolset": "coder" }]
+      "allow": [
+        {
+          "pubkey": "npub1...",
+          "toolset": "coder"
+        }
+      ]
     }
-  ]
+  ],
+  "container": {
+    "runtime": "docker",
+    "image": "node:26-bookworm",
+    "network": "open",
+    "memory": "4g",
+    "pidsLimit": 512
+  }
 }

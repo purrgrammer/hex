@@ -15,12 +15,16 @@
  * the log about what it ran.
  */
 
-import { spawn } from "node:child_process";
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { ToolResult, ToolSpec } from "./types.js";
 import { EXEC_TOOL, WRITE_TOOL } from "./types.js";
-import type { WorktreeManager } from "../worktree.js";
+import type { Checkout } from "../clone.js";
+import type { ExecBackend } from "./exec-backend.js";
+import { truncateOutput } from "./exec-backend.js";
+
+export { truncateOutput, MAX_OUTPUT_CHARS } from "./exec-backend.js";
+export { scrubEnv } from "./exec-host.js";
 
 /**
  * Default ceiling for one command.
@@ -31,11 +35,16 @@ import type { WorktreeManager } from "../worktree.js";
  */
 export const DEFAULT_EXEC_TIMEOUT_MS = 15 * 60_000;
 
-/** What comes back to the model. Beyond this the middle is dropped, and said so. */
-export const MAX_OUTPUT_CHARS = 50_000;
-
 export interface RepoToolsOptions {
-  worktrees: WorktreeManager;
+  worktrees: Checkout;
+  /**
+   * Where commands run. Required, with no default.
+   *
+   * A default would make the safer backend opt-in, and an optional
+   * security-relevant field is the shape of a silent downgrade — the compiler
+   * enumerating every construction site is the point.
+   */
+  backend: ExecBackend;
   /** Repos this channel may touch. Empty means these tools do nothing. */
   repos: string[];
   /**
@@ -55,14 +64,6 @@ export interface RepoToolsOptions {
   log?: (line: string) => void;
   /** Log instead of running. */
   dryRun?: boolean;
-}
-
-/** Keep the head and the tail: a failure's cause is at one end or the other. */
-export function truncateOutput(text: string): string {
-  if (text.length <= MAX_OUTPUT_CHARS) return text;
-  const half = Math.floor(MAX_OUTPUT_CHARS / 2);
-  const dropped = text.length - half * 2;
-  return `${text.slice(0, half)}\n\n… ${dropped} characters omitted …\n\n${text.slice(-half)}`;
 }
 
 export class RepoTools {
@@ -203,7 +204,24 @@ export class RepoTools {
     );
 
     const timeout = this.options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
-    const result = await runCommand(command, worktree.path, timeout, signal);
+    const result = await this.options.backend.run({
+      command,
+      cwd: worktree.path,
+      timeoutMs: timeout,
+      // Names the container, so a leftover can be found by the conversation it
+      // belonged to rather than by luck.
+      id: `${this.workspace}-${repo}`,
+      signal,
+    });
+
+    // After every command rather than the ones that look like commits: a
+    // container writes into its own clone, so without this the branch would only
+    // ever exist in there and never where the operator looks for it.
+    try {
+      await this.options.worktrees.afterCommand?.(worktree);
+    } catch {
+      // Reported by the manager; the work is not lost, only further away.
+    }
 
     const body = truncateOutput(result.output.trim());
     // Said differently from a timeout, because it means something different: the
@@ -278,153 +296,4 @@ export class RepoTools {
     await writeFile(target, content, "utf8");
     return { ok: true, output: `wrote ${inside} (${content.length} chars)` };
   }
-}
-
-interface CommandResult {
-  /** Killed because the caller withdrew the request, not because it hung. */
-  aborted?: boolean;
-  code: number;
-  output: string;
-  timedOut: boolean;
-}
-
-/**
- * How long to keep reading output after the command itself has exited.
- *
- * A shell that backgrounds something exits immediately while its child holds
- * the inherited pipe open, so waiting for `close` waits for the background job,
- * which is forever. Waiting for `exit` instead can clip the last chunk, so the
- * pipes get this long to drain and no longer.
- */
-const FLUSH_GRACE_MS = 250;
-
-/**
- * Run one command and collect what it said.
- *
- * stdout and stderr are interleaved into one stream because that is how a
- * person reads a build log, and separating them loses which warning belonged to
- * which step.
- *
- * The process group is killed on the way out of EVERY path, not only the
- * timeout. A model told it can build and run tests will eventually start a dev
- * server or a watcher; reaped only on timeout, `npm run dev &` returned "ok" in
- * nine milliseconds and left a server bound to a port with `ppid 1`, outliving
- * the daemon itself. Hex runs commands, it does not host daemons — anything
- * still alive when the command finishes is a leak.
- */
-function runCommand(
-  command: string,
-  cwd: string,
-  timeoutMs: number,
-  signal?: AbortSignal,
-): Promise<CommandResult> {
-  // Nothing is spawned for a request that was already withdrawn.
-  if (signal?.aborted)
-    return Promise.resolve({
-      code: -1,
-      output: "",
-      timedOut: false,
-      aborted: true,
-    });
-
-  return new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", command], {
-      cwd,
-      // The daemon's own secrets are removed from what it hands out. Anything
-      // it runs could still read them off disk — the operator accepted that —
-      // but they should not be one `env` away from being repeated into a chat.
-      env: scrubEnv(process.env),
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let output = "";
-    let timedOut = false;
-    let aborted = false;
-    const append = (chunk: Buffer) => {
-      output += chunk.toString();
-      // Bounded in memory too, not just on the way out: a runaway loop printing
-      // for fifteen minutes should not grow the daemon's heap without limit.
-      if (output.length > MAX_OUTPUT_CHARS * 4)
-        output = output.slice(-MAX_OUTPUT_CHARS * 2);
-    };
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
-
-    const killGroup = () => {
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // Already gone, which is the outcome we wanted anyway.
-      }
-    };
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killGroup();
-    }, timeoutMs);
-
-    // The whole point of the signal: a fifteen-minute ceiling makes cancelling
-    // cosmetic unless the command actually dies when someone says stop.
-    const onAbort = () => {
-      aborted = true;
-      killGroup();
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    let settled = false;
-    const finish = (code: number) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      // The signal outlives the command by design; a listener left on it leaks.
-      signal?.removeEventListener("abort", onAbort);
-      // Anything the command backgrounded dies with it, and the pipes are let
-      // go so a survivor cannot hold this promise open.
-      killGroup();
-      child.stdout.destroy();
-      child.stderr.destroy();
-      resolve({ code, output, timedOut, aborted });
-    };
-
-    child.on("error", (error) => {
-      output += `\n${error.message}`;
-      finish(-1);
-    });
-    // `exit`, not `close`: close waits for every holder of the pipe, and a
-    // backgrounded grandchild is one — `npm run dev &` would hold the turn open
-    // for the full timeout. The grace lets the buffers drain first.
-    child.on("exit", (code) => {
-      setTimeout(() => finish(code ?? -1), FLUSH_GRACE_MS);
-    });
-  });
-}
-
-/** Names whose values the daemon holds and a child has no business reading. */
-const SECRET_ENV = /NSEC|API_KEY|SECRET|TOKEN|PASSWORD/i;
-
-export function scrubEnv(
-  env: NodeJS.ProcessEnv,
-  /** Where the running node lives. Injected so the test does not need nvm. */
-  nodeBin = dirname(process.execPath),
-): Record<string, string | undefined> {
-  const copy: Record<string, string | undefined> = {};
-  for (const [key, value] of Object.entries(env))
-    if (!SECRET_ENV.test(key)) copy[key] = value;
-
-  /**
-   * The toolchain Hex runs is the one Hex is running on.
-   *
-   * Under a supervisor there is no login shell and no version manager: launchd
-   * hands the daemon a minimal PATH, `bash -lc` does not source the operator's
-   * nvm setup, and every command Hex was asked to run died on
-   * `npm: command not found` — a coding agent that cannot build or test. The
-   * plist names an absolute node, so the directory beside it has npm and npx in
-   * it; putting that on the path is both the fix and the honest answer to
-   * "which node does the agent use".
-   */
-  const path = copy.PATH ?? "";
-  if (!path.split(":").includes(nodeBin))
-    copy.PATH = path ? `${nodeBin}:${path}` : nodeBin;
-  return copy;
 }
