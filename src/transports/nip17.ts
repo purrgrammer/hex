@@ -160,7 +160,22 @@ export class Nip17Transport implements Transport {
     const event = finalizeEvent(
       {
         kind: ephemeral ? KIND_GIFT_WRAP_EPHEMERAL : KIND_GIFT_WRAP,
-        created_at: randomPast(),
+        /**
+         * An ephemeral wrap is dated NOW, and only a stored one is backdated.
+         *
+         * NIP-59 randomises a wrap's timestamp so a relay cannot read the
+         * conversation's timing off its inbox — which is about events it KEEPS.
+         * A relay does not keep an ephemeral one; it forwards what is live and
+         * rejects the rest, and three real relays answered a backdated 21059
+         * with `invalid: ephemeral event expired`. Backdating it made every
+         * delta undeliverable everywhere, which is the whole live-progress
+         * channel gone with nothing but a log line to say so.
+         *
+         * Nothing leaks by dating it now: the payload it carries is worthless in
+         * a second anyway, and the turn that repeats its content still travels
+         * on a wrap whose timestamp says nothing.
+         */
+        created_at: ephemeral ? Math.floor(Date.now() / 1000) : randomPast(),
         content: nip44Encrypt(
           JSON.stringify(seal),
           getConversationKey(key, recipient),

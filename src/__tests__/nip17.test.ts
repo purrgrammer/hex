@@ -210,6 +210,63 @@ describe("Nip17Transport.reply", () => {
     expect(rumor.pubkey).toBe(hexPubkey);
   });
 
+  it("dates an ephemeral wrap now, because a relay expires a backdated one", async () => {
+    // Three real relays answered a backdated 21059 with `invalid: ephemeral event
+    // expired`. NIP-59 randomises a wrap's timestamp so a relay cannot read the
+    // conversation's timing off what it KEEPS — and it keeps no ephemeral wrap.
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const bus = new Nip17Transport({
+      relays,
+      signer: hexSigner,
+      pubkey: hexPubkey,
+      inboxRelays: [relay.url],
+      readRelays: [relay.url],
+      allow: [peerPubkey],
+      since: 0,
+      publishTimeoutMs: 1000,
+    });
+    transport = bus;
+
+    const list = finalizeEvent(
+      {
+        kind: KIND_DM_RELAYS,
+        content: "",
+        created_at: 2000,
+        tags: [["relay", relay.url]],
+      },
+      peerKey,
+    );
+    const { publishTo } = await import("../relays.js");
+    await publishTo(relays, [relay.url], list);
+    const before = relay.received.length;
+
+    const now = Math.floor(Date.now() / 1000);
+    const rumor = {
+      id: "f".repeat(64),
+      pubkey: hexPubkey,
+      created_at: now,
+      kind: 21777,
+      tags: [["p", peerPubkey]],
+      content: "streaming",
+    };
+    await bus.publishRumor(rumor, [peerPubkey], { ephemeral: true });
+
+    const sent = relay.received.slice(before);
+    const wrap = sent.find((event) => event.kind === 21059);
+    expect(wrap).toBeDefined();
+    // Now, not two days ago: a second of clock slack, and nothing more.
+    expect(Math.abs(wrap!.created_at - now)).toBeLessThanOrEqual(2);
+
+    // The stored envelope keeps its randomised past, which is what it is for.
+    const stored = await bus.reply(inboundFrom(), "kept");
+    expect(stored).toBeTruthy();
+    const kept = relay.received
+      .slice(before)
+      .filter((event) => event.kind === KIND_GIFT_WRAP);
+    expect(kept.some((event) => event.created_at < now)).toBe(true);
+  });
+
   it("delivers to the good relay when a bad URL in the list throws", async () => {
     // `pool.relay(url)` throws on a URL applesauce will not take, and with
     // `Promise.all` that rejection discarded every other relay's ACCEPTED
