@@ -66,6 +66,7 @@ export interface EveTranscriptOptions {
   sink: RumorSink;
   /** Off means nothing streams; the turns still arrive when they close. */
   deltas?: boolean;
+  /** Overrides what the stream says. For a runtime that does not name one. */
   model?: { id: string; provider?: string };
   log?: (line: string) => void;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -89,6 +90,33 @@ export class EveTranscript {
   private readonly coalescer: DeltaCoalescer;
   /** Parts of the step being assembled, flushed when the step completes. */
   private pending: TurnPart[] = [];
+  /**
+   * The model, as the stream last named it.
+   *
+   * Not persisted, and it does not need to be: a model tag belongs on an
+   * assistant turn, an assistant turn is only published once a step has closed,
+   * and a step always announces itself first. A head republished by a resumed
+   * process before its first step is the one event that can lack it, and the next
+   * head carries it.
+   */
+  private model?: { id: string; provider?: string };
+
+  /**
+   * Where the stream is now, and where it is safe to say it has been read to.
+   *
+   * These are deliberately two numbers. The durable one (`record.streamIndex`)
+   * advances only when a publish LANDS, so a turn that reached nobody leaves the
+   * cursor behind it and a restart replays the Eve events that produced it. An
+   * event that publishes nothing — a reasoning fragment, a step announcing its
+   * model — moves only the live one, so replaying it costs a rebuild of state
+   * that was in memory anyway.
+   *
+   * Advancing the durable cursor per event was the hole in the retry story: the
+   * next head to publish would carry the cursor past the turn that failed, and
+   * the restart would skip it.
+   */
+  private atIndex = 0;
+
   /** Tool calls seen this step, so a result can name the tool it answers. */
   private readonly calls = new Map<string, string>();
 
@@ -97,6 +125,9 @@ export class EveTranscript {
     /** Eve's session id. The wire's is derived once and kept. */
     readonly sessionId: string,
   ) {
+    // A configured model is the starting point; the stream overwrites it the
+    // moment it names one of its own.
+    this.model = options.model;
     this.record = options.store.transcriptFor(sessionId) ?? {
       sessionId,
       nostrId: randomBytes(32).toString("hex"),
@@ -182,7 +213,7 @@ export class EveTranscript {
    */
   async handle(event: EveEnvelope, index?: number): Promise<void> {
     const data = payload(event);
-    if (index !== undefined) this.record.streamIndex = index;
+    if (index !== undefined) this.atIndex = index;
 
     switch (event.type) {
       case "session.started":
@@ -194,6 +225,27 @@ export class EveTranscript {
         this.coalescer.startTurn(this.record.turn);
         await this.status("active");
         break;
+
+      /**
+       * `step.started` is where Eve names the model, and the only place it does.
+       *
+       * Taken from the stream rather than from config: the config would be a
+       * second copy of a fact the runtime owns, and the runtime is free to switch
+       * model between steps — an agent that falls back to a cheaper one mid-turn
+       * would otherwise publish a transcript claiming the model it was started
+       * with. `modelId` carries the provider ahead of a slash when there is one.
+       */
+      case "step.started": {
+        const id = stringField(data, "modelId");
+        if (id) {
+          const slash = id.indexOf("/");
+          this.model =
+            slash > 0
+              ? { id: id.slice(slash + 1), provider: id.slice(0, slash) }
+              : { id };
+        }
+        break;
+      }
 
       case "message.received": {
         const text = stringField(data, "message") ?? "";
@@ -327,7 +379,6 @@ export class EveTranscript {
         break;
 
       default:
-        this.options.store.saveTranscript(this.record);
         break;
     }
   }
@@ -400,7 +451,7 @@ export class EveTranscript {
         parts: fitted,
         turn: this.record.turn || 1,
         stop: extra.stop,
-        model: role === "assistant" ? this.options.model : undefined,
+        model: role === "assistant" ? this.model : undefined,
         usage: extra.usage,
         alt: extra.alt,
       },
@@ -485,7 +536,7 @@ export class EveTranscript {
         lastSeq: this.record.seq,
         started: this.record.startedAt,
         ended: this.record.endedAt,
-        model: this.options.model,
+        model: this.model,
         usage,
         cost: this.record.cost
           ? { amount: this.record.cost, currency: "USD" }
@@ -558,7 +609,10 @@ export class EveTranscript {
         this.log(
           `[hex] transcript ${what} did not reach ${undeliverable.length} recipient(s)`,
         );
-      return delivered.length > 0;
+      if (delivered.length === 0) return false;
+      // Read this far, and everything up to here is on a relay.
+      this.record.streamIndex = this.atIndex;
+      return true;
     } catch (error) {
       this.log(
         `[hex] transcript ${what} failed: ${

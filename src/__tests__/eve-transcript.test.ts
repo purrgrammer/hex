@@ -57,7 +57,15 @@ const RUN: EveEnvelope[] = [
     type: "message.received",
     data: { message: "which relays carry kind 30023?", turnId: "trn_1" },
   },
-  { type: "step.started", data: { stepIndex: 0, turnId: "trn_1" } },
+  {
+    type: "step.started",
+    data: {
+      // Eve names the model here and nowhere else, provider ahead of the slash.
+      modelId: "anthropic/claude-opus-5",
+      stepIndex: 0,
+      turnId: "trn_1",
+    },
+  },
   {
     type: "reasoning.appended",
     data: {
@@ -152,7 +160,6 @@ describe("EveTranscript", () => {
         recipients: [OPERATOR],
         store,
         sink: impl,
-        model: { id: "test-model", provider: "test" },
         setTimer: () => 0,
         clearTimer: () => {},
       },
@@ -207,6 +214,12 @@ describe("EveTranscript", () => {
       text: "41 relays advertise it.",
     });
     expect(tag(answer, "stop")).toBe("end_turn");
+    // The model comes off the stream, split on the slash Eve puts it behind.
+    expect(answer.tags.find((t) => t[0] === "model")).toEqual([
+      "model",
+      "claude-opus-5",
+      "anthropic",
+    ]);
     expect(answer.tags.find((t) => t[0] === "usage")).toEqual([
       "usage",
       "18432",
@@ -218,6 +231,11 @@ describe("EveTranscript", () => {
     const head = sent.filter((s) => s.rumor.kind === 31777).at(-1)!.rumor;
     expect(tag(head, "status")).toBe("idle");
     expect(tag(head, "last-seq")).toBe("4");
+    expect(head.tags.find((t) => t[0] === "model")).toEqual([
+      "model",
+      "claude-opus-5",
+      "anthropic",
+    ]);
     expect(head.tags.find((t) => t[0] === "cost")).toEqual([
       "cost",
       "0.084100",
@@ -275,14 +293,17 @@ describe("EveTranscript", () => {
     const lastTurn = one.sent
       .filter((s) => s.rumor.kind === 1777)
       .at(-1)!.rumor;
-    expect(before.streamIndex).toBe(4);
+    // The cursor names the last event whose publish LANDED — the prompt at index
+    // 3 — not the last event seen. The `step.started` after it published nothing,
+    // so replaying it costs a rebuild of state that was only in memory.
+    expect(before.streamIndex).toBe(3);
     first.close();
 
     const second = HexStore.open(agentHome(home, AGENT).db);
     const two = sink();
     const after = publisher(second, two.impl);
     // The cursor came off disk, so the stream is resumed rather than replayed.
-    expect(after.streamIndex).toBe(4);
+    expect(after.streamIndex).toBe(3);
 
     for (const event of RUN.slice(4)) await after.handle(event, ++index);
     const resumed = two.sent.filter((s) => s.rumor.kind === 1777)[0]!.rumor;
@@ -402,7 +423,9 @@ describe("EveTranscript", () => {
     await pub.handle({ type: "something.invented.later", data: {} }, 3);
 
     expect(sent).toHaveLength(before);
-    expect(pub.streamIndex).toBe(3);
+    // Nothing was published by either, so the durable cursor stays where the
+    // last landed publish left it: the head at index 1.
+    expect(pub.streamIndex).toBe(1);
 
     store.close();
   });
