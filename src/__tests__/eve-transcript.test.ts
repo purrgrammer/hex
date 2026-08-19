@@ -312,16 +312,20 @@ describe("EveTranscript", () => {
     const lastTurn = one.sent
       .filter((s) => s.rumor.kind === 1777)
       .at(-1)!.rumor;
-    // The cursor names the last event whose publish LANDED — the prompt at index
-    // 3 — not the last event seen. The `step.started` after it published nothing,
-    // so replaying it costs a rebuild of state that was only in memory.
-    expect(before.streamIndex).toBe(3);
+    // The cursor keeps up with the STREAM, not with the publishes: most events
+    // publish nothing, and a cursor that only moved on a publish fell hundreds of
+    // events behind on a real turn.
+    expect(before.streamIndex).toBe(4);
     first.close();
 
     const second = HexStore.open(agentHome(home, AGENT).db);
     const two = sink();
     const after = publisher(second, two.impl);
     // The cursor came off disk, so the stream is resumed rather than replayed.
+    // On DISK it is where the last publish landed: the cursor is persisted in
+    // batches, so a restart re-reads a few events that produced nothing. They are
+    // deduped by their durable id if they publish, and were only ever in memory if
+    // they do not.
     expect(after.streamIndex).toBe(3);
 
     for (const event of RUN.slice(4)) await after.handle(event, ++index);
@@ -709,9 +713,9 @@ describe("EveTranscript", () => {
     await pub.handle({ type: "something.invented.later", data: {} }, 3);
 
     expect(sent).toHaveLength(before);
-    // Nothing was published by either, so the durable cursor stays where the
-    // last landed publish left it: the head at index 1.
-    expect(pub.streamIndex).toBe(1);
+    // Nothing was published, and the cursor still moved: an event that produces
+    // no event is one there is no reason to read twice.
+    expect(pub.streamIndex).toBe(3);
 
     store.close();
   });

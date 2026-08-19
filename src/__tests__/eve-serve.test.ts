@@ -89,9 +89,13 @@ function inbound(id: string, text: string): Inbound {
 }
 
 /** A fake Eve: one POST to start or continue, one NDJSON stream to read. */
-function fakeEve(events = TURN, tailIndex = 0) {
+/** Distinct per fake host: two of them are two different Eves, not one. */
+let hostCounter = 0;
+
+function fakeEve(events = TURN, tailIndex = 0, sessionId?: string) {
   const posts: { path: string; body: unknown }[] = [];
   const encoder = new TextEncoder();
+  const session = sessionId ?? `wrun_TEST_${(hostCounter += 1)}`;
 
   const impl = (async (url: string | URL, init?: RequestInit) => {
     const path = new URL(String(url)).pathname;
@@ -101,7 +105,7 @@ function fakeEve(events = TURN, tailIndex = 0) {
         ok: true,
         status: 200,
         statusText: "OK",
-        json: async () => ({ ok: true, sessionId: "wrun_TEST" }),
+        json: async () => ({ ok: true, sessionId: session }),
       };
     }
     return {
@@ -125,7 +129,7 @@ function fakeEve(events = TURN, tailIndex = 0) {
     };
   }) as unknown as typeof fetch;
 
-  return { impl, posts };
+  return { impl, posts, session };
 }
 
 function sink() {
@@ -244,11 +248,15 @@ describe("EveServer", () => {
       { to: "msg-1", text: "41 of them.", tags: undefined },
     ]);
 
+    // A second correspondent, so this is a fresh conversation rather than a
+    // follow-up with nothing new to read.
     const eve2 = fakeEve();
     const bus2 = transport();
-    await server(eve2, bus2, sink().impl, false).handle(
-      inbound("msg-2", "hello"),
-    );
+    await server(eve2, bus2, sink().impl, false).handle({
+      ...inbound("msg-2", "hello"),
+      author: "2".repeat(64),
+      room: { transport: "nip-17", id: "2".repeat(64) },
+    } as unknown as Inbound);
     expect(bus2.replies).toHaveLength(0);
   });
 
@@ -272,7 +280,7 @@ describe("EveServer", () => {
 
     expect(eve.posts.map((p) => p.path)).toEqual([
       "/eve/v1/session",
-      "/eve/v1/session/wrun_TEST",
+      `/eve/v1/session/${eve.session}`,
     ]);
     // And the trigger stays the message that OPENED the session: a head names
     // what set the run going, not the latest thing said to it.
@@ -315,13 +323,14 @@ describe("EveServer", () => {
     );
     expect(first.posts.map((p) => p.path)).toEqual(["/eve/v1/session"]);
 
-    // A new server over the same store: a different process, same disk.
-    const second = fakeEve(TWO_TURNS, 8);
+    // A new server over the same store, serving the same session: a different
+    // process, same disk, same Eve.
+    const second = fakeEve(TWO_TURNS, 8, first.session);
     await server(second, transport(), sink().impl).handle(
       inbound("msg-2", "second"),
     );
     expect(second.posts.map((p) => p.path)).toEqual([
-      "/eve/v1/session/wrun_TEST",
+      `/eve/v1/session/${first.session}`,
     ]);
   });
 

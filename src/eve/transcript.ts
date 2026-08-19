@@ -79,6 +79,15 @@ export interface EveTranscriptOptions {
 /** How many coalesced deltas may wait behind the one being published. */
 const MAX_QUEUED_DELTAS = 4;
 
+/**
+ * How many events may pass before the cursor is written down.
+ *
+ * A crash loses at most this many events' worth of position, and re-reading them
+ * costs nothing: the ones that publish are deduped by their durable id, and the
+ * ones that do not were never anywhere but memory.
+ */
+const SAVE_EVERY = 25;
+
 const sha256 = (text: string) =>
   createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -119,6 +128,10 @@ export class EveTranscript {
    * the restart would skip it.
    */
   private atIndex = 0;
+  /** Set when a publish reached nobody, which stops the durable cursor. */
+  private frozen = false;
+  /** The cursor value last written to disk, so a batch knows when it is due. */
+  private savedIndex = 0;
 
   /**
    * What this step has thought so far, and whether it has been published.
@@ -166,6 +179,7 @@ export class EveTranscript {
       cacheRead: 0,
       cacheWrite: 0,
     };
+    this.savedIndex = this.record.streamIndex;
     this.coalescer = new DeltaCoalescer({
       emit: (delta) => {
         this.queueDelta(delta);
@@ -515,6 +529,29 @@ export class EveTranscript {
       default:
         break;
     }
+
+    /**
+     * The cursor keeps up with the stream, except when something is unpublished.
+     *
+     * It used to advance ONLY on a successful publish, which was right about
+     * failures and catastrophic about volume: most events publish nothing — a
+     * reasoning fragment, a step announcing its model, every delta — so on a
+     * real turn the cursor fell nine hundred events behind the stream. A restart
+     * then re-read all of them and republished the turns they had already
+     * produced, and a follow-up spent minutes grinding through history before it
+     * could hear the answer.
+     *
+     * So: forward on every event, frozen the moment a publish reaches nobody, and
+     * thawed by the next one that lands. Persisted in batches, because a row
+     * written nine hundred times is nine hundred writes for one fact.
+     */
+    if (!this.frozen && this.atIndex > this.record.streamIndex) {
+      this.record.streamIndex = this.atIndex;
+      if (this.atIndex - this.savedIndex >= SAVE_EVERY) {
+        this.savedIndex = this.atIndex;
+        this.options.store.saveTranscript(this.record);
+      }
+    }
   }
 
   /**
@@ -528,6 +565,8 @@ export class EveTranscript {
     // Let whatever is still queued go out before the head says the session is
     // over — a delta arriving after `done` describes work already reported.
     await this.deltaTail;
+    // Whatever the batch had not written yet.
+    this.options.store.saveTranscript(this.record);
     if (this.deltaDropped > 0)
       this.log(
         `[hex] ${this.deltaDropped} delta(s) dropped keeping up with the stream; every one is repeated in its turn`,
@@ -786,9 +825,22 @@ export class EveTranscript {
         this.log(
           `[hex] transcript ${what} did not reach ${undeliverable.length} recipient(s)`,
         );
-      if (delivered.length === 0) return false;
+      if (delivered.length === 0) {
+        /**
+         * Freeze the cursor: something this stream produced is not on any relay.
+         *
+         * From here the durable cursor stops moving, so a restart re-reads the
+         * events that produced the lost turn and publishes it again. It thaws on
+         * the next successful publish, because by then the chain has moved on and
+         * replaying further back would duplicate what did land.
+         */
+        this.frozen = true;
+        return false;
+      }
+      this.frozen = false;
       // Read this far, and everything up to here is on a relay.
       this.record.streamIndex = this.atIndex;
+      this.options.store.saveTranscript(this.record);
       return true;
     } catch (error) {
       this.log(
