@@ -82,6 +82,22 @@ export interface ServeOptions {
     /** A fresh host per turn, bound to the message being answered. */
     host: (inbound: Inbound) => ToolHost;
   };
+  /**
+   * What this agent is, for the per-session snapshot.
+   *
+   * A function rather than a value, because the answer is read from the runtime
+   * when a session opens rather than known when the server is built.
+   */
+  describe?: () => Promise<
+    | {
+        name: string;
+        about?: string;
+        picture?: string;
+        instructions?: string;
+        tools?: { name: string; description?: string; parameters?: unknown }[];
+      }
+    | undefined
+  >;
   /** How long the pre-message read waits for silence. Injected in tests. */
   drainQuietMs?: number;
   log?: (line: string) => void;
@@ -210,6 +226,25 @@ export class EveServer {
           `[hex] could not catch up ${record.sessionId}: ${message(error)}`,
         );
       }
+    }
+  }
+
+  /**
+   * Publish the prompt and tools this run had, if anyone can tell us.
+   *
+   * The runtime is the source, not this package's config: the config is a
+   * request and the runtime is the answer, and publishing the request as if it
+   * were the answer is how a transcript comes to describe an agent that never
+   * ran.
+   */
+  private async describe(transcript: EveTranscript): Promise<void> {
+    const describe = this.options.describe;
+    if (!describe) return;
+    try {
+      const info = await describe();
+      if (info) await transcript.snapshot(info);
+    } catch (error) {
+      this.log(`[hex] could not describe the session: ${message(error)}`);
     }
   }
 
@@ -402,6 +437,15 @@ export class EveServer {
       );
       this.log(`[hex] ${short(peer)} → eve session ${sessionId}`);
       boundary = { last: -1, finished: new Set() };
+
+      /**
+       * What this run was set up with, published once, before anything it did.
+       *
+       * Fire and forget: a reader who cannot see the prompt still gets the
+       * transcript, and a run that refused to start because it could not
+       * describe itself would be a far worse trade.
+       */
+      void this.describe(conversation.transcript);
       // Bound as soon as the id exists. The runtime cannot call a tool before it
       // has thought, so a round trip's head start is enough — and a call that
       // does arrive first is refused politely rather than misrouted.

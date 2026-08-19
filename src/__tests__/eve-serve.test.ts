@@ -510,6 +510,58 @@ describe("EveServer", () => {
     expect(eve.posts.slice(before)).toHaveLength(1);
   });
 
+  it("publishes how the run was set up, once, addressed by session", async () => {
+    /**
+     * A standing definition says what the agent is in general and goes stale the
+     * moment its config changes. This says what applied to THIS run, so a
+     * transcript read next month still shows the prompt that produced it — and
+     * it is its own event rather than head tags, because the head is republished
+     * dozens of times a session and a prompt plus tool schemas is kilobytes.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const out = sink();
+    const server_ = new EveServer({
+      host: HOST,
+      transport: transport(),
+      reply: true,
+      fetchImpl: eve.impl,
+      drainQuietMs: 40,
+      describe: async () => ({
+        name: "Hex",
+        instructions: "You are Hex.",
+        tools: [{ name: "chat_respond", description: "Speak." }],
+      }),
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: out.impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+
+    await server_.handle(inbound("msg-1", "first"));
+    await server_.handle(inbound("msg-2", "second", "msg-1"));
+
+    const definitions = out.sent.filter((rumor) => rumor.kind === 31779);
+    // Once, not once per turn: a snapshot that kept up with its subject would
+    // not be one.
+    expect(definitions).toHaveLength(1);
+    expect(definitions[0]!.content).toBe("You are Hex.");
+    expect(
+      definitions[0]!.tags.filter((t) => t[0] === "tool").map((t) => t[1]),
+    ).toEqual(["chat_respond"]);
+
+    // The `d` is the session, and the head points at exactly that address.
+    const d = definitions[0]!.tags.find((t) => t[0] === "d")![1]!;
+    const head = out.sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
+    expect(head.tags.find((t) => t[0] === "agent")?.[1]).toBe(
+      `31779:${AGENT}:${d}`,
+    );
+  });
+
   it("picks up the conversation a previous process was having", async () => {
     /**
      * Seen live: `serve` restarted, the peer-to-session map was in memory, and the

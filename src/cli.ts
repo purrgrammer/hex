@@ -26,6 +26,7 @@ import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 import { EveServer } from "./eve/serve.js";
 import { ToolBridge } from "./eve/bridge.js";
 import { parseSessionControl } from "./nostr/decode-control.js";
+import { readAgentInfo } from "./eve/info.js";
 import { Prices } from "./eve/pricing.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
 import { RoomTools } from "./tools/room-tools.js";
@@ -652,6 +653,24 @@ async function main(): Promise<void> {
           host,
           transport,
           reply: !values["no-reply"],
+          /**
+           * What this run was set up with, asked of the runtime itself.
+           *
+           * The instructions file in this config is not it: under `serve` the
+           * prompt lives on the Eve side, and publishing this package's copy
+           * would describe an agent nobody ran.
+           */
+          describe: async () => {
+            const info = await readAgentInfo({ host });
+            if (!info) return undefined;
+            return {
+              name: config.profile.name ?? transcriptConfig.slug,
+              about: config.profile.about,
+              picture: config.profile.picture,
+              instructions: info.instructions,
+              tools: info.tools,
+            };
+          },
           tools:
             bridge && knowledge
               ? {

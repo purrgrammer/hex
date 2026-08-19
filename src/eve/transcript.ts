@@ -23,6 +23,7 @@ import { DeltaCoalescer, type CoalescedDelta } from "../nostr/coalesce.js";
 import { fitTurn } from "../nostr/blob.js";
 import {
   buildAgentDefinition,
+  definitionAddress,
   buildDelta,
   buildSessionHead,
   buildTurn,
@@ -285,6 +286,44 @@ export class EveTranscript {
   private log(line: string): void {
     this.options.log?.(line);
   }
+
+  /**
+   * Publish what this run was set up with: the prompt, and the tools on offer.
+   *
+   * Addressed by SESSION rather than by agent slug, and that is the whole point.
+   * A standing definition says what the agent is in general and goes stale the
+   * moment its config changes; this says what applied to this run, so a
+   * transcript read next month still shows the prompt that produced it.
+   *
+   * On its own event rather than on the head, because the head is republished on
+   * every status change and every turn — dozens of times in a long session,
+   * sealed and wrapped once per recipient each time. A prompt plus tool schemas
+   * is kilobytes. The head points at this instead, through the `agent` tag it
+   * already carried.
+   *
+   * Published once and forgotten: a snapshot that kept up with its subject would
+   * not be one.
+   */
+  async snapshot(info: {
+    name: string;
+    about?: string;
+    picture?: string;
+    instructions?: string;
+    tools?: AgentToolSpec[];
+  }): Promise<void> {
+    if (this.snapshotted) return;
+    this.snapshotted = true;
+    await this.send(
+      buildAgentDefinition(this.options.agentPubkey, {
+        slug: this.record.nostrId,
+        ...info,
+        alt: `${info.name} — how this session was set up`,
+      }),
+      "session definition",
+    );
+  }
+
+  private snapshotted = false;
 
   /** Publish the agent's definition. Once per agent, not per session. */
   async announce(definition: {
@@ -967,7 +1006,17 @@ export class EveTranscript {
           : undefined,
         deltaRelays:
           this.options.deltas === false ? undefined : this.options.deltaRelays,
-        definition: `31779:${this.options.agentPubkey}:${this.options.slug}`,
+        /**
+         * Whichever definition describes this run.
+         *
+         * The per-session snapshot when one was published, the standing
+         * definition otherwise — a reader follows one pointer either way, and
+         * the address itself says which it got.
+         */
+        definition: definitionAddress(
+          this.options.agentPubkey,
+          this.snapshotted ? this.record.nostrId : this.options.slug,
+        ),
         alt: `Agent session: ${title ?? this.sessionId} (${this.record.status}, ${this.record.seq} turns)`,
       },
     );
