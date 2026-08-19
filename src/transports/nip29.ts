@@ -270,7 +270,11 @@ export class Nip29Transport implements Transport {
    * Returns the published event's id so the caller can remember it — Hex's own
    * message comes straight back through the same subscription.
    */
-  async reply(to: Inbound, text: string): Promise<string> {
+  async reply(
+    to: Inbound,
+    text: string,
+    extraTags: string[][] = [],
+  ): Promise<string> {
     if (!to.room.relay) throw new Error("a NIP-29 room needs its relay");
     const relay = to.room.relay;
     const event = await GroupMessageFactory.reply(
@@ -282,7 +286,11 @@ export class Nip29Transport implements Transport {
       // the parent, and grimoire reads `q` and ignores the factory's `e`. With
       // the relay hint and the author, so a client can fetch what is quoted.
       // The `e` stays for clients that thread on it instead.
-      .modifyPublicTags((tags) => [...tags, ["q", to.id, relay, to.author]])
+      .modifyPublicTags((tags) => [
+        ...tags,
+        ["q", to.id, relay, to.author],
+        ...extraTags,
+      ])
       .sign(this.options.signer);
 
     const outcomes = await publishTo(

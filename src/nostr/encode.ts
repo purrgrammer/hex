@@ -17,6 +17,7 @@ import {
 } from "./kinds.js";
 import { isKnownPart } from "./types.js";
 import type {
+  RepositorySpec,
   AgentDefinitionInput,
   AgentToolSpec,
   AgentTurnInput,
@@ -322,6 +323,25 @@ export function buildAgentDefinition(
   for (const tool of input.tools ?? []) tags.push(toolTag(tool));
   for (const suggestion of input.suggestions ?? [])
     tags.push(["try", suggestion]);
+  /**
+   * What the agent has checked out, and where.
+   *
+   * `["repo", name, url, path, description]`, positional, with empty strings
+   * for what is not known — a reader indexing by position must not have a
+   * missing url shift the path into its place.
+   *
+   * The PATH is the part worth carrying. A client offering "start a run on
+   * grimoire" has to name a directory the agent will recognise, and one it
+   * guessed at produces a prompt the agent quietly ignores.
+   */
+  for (const repo of input.repositories ?? [])
+    tags.push([
+      "repo",
+      repo.name,
+      repo.url ?? "",
+      repo.path ?? "",
+      repo.description ?? "",
+    ]);
   if (input.alt) tags.push(["alt", input.alt]);
 
   // The content IS the system prompt. Nothing wraps it, so anyone reading the

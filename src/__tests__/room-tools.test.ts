@@ -166,6 +166,61 @@ describe("RoomTools.call", () => {
     expect(tools.deliveredIds).toEqual(["abc123"]);
   });
 
+  it("carries an attachment's imeta so the picture is readable", async () => {
+    /**
+     * An encrypted blob's URL on its own is a link to bytes nobody can open.
+     * The `imeta` beside it holds the key, so a respond that dropped it would
+     * deliver a broken image every single time — and the model, told
+     * `delivered as …`, would have no way to know.
+     */
+    const sent: { text: string; tags?: string[][] }[] = [];
+    const tools = new RoomTools({
+      transport: transport({
+        reply: async (_to, text, tags) => {
+          sent.push({ text, tags });
+          return "abc123";
+        },
+      }),
+      incoming: INBOUND,
+    });
+
+    const imeta = [
+      "imeta",
+      "url https://blossom.example/abc",
+      "m image/png",
+      "decryption-key aa",
+    ];
+    const result = await tools.call({
+      name: RESPOND_TOOL,
+      arguments: { text: "here it is", imeta },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sent[0]!.tags).toEqual([imeta]);
+  });
+
+  it("drops something that is not an imeta rather than publishing it", async () => {
+    // It is the tool's own output coming back, so the risk is a model mangling
+    // it — and a malformed tag published as-is renders as nothing, with no
+    // explanation anywhere.
+    const sent: { tags?: string[][] }[] = [];
+    const tools = new RoomTools({
+      transport: transport({
+        reply: async (_to, _text, tags) => {
+          sent.push({ tags });
+          return "abc123";
+        },
+      }),
+      incoming: INBOUND,
+    });
+
+    await tools.call({
+      name: RESPOND_TOOL,
+      arguments: { text: "hi", imeta: ["p", "not an imeta"] },
+    });
+    expect(sent[0]!.tags).toEqual([]);
+  });
+
   it("refuses a second answer in one turn, and says why", async () => {
     // A model that answers three times has misunderstood; the room is worse off
     // for hearing all three, and the refusal is what lets it stop.

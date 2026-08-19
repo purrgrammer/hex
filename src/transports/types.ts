@@ -67,7 +67,15 @@ export interface Transport {
    */
   fetchById?(room: Room, id: string): Promise<Inbound | null>;
   /** Publish a reply and return its event id. */
-  reply(to: Inbound, text: string): Promise<string>;
+  /**
+   * `tags` rides on the message itself.
+   *
+   * What it is for: an `imeta` describing an attachment. An encrypted blob's
+   * URL on its own is a link to bytes nobody can open, and the tag beside it is
+   * what makes them readable — so a transport that dropped it would deliver a
+   * broken image every time.
+   */
+  reply(to: Inbound, text: string, tags?: string[][]): Promise<string>;
   /**
    * Acknowledge that a message is being worked on.
    *

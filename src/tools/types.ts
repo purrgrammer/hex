@@ -81,6 +81,8 @@ export const RESOLVE_TOOL = "nostr.resolve";
 /** Signing and publishing as the agent. Public, permanent, bounded. */
 export const PUBLISH_TOOL = "nostr.publish";
 export const SIGN_TOOL = "nostr.sign";
+/** Putting a file somewhere a reader can fetch it. Off unless configured. */
+export const UPLOAD_TOOL = "blossom.upload";
 /**
  * Every tool id that exists, so config can refuse one that does not.
  *
@@ -98,6 +100,7 @@ export const KNOWN_TOOLS: readonly string[] = [
   RESOLVE_TOOL,
   PUBLISH_TOOL,
   SIGN_TOOL,
+  UPLOAD_TOOL,
 ];
 
 /**

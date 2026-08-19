@@ -6,6 +6,7 @@ import { PrivateKeySigner } from "applesauce-signers";
 import {
   KIND_BLOSSOM_AUTH,
   encrypt,
+  fileMessageTags,
   imetaTag,
   uploadBytes,
   type Uploaded,
@@ -240,5 +241,59 @@ describe("imetaTag", () => {
       `decryption-nonce ${"c".repeat(32)}`,
       `ox ${"d".repeat(64)}`,
     ]);
+  });
+});
+
+describe("fileMessageTags", () => {
+  it("says the same thing NIP-17 says, beside the imeta that says it too", () => {
+    /**
+     * Both, not one. NIP-17 defines these flat tags and a client written to the
+     * spec reads them; grimoire and the Concord clients read the `imeta`.
+     * Sending both costs a few hundred bytes inside an already-sealed message,
+     * and is the difference between an attachment that renders in one client
+     * and one that renders in either.
+     */
+    const uploaded: Uploaded = {
+      url: "https://blossom.example/abc",
+      sha256: "a".repeat(64),
+      size: 10,
+      mime: "image/png",
+      encryption: {
+        algorithm: "aes-gcm",
+        key: "b".repeat(64),
+        nonce: "c".repeat(32),
+        ox: "d".repeat(64),
+      },
+    };
+
+    const tags = fileMessageTags(uploaded);
+    expect(tags).toContainEqual(["file-type", "image/png"]);
+    expect(tags).toContainEqual(["x", "a".repeat(64)]);
+    expect(tags).toContainEqual(["decryption-key", "b".repeat(64)]);
+    expect(tags).toContainEqual(["decryption-nonce", "c".repeat(32)]);
+    expect(tags).toContainEqual(["ox", "d".repeat(64)]);
+
+    // The two must agree, or a client reading one and a client reading the
+    // other disagree about which bytes the message is about.
+    const imeta = imetaTag(uploaded);
+    const fromImeta = (name: string) =>
+      imeta
+        .slice(1)
+        .find((part) => part.startsWith(`${name} `))
+        ?.slice(name.length + 1);
+    const fromFlat = (name: string) =>
+      tags.find(([tagName]) => tagName === name)?.[1];
+    for (const field of ["decryption-key", "decryption-nonce", "ox", "x"])
+      expect(fromFlat(field)).toBe(fromImeta(field));
+  });
+
+  it("says nothing about decryption for a public file", () => {
+    const tags = fileMessageTags({
+      url: "https://blossom.example/abc",
+      sha256: "a".repeat(64),
+      size: 10,
+      mime: "image/png",
+    });
+    expect(tags.some(([name]) => name.startsWith("decryption"))).toBe(false);
   });
 });

@@ -57,6 +57,15 @@ export const KIND_GIFT_WRAP = 1059;
 /** The same envelope a relay must not store, for a payload nobody needs twice. */
 export const KIND_GIFT_WRAP_EPHEMERAL = 21059;
 export const KIND_PRIVATE_MESSAGE = 14;
+
+/**
+ * NIP-17's file message. Its content is a URL and nothing else.
+ *
+ * A separate kind rather than a kind 14 with a link in it, because a reader
+ * that knows the difference can render an attachment as an attachment — and
+ * one that does not still sees a URL, which is the whole content.
+ */
+export const KIND_FILE_MESSAGE = 15;
 /** NIP-25, as a rumor inside a wrap. */
 export const KIND_REACTION = 7;
 /** Where a peer says their wraps should be delivered. */
@@ -459,6 +468,16 @@ export class Nip17Transport implements Transport {
      * content, which every recipient recomputes and rejects.
      */
     tags: string[][] = [],
+    /**
+     * The rumor's kind. 14 unless this message IS a file (15).
+     *
+     * Swapped after stamping rather than by a different factory: the sealing,
+     * wrapping, recipient tags and delivery are identical for both, and the
+     * only thing that differs is the number. Changed BEFORE the id is computed,
+     * for the same reason the tags are — a kind altered afterwards leaves a
+     * rumor whose id does not match its own content.
+     */
+    kind: number = KIND_PRIVATE_MESSAGE,
   ): Promise<string> {
     // Stamped, not signed: a rumor carries a pubkey and an id and no signature.
     // The id is computed here because the session store keys on it, and because
@@ -467,10 +486,11 @@ export class Nip17Transport implements Transport {
     const stamped = await (replyToId ? draft.replyTo(replyToId) : draft).stamp(
       this.options.signer,
     );
-    const unsigned =
-      tags.length > 0
-        ? { ...stamped, tags: [...stamped.tags, ...tags] }
-        : stamped;
+    const unsigned = {
+      ...stamped,
+      kind,
+      tags: tags.length > 0 ? [...stamped.tags, ...tags] : stamped.tags,
+    };
     const rumor = { ...unsigned, id: getEventHash(unsigned) } as Rumor;
 
     const theirInbox = await this.inboxOf(peer);

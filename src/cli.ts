@@ -20,9 +20,15 @@ import { announceIdentity } from "./identity.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
 import type { TransportConfig } from "./config.js";
-import { Nip17Transport } from "./transports/nip17.js";
+import type { Inbound } from "./transports/types.js";
+import { KIND_FILE_MESSAGE, Nip17Transport } from "./transports/nip17.js";
 import { Nip29Transport } from "./transports/nip29.js";
-import { imetaTag, upload } from "./blossom.js";
+import {
+  fileMessageTags,
+  imetaTag,
+  upload,
+  type Uploaded,
+} from "./blossom.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
@@ -34,6 +40,7 @@ import { Prices } from "./eve/pricing.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
 import { RoomTools } from "./tools/room-tools.js";
 import { PublishTools } from "./tools/publish.js";
+import { BlossomTools } from "./tools/blossom-tools.js";
 import { ReplyGate } from "./policy.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
@@ -136,6 +143,7 @@ async function main(): Promise<void> {
       "no-reply": { type: "boolean", default: false },
       attach: { type: "string", multiple: true },
       transport: { type: "string" },
+      "as-file": { type: "boolean", default: false },
       "no-encrypt": { type: "boolean", default: false },
       help: { type: "boolean", default: false, short: "h" },
     },
@@ -362,7 +370,11 @@ async function main(): Promise<void> {
           fail(
             `--transport ${transportName} is not a transport this build has — nip-17 or nip-29`,
           );
-        if (!text) fail("a message with no words in it says nothing");
+        // A file IS a message. Words are only required when nothing else is
+        // being sent — `--as-file` in particular needs the text EMPTY, since a
+        // kind 15's content is the URL and nothing else.
+        if (!text && (values.attach ?? []).length === 0)
+          fail("a message with no words and no files in it says nothing");
 
         const resolved = await resolveSigner(config.identity.signer, {
           baseDir: loaded.baseDir,
@@ -381,6 +393,7 @@ async function main(): Promise<void> {
          */
         const attachments = values.attach ?? [];
         const imetas: string[][] = [];
+        const uploads: Uploaded[] = [];
         let body = text;
 
         if (attachments.length > 0) {
@@ -402,6 +415,7 @@ async function main(): Promise<void> {
               log: (line) => console.log(line),
             });
             imetas.push(imetaTag(uploaded));
+            uploads.push(uploaded);
             body = body ? `${body}\n${uploaded.url}` : uploaded.url;
             console.log(
               `[hex] ${basename(path)} → ${uploaded.url}${encrypted ? " (encrypted)" : ""}`,
@@ -488,12 +502,40 @@ async function main(): Promise<void> {
           log: (line) => console.log(line),
         });
 
+        /**
+         * A kind 15 when the message IS the file.
+         *
+         * NIP-17 says a file message's content is the URL and nothing else, so
+         * this is only offered for a single attachment with no words of its
+         * own — anything else would have to throw away either the text or the
+         * other files to fit the shape.
+         */
+        const asFile =
+          values["as-file"] && uploads.length === 1 && !text.trim();
+        if (values["as-file"] && !asFile)
+          fail(
+            "--as-file needs exactly one attachment and no message text: a kind 15's content is the URL",
+          );
+
+        const kind = asFile ? KIND_FILE_MESSAGE : undefined;
+        const messageTags = asFile
+          ? [...imetas, ...fileMessageTags(uploads[0]!)]
+          : imetas;
+
         if (values["dry-run"]) {
-          console.log(`would send to ${nip19.npubEncode(peer)}: ${body}`);
-          for (const tag of imetas) console.log(`  ${tag.join(" | ")}`);
+          console.log(
+            `would send to ${nip19.npubEncode(peer)} as kind ${kind ?? 14}: ${body}`,
+          );
+          for (const tag of messageTags) console.log(`  ${tag.join(" | ")}`);
         } else {
-          const id = await transport.send(peer, body, undefined, imetas);
-          console.log(`sent ${id}`);
+          const id = await transport.send(
+            peer,
+            body,
+            undefined,
+            messageTags,
+            kind,
+          );
+          console.log(`sent ${id}${asFile ? " (kind 15)" : ""}`);
         }
         transport.stop();
         await resolved.close();
@@ -774,6 +816,29 @@ async function main(): Promise<void> {
               })
             : undefined;
 
+        /**
+         * Uploading, if the operator named somewhere to upload to.
+         *
+         * Built per message rather than once: whether an attachment is
+         * encrypted depends on the ROOM it is going to, and only the inbound
+         * message knows which that is.
+         */
+        const blossomConfig = config.tools?.blossom;
+        const blossomFor = (inbound: Inbound) =>
+          bridge && blossomConfig?.enabled
+            ? new BlossomTools({
+                servers: blossomConfig.servers,
+                signer: resolved.signer,
+                // A private conversation's file is encrypted; a public group's
+                // is not, because encrypting it hides it from the room.
+                encryptByDefault:
+                  inbound.room.transport === "nip-17" &&
+                  blossomConfig.encryptByDefault !== false,
+                perHour: blossomConfig.perHour,
+                log: (line) => console.log(line),
+              })
+            : undefined;
+
         const server = new EveServer({
           host,
           transport,
@@ -794,6 +859,7 @@ async function main(): Promise<void> {
               picture: config.profile.picture,
               instructions: info.instructions,
               tools: info.tools,
+              repositories: config.repositories,
             };
           },
           tools:
@@ -807,6 +873,7 @@ async function main(): Promise<void> {
                       selfPubkey: resolved.pubkey,
                       knowledge,
                       publish: publishing,
+                      blossom: blossomFor(inbound),
                       log: (line) => console.log(line),
                     }),
                 }

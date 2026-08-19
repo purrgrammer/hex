@@ -364,8 +364,28 @@ export interface AgentDefinitionInput {
   tools?: AgentToolSpec[];
   /** Starter prompts a client offers before the first message. */
   suggestions?: string[];
+  /** Checkouts this agent can read, and where they sit inside its sandbox. */
+  repositories?: RepositorySpec[];
   alt?: string;
   createdAt?: number;
+}
+
+/**
+ * A repository an agent has on hand.
+ *
+ * The `path` is where it lives INSIDE the agent's sandbox, which is what makes
+ * this worth publishing rather than inferring: a reader that wants a run scoped
+ * to one checkout has to name a directory the agent will recognise, and
+ * guessing at it produces a prompt the agent quietly ignores.
+ */
+export interface RepositorySpec {
+  /** Short name, unique within an agent. */
+  name: string;
+  /** Where a person can read it — a clone URL or a web page. */
+  url?: string;
+  /** Its path in the sandbox, e.g. `/workspace/grimoire`. */
+  path?: string;
+  description?: string;
 }
 
 // ── Decoded events (what a reader gets back) ─────────────────────────────────

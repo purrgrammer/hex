@@ -13,6 +13,7 @@
 import type { Inbound, Transport } from "../transports/types.js";
 import type { KnowledgeTools } from "./knowledge.js";
 import type { PublishTools } from "./publish.js";
+import type { BlossomTools } from "./blossom-tools.js";
 import { nip19 } from "nostr-tools";
 
 import {
@@ -71,6 +72,15 @@ export interface RoomToolsOptions {
    * and subject to the same grants.
    */
   publish?: PublishTools;
+  /**
+   * Uploading a file. Off unless the operator configured a host.
+   *
+   * Built per-message rather than shared, because whether to encrypt is a
+   * property of the ROOM: a DM's attachment is encrypted so the sealed
+   * conversation stays sealed, and a public group's is not, because encrypting
+   * it hides the picture from everyone it was posted for.
+   */
+  blossom?: BlossomTools;
   /**
    * Which tools this channel gets, as ids or `namespace.*`.
    *
@@ -161,6 +171,14 @@ export class RoomTools implements ToolHost {
                 "and ordinary sentences, and `nostr:` bech32 entities to refer " +
                 "to people and events.",
             },
+            imeta: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "The `imeta` tag from blossom.upload, when your message links " +
+                "an uploaded file. Without it an encrypted attachment is a " +
+                "link to bytes the reader cannot open.",
+            },
           },
           required: ["text"],
           additionalProperties: false,
@@ -237,6 +255,7 @@ export class RoomTools implements ToolHost {
     const optional: ToolSpec[] = [];
     if (this.options.knowledge) optional.push(...this.options.knowledge.list());
     if (this.options.publish) optional.push(...this.options.publish.list());
+    if (this.options.blossom) optional.push(...this.options.blossom.list());
 
     specs.push(
       ...(this.options.grants
@@ -270,6 +289,8 @@ export class RoomTools implements ToolHost {
       return this.options.knowledge.call(name, call.arguments);
     if (this.options.publish?.handles(name))
       return this.options.publish.call(name, call.arguments);
+    if (this.options.blossom?.handles(name))
+      return this.options.blossom.call({ name, arguments: call.arguments });
 
     switch (name) {
       case RESPOND_TOOL:
@@ -322,9 +343,23 @@ export class RoomTools implements ToolHost {
     }
 
     try {
+      /**
+       * An `imeta` from `blossom.upload`, passed straight through.
+       *
+       * Validated only for shape — it is the tool's own output coming back, so
+       * the risk is a model mangling it rather than inventing one, and a
+       * malformed tag published as-is renders as nothing with no explanation.
+       */
+      const imeta = Array.isArray(args.imeta)
+        ? args.imeta.filter((part): part is string => typeof part === "string")
+        : undefined;
+      const tags =
+        imeta && imeta[0] === "imeta" && imeta.length > 1 ? [imeta] : [];
+
       const id = await this.options.transport.reply(
         this.options.incoming,
         text,
+        tags,
       );
       this.responses += 1;
       this.didDeliver = true;

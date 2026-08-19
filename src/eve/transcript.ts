@@ -30,6 +30,7 @@ import {
 } from "../nostr/encode.js";
 import type {
   AgentToolSpec,
+  RepositorySpec,
   Cost,
   Rumor,
   SessionStatus,
@@ -329,6 +330,7 @@ export class EveTranscript {
     picture?: string;
     instructions?: string;
     tools?: AgentToolSpec[];
+    repositories?: RepositorySpec[];
   }): Promise<void> {
     if (this.snapshotted) return;
     this.snapshotted = true;

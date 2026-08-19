@@ -131,6 +131,16 @@ export interface ToolsConfig {
   };
 }
 
+export interface RepositoryConfig {
+  /** Short name, unique in this config. */
+  name: string;
+  /** Where a person can read it. */
+  url?: string;
+  /** Where the AGENT finds it — the path inside its sandbox. */
+  path?: string;
+  description?: string;
+}
+
 export interface EveConfig {
   host: string;
   /**
@@ -193,6 +203,16 @@ export interface HexConfig {
   transcript?: TranscriptConfig;
   eve?: EveConfig;
   tools?: ToolsConfig;
+  /**
+   * Checkouts the agent has, and where they sit inside its sandbox.
+   *
+   * Stated here rather than read from the runtime, because the runtime does not
+   * report it: Eve's `/eve/v1/info` describes the sandbox DEFINITION, not what
+   * a bootstrap hook cloned into it, so a session with two repositories in
+   * `/workspace` describes a workspace with no root entries at all. Whoever
+   * wrote the bootstrap knows; nothing else does.
+   */
+  repositories?: RepositoryConfig[];
   transports: TransportConfig[];
 }
 
@@ -475,6 +495,41 @@ function parseBlossomTools(
   };
 }
 
+function parseRepositories(value: unknown): RepositoryConfig[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value))
+    throw new ConfigError("repositories must be an array");
+
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const record = requireRecord(entry, `repositories[${index}]`);
+    rejectUnknown(
+      record,
+      ["name", "url", "path", "description"],
+      `repositories[${index}]`,
+    );
+    const name = requireString(record.name, `repositories[${index}].name`);
+    // Two repositories with one name is a client offering the same choice
+    // twice and an agent told to work in whichever one it guesses.
+    if (seen.has(name))
+      throw new ConfigError(`repositories: ${name} is named twice`);
+    seen.add(name);
+
+    for (const field of ["url", "path", "description"] as const)
+      if (record[field] !== undefined && typeof record[field] !== "string")
+        throw new ConfigError(
+          `repositories[${index}].${field} must be a string`,
+        );
+
+    return {
+      name,
+      url: record.url as string | undefined,
+      path: record.path as string | undefined,
+      description: record.description as string | undefined,
+    };
+  });
+}
+
 function parseEve(value: unknown): EveConfig | undefined {
   if (value === undefined) return undefined;
   const record = requireRecord(value, "eve");
@@ -602,6 +657,7 @@ export function parseConfig(input: unknown): HexConfig {
       "transcript",
       "eve",
       "tools",
+      "repositories",
       "transports",
     ],
     "config",
@@ -647,6 +703,7 @@ export function parseConfig(input: unknown): HexConfig {
     transcript: parseTranscript(raw.transcript),
     eve: parseEve(raw.eve),
     tools: parseTools(raw.tools),
+    repositories: parseRepositories(raw.repositories),
     transports: parseTransports(raw.transports),
   };
 

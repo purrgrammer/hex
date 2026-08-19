@@ -316,3 +316,31 @@ export function imetaTag(uploaded: Uploaded): string[] {
   }
   return ["imeta", ...parts];
 }
+
+/**
+ * The flat tags NIP-17 puts on a kind-15 file message.
+ *
+ * Alongside the `imeta`, not instead of it. NIP-17 defines these — `file-type`,
+ * `encryption-algorithm`, `decryption-key`, `decryption-nonce`, `x`, `ox`,
+ * `size` — and a client written to the spec reads them; grimoire and the
+ * Concord clients read the `imeta`. Sending both costs a few hundred bytes
+ * inside an already-sealed message and is the difference between an attachment
+ * that renders in one client and one that renders in either.
+ *
+ * They say the same thing, so nothing is trusted twice: a reader takes whichever
+ * it understands, and both name the same URL, key and hashes.
+ */
+export function fileMessageTags(uploaded: Uploaded): string[][] {
+  const tags: string[][] = [
+    ["file-type", uploaded.mime],
+    ["x", uploaded.sha256],
+    ["size", String(uploaded.size)],
+  ];
+  if (uploaded.encryption) {
+    tags.push(["encryption-algorithm", uploaded.encryption.algorithm]);
+    tags.push(["decryption-key", uploaded.encryption.key]);
+    tags.push(["decryption-nonce", uploaded.encryption.nonce]);
+    tags.push(["ox", uploaded.encryption.ox]);
+  }
+  return tags;
+}
