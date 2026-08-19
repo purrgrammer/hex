@@ -24,11 +24,11 @@ hex announce                                 # publish kind 0 / 10002 / 10050
 
 Three relay roles, and they are not interchangeable:
 
-| Role | What it is for |
-| --- | --- |
-| `read` | lookups — kind 0, metadata |
-| `publish` | Hex's own outbox — kind 0, 10002, 10050 |
-| `dm` | Hex's NIP-17 inbox, and exactly what its kind 10050 announces |
+| Role      | What it is for                                                |
+| --------- | ------------------------------------------------------------- |
+| `read`    | lookups — kind 0, metadata                                    |
+| `publish` | Hex's own outbox — kind 0, 10002, 10050                       |
+| `dm`      | Hex's NIP-17 inbox, and exactly what its kind 10050 announces |
 
 A group message never goes to `publish`: a NIP-29 kind 9 is published to the
 group's own relay and nowhere else, because a kind 9 on a foreign relay is not in
@@ -44,6 +44,19 @@ says otherwise. A reader deserves to know a reply came from a machine.
 The secret key is never inline: `identity.signer` names an env var or a file, or
 points at a NIP-46 bunker whose client keypair is persisted under `stateDir` so a
 restart does not re-pair.
+
+Four sections govern what `serve` can do, and all four are absent by default:
+
+| Section         | What it turns on                                                              |
+| --------------- | ----------------------------------------------------------------------------- |
+| `eve.host`      | which runtime to drive                                                        |
+| `eve.bridge`    | the loopback port and token for Hex's own tools                               |
+| `eve.pricing`   | an OpenAI-shaped `/models` endpoint, for costing a provider that reports none |
+| `tools.publish` | `nostr.publish` and `nostr.sign`, with `kinds`, `perHour` and `dryRun`        |
+
+`eve.pricing` has no default URL, because a guessed price list is a made-up
+number with a currency on it. What it produces is published marked `estimated`,
+since a figure presented as a bill when it is arithmetic is worse than no figure.
 
 ## Commands
 
@@ -64,6 +77,12 @@ restart does not re-pair.
   `transcript` section naming who reads it, because publishing is never a
   default. `--dry-run` prints the rumors instead of wrapping them, which is how
   the mapping gets checked against a real host with no relay involved.
+- `hex serve [--host <url>] [--no-reply]` — answer private messages by running
+  them through Eve, publishing each run as a transcript as it happens. This is
+  the whole loop: a DM arrives, a session opens, the transcript is published with
+  the message that started it named on its head, and the answer comes back in the
+  conversation. `--no-reply` publishes the session and says nothing in chat,
+  which is only useful with a client that reads transcripts.
 
 ## Publishing a transcript
 
@@ -87,17 +106,48 @@ under one session id, which every conforming reader must read as a fork.
 Named `<namespace>.<action>`, the same registry convention the in-app assistant
 uses, because it is the same Hex:
 
-| Tool | What it does |
-| --- | --- |
-| `chat.respond` | Say something in the room. The only way to be heard. |
-| `chat.react` | One emoji on the message. Offered only if the transport has reactions. |
-| `grimoire.help` | A NIP's text or a kind's definition, from the NIPs repository. |
-| `nostr.req` | A NIP-01 filter against relays. Read-only, capped. |
-| `nostr.resolve` | A bech32 entity turned into the person or event it names. |
+| Tool            | What it does                                                           |
+| --------------- | ---------------------------------------------------------------------- |
+| `chat.respond`  | Say something in the room. The only way to be heard.                   |
+| `chat.react`    | One emoji on the message. Offered only if the transport has reactions. |
+| `chat.who`      | Who you are talking to, as an npub.                                    |
+| `chat.history`  | The conversation so far, your own replies included.                    |
+| `grimoire.help` | A NIP's text or a kind's definition, from the NIPs repository.         |
+| `nostr.req`     | A NIP-01 filter against relays. Read-only, capped.                     |
+| `nostr.resolve` | A bech32 entity turned into the person or event it names.              |
+| `nostr.publish` | Sign an event and put it on relays. Off unless configured.             |
+| `nostr.sign`    | Sign an event and hand it back unsent. Same bounds as publishing.      |
 
 The ids carry the dot; the wire carries an underscore, since OpenAI-shaped
-function names cannot contain one. Nothing here signs, publishes, spends or
-follows except `chat.*`, which publishes exactly one chat message.
+function names cannot contain one.
+
+`chat.who` and `chat.history` exist because a runtime is handed one message and
+told nothing else. Without them "check my recent posts" became a query for kind 1
+across the whole network, answered from strangers, and anything referring to
+earlier was repeated or invented.
+
+The writing tools are absent unless `tools.publish.enabled` is set. Signing and
+publishing carry the same bounds — a signed event is one relay call from being
+published by whoever holds it — and some kinds are refused unless the operator
+names them in `tools.publish.kinds`: kinds 0, 3, 10002 and 10050 replace what the
+agent already has, and a new 10050 silently redirects every private message sent
+to it; kind 5 asks relays to delete what it names; kinds 4, 13, 1059 and 21059 are
+built by the transports with the right seal and throwaway key, and a hand-rolled
+one leaks exactly what the envelope hides.
+
+### Where the tools run
+
+Eve runs the agent in its own process, so a tool it calls executes there — and
+these cannot. `chat.respond` answers one message, in the room it arrived in,
+signed by a key only this process holds. So the call comes back: a loopback HTTP
+bridge binds each live session to the tool host for the message being answered,
+and the runtime's tool definitions are a `fetch` that knows a session id.
+
+The bridge listens on 127.0.0.1 with a shared token, and the **session id is
+never the model's to choose** — it comes from the runtime's own session context.
+An id a model could name is an answer it could address into someone else's
+conversation. Calls dedupe on the runtime's call id, because a step interrupted
+mid-execution is re-run and a resent message is not idempotent.
 
 `grimoire.help` earns its place: asked from memory, the model called kind 9 an
 MLS event. Asked with the tool, it reads the spec and cites the NIP.
@@ -175,6 +225,17 @@ assembly, worktrees and container isolation — was **removed** rather than kept
 parallel: Eve does all of it, and two implementations of a turn is one that drifts.
 What remains is what Eve has no opinion about, which is Nostr.
 
+`hex serve` drives Eve from a Nostr message and publishes the run as it happens:
+tools over the loopback bridge, deltas as they stream, per-turn cost, and a
+per-session snapshot of the prompt and tools the run had. An operator can answer,
+steer, stop, compact or clear a session with a kind-1779 control event, which is
+honoured only from the pubkey the session's head names as operator.
+
+A reply continues the run it threads onto; a message that threads onto nothing
+starts a new one. Sessions left mid-flight by a killed process are caught up at
+startup, because a head that says `active` forever is a lie no reader can detect.
+
 Known limits: the dedupe set is in memory, so a restart can re-answer a DM that
-arrived in the last hour; and nothing yet drives Eve *from* a Nostr message —
-`hex eve` follows a session someone else started.
+arrived in the last hour; child sessions of a subagent are named on the turn that
+spawned them but never followed; and cost is computed from a price list when the
+provider reports none, which cannot see cache discounts and errs high.
