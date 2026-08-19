@@ -203,7 +203,8 @@ export class EveTranscript {
           ? (data.actions as EveActionRequest[])
           : [];
         for (const action of actions) {
-          const name = action.toolName ?? action.name ?? action.kind ?? "action";
+          const name =
+            action.toolName ?? action.name ?? action.kind ?? "action";
           const id = action.callId ?? name;
           this.calls.set(id, name);
           this.pending.push({
@@ -323,7 +324,8 @@ export class EveTranscript {
   private async flush(
     role: TurnRole,
     extra: {
-      stop?: "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
+      stop?:
+        "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
       usage?: Usage;
     } = {},
   ): Promise<void> {
@@ -343,7 +345,8 @@ export class EveTranscript {
     role: TurnRole,
     parts: TurnPart[],
     extra: {
-      stop?: "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
+      stop?:
+        "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
       usage?: Usage;
       alt?: string;
     } = {},
@@ -404,25 +407,31 @@ export class EveTranscript {
       cacheRead: this.record.cacheRead,
       cacheWrite: this.record.cacheWrite,
     };
-    const rumor = buildSessionHead(this.options.agentPubkey, this.record.nostrId, {
-      title: title ?? this.sessionId,
-      status: this.record.status as SessionStatus,
-      operator: {
-        pubkey: this.options.recipients[0] ?? this.options.agentPubkey,
+    const rumor = buildSessionHead(
+      this.options.agentPubkey,
+      this.record.nostrId,
+      {
+        title: title ?? this.sessionId,
+        status: this.record.status as SessionStatus,
+        operator: {
+          pubkey: this.options.recipients[0] ?? this.options.agentPubkey,
+        },
+        observers: this.options.recipients
+          .slice(1)
+          .map((pubkey) => ({ pubkey })),
+        trigger: this.record.trigger ? { id: this.record.trigger } : undefined,
+        lastSeq: this.record.seq,
+        started: this.record.startedAt,
+        ended: this.record.endedAt,
+        model: this.options.model,
+        usage,
+        cost: this.record.cost
+          ? { amount: this.record.cost, currency: "USD" }
+          : undefined,
+        definition: `31779:${this.options.agentPubkey}:${this.options.slug}`,
+        alt: `Agent session: ${title ?? this.sessionId} (${this.record.status}, ${this.record.seq} turns)`,
       },
-      observers: this.options.recipients.slice(1).map((pubkey) => ({ pubkey })),
-      trigger: this.record.trigger ? { id: this.record.trigger } : undefined,
-      lastSeq: this.record.seq,
-      started: this.record.startedAt,
-      ended: this.record.endedAt,
-      model: this.options.model,
-      usage,
-      cost: this.record.cost
-        ? { amount: this.record.cost, currency: "USD" }
-        : undefined,
-      definition: `31779:${this.options.agentPubkey}:${this.options.slug}`,
-      alt: `Agent session: ${title ?? this.sessionId} (${this.record.status}, ${this.record.seq} turns)`,
-    });
+    );
     await this.send(rumor, "head");
   }
 
@@ -436,8 +445,8 @@ export class EveTranscript {
     let rumor: Rumor;
     try {
       rumor = buildDelta(
-      this.options.agentPubkey,
-      { agent: this.options.agentPubkey, session: this.record.nostrId },
+        this.options.agentPubkey,
+        { agent: this.options.agentPubkey, session: this.record.nostrId },
         {
           turn: delta.turn,
           part: delta.part,

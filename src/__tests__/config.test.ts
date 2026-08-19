@@ -229,3 +229,43 @@ describe("parseConfig", () => {
     expect(() => parseConfigText("{ not json")).toThrow(ConfigError);
   });
 });
+
+describe("transcript and eve sections", () => {
+  const OPERATOR = "1".repeat(64);
+
+  it("is absent unless configured — publishing is never a default", () => {
+    // An agent that starts mailing its conversations because it was upgraded has
+    // leaked one nobody asked it to send.
+    expect(parseConfig(minimal).transcript).toBeUndefined();
+    expect(parseConfig(minimal).eve).toBeUndefined();
+  });
+
+  it("fills the defaults a recipient list implies", () => {
+    const config = parseConfig({
+      ...minimal,
+      transcript: { to: [OPERATOR] },
+    });
+    expect(config.transcript).toEqual({
+      to: [OPERATOR],
+      slug: "hex",
+      deltas: true,
+      announce: true,
+    });
+  });
+
+  it("refuses a transcript with nobody to read it", () => {
+    expect(() => parseConfig({ ...minimal, transcript: { to: [] } })).toThrow(
+      /at least one recipient/,
+    );
+  });
+
+  it("refuses an eve host that is not a URL", () => {
+    // A host the URL parser cannot read follows nothing and says nothing.
+    expect(() =>
+      parseConfig({ ...minimal, eve: { host: "127.0.0.1:2000" } }),
+    ).toThrow(/must be a URL/);
+    expect(
+      parseConfig({ ...minimal, eve: { host: "http://127.0.0.1:2000" } }).eve,
+    ).toEqual({ host: "http://127.0.0.1:2000" });
+  });
+});

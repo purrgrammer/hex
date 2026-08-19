@@ -58,6 +58,29 @@ restart does not re-pair.
 - `hex run [--dry-run] [--brain echo]` — announce, join every `autoJoin` group,
   then listen. A message that addresses Hex gets a 👀 reaction while the model
   thinks and a threaded kind 9 when it answers. Runs until interrupted.
+- `hex eve <session-id> [--host <url>] [--dry-run]` — follow an Eve session's
+  event stream and publish it as a transcript (NIP-xx: Agent Sessions): a turn
+  per step, deltas as it goes, a head that says where the session stands. Needs a
+  `transcript` section naming who reads it, because publishing is never a
+  default. `--dry-run` prints the rumors instead of wrapping them, which is how
+  the mapping gets checked against a real host with no relay involved.
+
+## Publishing a transcript
+
+`transcript` is absent by default and that is deliberate: an agent that starts
+mailing its conversations because it was upgraded has leaked one nobody asked it
+to send.
+
+```json
+"eve": { "host": "http://127.0.0.1:2000" },
+"transcript": { "to": ["npub1…"], "slug": "hex", "deltas": true }
+```
+
+Two cursors are durable, and Eve pays for one of them. Its `startIndex` says how
+far this consumer has read, so a restart resumes rather than republishes;
+`seq`/`prev` are the chain on the wire, kept in the `transcripts` table. Losing
+the second is the worse failure — resuming at `seq` 1 publishes a second chain
+under one session id, which every conforming reader must read as a fork.
 
 ## Tools
 

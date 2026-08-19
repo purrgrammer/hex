@@ -122,6 +122,7 @@ export { RoomContext, type ContextOptions } from "./context.js";
 export {
   Nip17Transport,
   KIND_GIFT_WRAP,
+  KIND_GIFT_WRAP_EPHEMERAL,
   KIND_PRIVATE_MESSAGE,
   KIND_DM_RELAYS,
   type Nip17TransportOptions,
@@ -139,3 +140,22 @@ export {
   type JoinOutcome,
   type JoinOptions,
 } from "./transports/nip29-join.js";
+export {
+  streamSession,
+  streamUrl,
+  type StreamOptions,
+  type IndexedEvent,
+} from "./eve/stream.js";
+export {
+  EveTranscript,
+  type EveTranscriptOptions,
+  type RumorSink,
+} from "./eve/transcript.js";
+export {
+  stopFor,
+  usageFor,
+  outputText,
+  type EveEnvelope,
+  type EveFinishReason,
+  type EveUsage,
+} from "./eve/types.js";

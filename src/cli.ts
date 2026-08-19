@@ -6,6 +6,7 @@
  * check    — validate the config and dial every relay, per role. No publishing.
  * announce — write kind 0 / 10002 / 10050 from config, skipping what matches.
  * run      — join, listen on every configured group, and answer when addressed.
+ * eve      — follow an Eve session and publish it as events.
  */
 
 import { parseArgs } from "node:util";
@@ -32,6 +33,8 @@ import { ContainerBackend } from "./tools/exec-container.js";
 import { toolsetFor } from "./grants.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { SessionTracker } from "./sessions.js";
+import { streamSession } from "./eve/stream.js";
+import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -43,6 +46,8 @@ Usage:
   hex ask      [config] "question" [--as <npub>]  one turn through the brain
   hex dm       [config] <npub> "message"   send a private message, unprompted
   hex run      [config] [--dry-run] [--brain echo]  join, listen, and answer
+  hex eve      [config] <session-id> [--host <url>] [--dry-run]
+                                   follow an Eve session, publish it as events
 
 Config defaults to ./hex.config.json.
 
@@ -94,6 +99,7 @@ async function main(): Promise<void> {
       auto: { type: "boolean", default: false },
       "env-file": { type: "string" },
       brain: { type: "string" },
+      host: { type: "string" },
       as: { type: "string" },
       help: { type: "boolean", default: false, short: "h" },
     },
@@ -732,6 +738,143 @@ async function main(): Promise<void> {
         await agent.idle();
         // Every write already committed as it happened; this just releases the
         // file handle so a supervisor's restart is not racing a WAL checkpoint.
+        store.close();
+        await resolved.close();
+        return;
+      }
+
+      case "eve": {
+        const transcriptConfig = config.transcript;
+        if (!transcriptConfig)
+          fail(
+            "this config has no `transcript` section, so there is nobody to publish a session to",
+          );
+        const host = values.host ?? config.eve?.host;
+        if (!host)
+          fail("no Eve host — set `eve.host` in the config or pass --host");
+
+        const [, , sessionId] = positionals;
+        if (!sessionId)
+          fail("usage: hex eve [config] <session-id> [--host <url>]");
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+
+        // The cursor lives with the agent's other state, keyed by its pubkey, so
+        // two agents on one machine never resume each other's stream.
+        const home = agentHome(
+          config.state.home
+            ? expandHome(config.state.home, loaded.baseDir)
+            : DEFAULT_HOME,
+          resolved.pubkey,
+        );
+        const store = HexStore.open(home.db);
+
+        /**
+         * Where a rumor goes.
+         *
+         * A dry run prints instead of publishing, which is how the mapping gets
+         * checked against a real Eve host with no relay involved — and the field
+         * names in this consumer are the thing most likely to be wrong.
+         */
+        const dm = dmTransport(config.transports);
+        let sink: RumorSink;
+        let transport: Nip17Transport | undefined;
+        if (values["dry-run"]) {
+          sink = {
+            publishRumor: async (rumor, recipients, publishOptions) => {
+              console.log(
+                `${publishOptions?.ephemeral ? "delta " : "would"} kind ${rumor.kind} ${
+                  rumor.tags
+                    .filter((t) =>
+                      ["seq", "role", "status", "delta"].includes(t[0]!),
+                    )
+                    .map((t) => t.join("="))
+                    .join(" ") || "—"
+                } ${rumor.content.slice(0, 120)}`,
+              );
+              return { delivered: recipients, undeliverable: [] };
+            },
+          };
+        } else {
+          if (!dm)
+            fail(
+              "publishing a transcript needs a nip-17 transport — a gift wrap has nowhere else to go",
+            );
+          transport = new Nip17Transport({
+            relays,
+            signer: resolved.signer,
+            pubkey: resolved.pubkey,
+            inboxRelays: config.relays.dm,
+            readRelays: config.relays.read,
+            allow: dm.allow.map((peer) => peer.pubkey),
+            since: Math.floor(Date.now() / 1000),
+            log: (line) => console.log(line),
+          });
+          sink = transport;
+        }
+
+        const transcript = new EveTranscript(
+          {
+            agentPubkey: resolved.pubkey,
+            slug: transcriptConfig.slug,
+            recipients: transcriptConfig.to,
+            store,
+            sink,
+            deltas: transcriptConfig.deltas,
+            log: (line) => console.log(line),
+          },
+          sessionId,
+        );
+
+        console.log(`npub    ${nip19.npubEncode(resolved.pubkey)}`);
+        console.log(`eve     ${host}`);
+        console.log(
+          `session ${sessionId} from index ${transcript.streamIndex}`,
+        );
+        console.log(
+          `to      ${transcriptConfig.to.map((p) => nip19.npubEncode(p).slice(0, 16) + "…").join(", ")}`,
+        );
+
+        if (transcriptConfig.announce)
+          await transcript.announce({
+            name: config.profile.name ?? transcriptConfig.slug,
+            about: config.profile.about,
+            picture: config.profile.picture,
+            instructions: loaded.instructions || undefined,
+          });
+
+        // Interrupting a follow is not the session ending — Eve keeps running —
+        // so the head says `aborted`, which is "nobody is watching any more".
+        const abort = new AbortController();
+        let interrupted = false;
+        const stop = (signal: string) => {
+          if (interrupted) return;
+          interrupted = true;
+          console.log(`\n${signal} — stopping`);
+          abort.abort();
+        };
+        process.once("SIGINT", () => stop("SIGINT"));
+        process.once("SIGTERM", () => stop("SIGTERM"));
+
+        try {
+          for await (const { index, event } of streamSession({
+            host,
+            sessionId,
+            startIndex: transcript.streamIndex,
+            follow: true,
+            signal: abort.signal,
+          }))
+            await transcript.handle(event, index);
+        } catch (error) {
+          // An aborted fetch is the operator's Ctrl-C, not a failure.
+          if (!abort.signal.aborted) throw error;
+        }
+
+        await transcript.close(interrupted ? "aborted" : "done");
+        transport?.stop();
         store.close();
         await resolved.close();
         return;

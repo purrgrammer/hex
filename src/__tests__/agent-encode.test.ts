@@ -25,7 +25,16 @@ const AT = 1_755_500_000;
  * by producing the same ids from the same inputs.
  */
 const vectors = JSON.parse(
-  readFileSync(join(import.meta.dirname, "..", "nostr", "__fixtures__", "agent-vectors.json"), "utf8"),
+  readFileSync(
+    join(
+      import.meta.dirname,
+      "..",
+      "nostr",
+      "__fixtures__",
+      "agent-vectors.json",
+    ),
+    "utf8",
+  ),
 ) as {
   definition: string;
   head: string;

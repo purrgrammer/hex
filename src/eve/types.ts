@@ -18,12 +18,7 @@ export interface EveEnvelope {
 
 /** Eve's own finish reasons, from `AssistantStepFinishReason`. */
 export type EveFinishReason =
-  | "content-filter"
-  | "error"
-  | "length"
-  | "other"
-  | "stop"
-  | "tool-calls";
+  "content-filter" | "error" | "length" | "other" | "stop" | "tool-calls";
 
 export interface EveUsage {
   costUsd?: number;
@@ -99,7 +94,9 @@ export function stopFor(
 /** Eve counts tokens in its own fields; the NIP wants four numbers in order. */
 export function usageFor(
   raw: unknown,
-): { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined {
+):
+  | { input: number; output: number; cacheRead: number; cacheWrite: number }
+  | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const usage = raw as EveUsage;
   const numbers = [

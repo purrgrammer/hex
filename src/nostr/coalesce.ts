@@ -82,7 +82,10 @@ export class DeltaCoalescer {
     // Switching kind flushes the other buffer first, so text and reasoning never
     // interleave within a part. A different tool is a different subject and
     // flushes for the same reason.
-    if (this.buffer && (this.buffer.kind !== kind || this.buffer.toolId !== toolId))
+    if (
+      this.buffer &&
+      (this.buffer.kind !== kind || this.buffer.toolId !== toolId)
+    )
       this.flush();
 
     if (this.emitted >= this.options.maxPerTurn) {

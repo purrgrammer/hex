@@ -47,11 +47,17 @@ const RUN: EveEnvelope[] = [
   { type: "step.started", data: { stepIndex: 0, turnId: "trn_1" } },
   {
     type: "reasoning.appended",
-    data: { reasoningDelta: "NIP-66 monitors ", reasoningSoFar: "NIP-66 monitors " },
+    data: {
+      reasoningDelta: "NIP-66 monitors ",
+      reasoningSoFar: "NIP-66 monitors ",
+    },
   },
   {
     type: "reasoning.appended",
-    data: { reasoningDelta: "publish 30166", reasoningSoFar: "NIP-66 monitors publish 30166" },
+    data: {
+      reasoningDelta: "publish 30166",
+      reasoningSoFar: "NIP-66 monitors publish 30166",
+    },
   },
   {
     type: "reasoning.completed",
@@ -89,7 +95,11 @@ const RUN: EveEnvelope[] = [
   { type: "message.appended", data: { messageDelta: "advertise it." } },
   {
     type: "message.completed",
-    data: { message: "41 relays advertise it.", finishReason: "stop", stepIndex: 1 },
+    data: {
+      message: "41 relays advertise it.",
+      finishReason: "stop",
+      stepIndex: 1,
+    },
   },
   {
     type: "step.completed",
@@ -249,7 +259,9 @@ describe("EveTranscript", () => {
     const before = publisher(first, one.impl);
     let index = 0;
     for (const event of RUN.slice(0, 4)) await before.handle(event, ++index);
-    const lastTurn = one.sent.filter((s) => s.rumor.kind === 1777).at(-1)!.rumor;
+    const lastTurn = one.sent
+      .filter((s) => s.rumor.kind === 1777)
+      .at(-1)!.rumor;
     expect(before.streamIndex).toBe(4);
     first.close();
 
