@@ -5,8 +5,14 @@
   <key>Label</key>
   <string>rocks.grimoire.hex</string>
 
-  <!-- caffeinate holds sleep off for as long as hex runs, and exits with it, so
-       no assertion is left behind when the agent stops. -->
+  <!-- Follows ONE Eve session and publishes it. The session id is an argument,
+       so this is a per-session job rather than a daemon: `hex run` is gone, the
+       agent loop lives in Eve now, and nothing here decides when a session
+       starts. Copy it per session, or drive `hex eve` from whatever launches
+       Eve.
+
+       caffeinate holds sleep off for as long as it runs, and exits with it, so
+       no assertion is left behind when the follow stops. -->
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/caffeinate</string>
@@ -20,14 +26,17 @@
          load-bearing: deleting the branch you were developing on stops the
          agent, and a rebuild mid-conversation swaps the code underneath it. -->
     <string>/Users/YOU/.hex/dist/cli.js</string>
-    <string>run</string>
+    <string>eve</string>
     <string>/Users/YOU/.hex/hex.config.json</string>
+    <string>ses_REPLACE_WITH_SESSION_ID</string>
   </array>
 
   <key>RunAtLoad</key>
   <true/>
 
-  <!-- Restart on crash, and only on crash: a clean exit is a deliberate stop. -->
+  <!-- Restart on crash, and only on crash: a clean exit is a deliberate stop.
+       Safe to restart because the stream cursor is durable — a resumed follow
+       asks Eve for the events it missed rather than republishing the session. -->
   <key>KeepAlive</key>
   <dict>
     <key>SuccessfulExit</key>
@@ -41,9 +50,7 @@
   <string>/Users/YOU/.hex</string>
 
   <!-- launchd hands a process a minimal PATH and no login shell, so a version
-       manager is not on it. Hex puts its own node's directory on the path of
-       anything it runs, which is why `npm` works in a command it was asked to
-       run; this is for the daemon itself. -->
+       manager is not on it. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
