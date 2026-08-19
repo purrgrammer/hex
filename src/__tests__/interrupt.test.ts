@@ -38,6 +38,15 @@ class FakeTransport implements Transport {
   readonly inbox = new Subject<Inbound>();
   readonly replies: { to: string; text: string }[] = [];
   readonly reactions: { to: string; emoji: string }[] = [];
+  /**
+   * How long a publish takes.
+   *
+   * Zero by default, which is exactly why a real bug hid here: with `reply`
+   * resolving in a microtask the window between releasing a room and finishing
+   * the stop notice has no width, and no test could land a message in it. A gift
+   * wrap on real relays takes hundreds of milliseconds.
+   */
+  replyLatencyMs = 0;
   start() {
     return this.inbox.asObservable();
   }
@@ -45,6 +54,8 @@ class FakeTransport implements Transport {
     return [];
   }
   async reply(to: Inbound, text: string): Promise<string> {
+    if (this.replyLatencyMs)
+      await new Promise((done) => setTimeout(done, this.replyLatencyMs));
     this.replies.push({ to: to.id, text });
     return `reply-${this.replies.length}`;
   }
@@ -302,6 +313,86 @@ describe("interrupting a DM", () => {
 
     brain.finish();
     await agent.idle();
+    agent.stop();
+    relays.pool.close?.();
+  });
+
+  it("does not hand the room to a third message while the notice publishes", async () => {
+    // The reviewed bug, and the reason `reply` can be slow in this fake. The
+    // interrupt used to wait for the old turn — which released the room — and
+    // only then publish. A message arriving during that publish got a turn of
+    // its own, which the still-pending interrupt then killed: the oldest
+    // instruction won and the newest was discarded.
+    const brain = new SlowBrain();
+    const { transport, agent, relays } = harness(brain);
+    transport.replyLatencyMs = 60;
+
+    transport.inbox.next(inbound({ id: "task", text: "install everything" }));
+    await brain.entered;
+    transport.inbox.next(inbound({ id: "stop", text: "stop" }));
+    // Land squarely inside the notice's publish.
+    await new Promise((done) => setTimeout(done, 20));
+    transport.inbox.next(inbound({ id: "instead", text: "do X instead" }));
+    await agent.idle();
+
+    // Exactly one turn was abandoned, so exactly one notice went out.
+    const notices = transport.replies.filter((reply) =>
+      reply.text.includes("Stopped"),
+    );
+    expect(notices).toHaveLength(1);
+
+    // The newest instruction is the one that ran, and it ran once.
+    const answered = brain.seen.slice(1).map((request) => request.incoming.id);
+    expect(answered).toEqual(["instead"]);
+    expect(transport.replies.at(-1)?.text).toBe("doing that instead");
+
+    // And no turn was started for a message only to be killed by a pending
+    // interrupt — the abandoned turn count is one, not two.
+    expect(brain.aborted).toEqual([true]);
+
+    agent.stop();
+    relays.pool.close?.();
+  }, 20_000);
+
+  it("reports one abandoned turn once, however many interrupts arrive", async () => {
+    // Two follow-ups during the same drain used to read the same live turn and
+    // both announce it, so the user was told twice about one stop.
+    const brain = new SlowBrain();
+    const { transport, agent, relays } = harness(brain);
+    transport.replyLatencyMs = 40;
+
+    transport.inbox.next(inbound({ id: "task" }));
+    await brain.entered;
+    transport.inbox.next(inbound({ id: "stop-a" }));
+    transport.inbox.next(inbound({ id: "stop-b" }));
+    await agent.idle();
+
+    expect(
+      transport.replies.filter((reply) => reply.text.includes("Stopped")),
+    ).toHaveLength(1);
+
+    agent.stop();
+    relays.pool.close?.();
+  }, 20_000);
+
+  it("does not claim it killed something that never ran", async () => {
+    // The activity log records refused calls too — a `respond` the abort guard
+    // turned down among them — and the notice's whole job is to be trustworthy
+    // about what happened on disk.
+    const brain = new SlowBrain();
+    const { transport, agent, relays } = harness(brain);
+
+    transport.inbox.next(inbound({ id: "task" }));
+    await brain.entered;
+    transport.inbox.next(inbound({ id: "steer" }));
+    await agent.idle();
+
+    const notice = transport.replies.find((reply) =>
+      reply.text.includes("Stopped"),
+    );
+    expect(notice?.text).toContain("had not started anything");
+    expect(notice?.text).not.toContain("killed mid-run");
+
     agent.stop();
     relays.pool.close?.();
   });

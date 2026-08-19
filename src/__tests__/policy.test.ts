@@ -313,21 +313,4 @@ describe("interrupting", () => {
     g.end(first, false);
     expect(g.holderFor(first)).toBeUndefined();
   });
-
-  it("admits a steered message once the room is free, without re-checking seen", () => {
-    const g = gate();
-    const first = inbound({ id: "a", room: DM });
-    g.consider(first);
-    g.begin(first);
-
-    const interrupting = inbound({ id: "b", room: DM });
-    g.consider(interrupting);
-    // Still held, so it is not yet admissible.
-    expect(g.steer(interrupting).reply).toBe(false);
-
-    g.end(first, false);
-    // Its id is in `seen`, and `steer` admits it anyway — that is the point.
-    expect(g.steer(interrupting).reply).toBe(true);
-    expect(g.consider(interrupting).reply).toBe(false);
-  });
 });

@@ -52,12 +52,32 @@ export function worktreeName(workspace: string): string {
  * `--all` fails as a whole if ANY remote fails, and a clone can easily carry one
  * that a supervised daemon cannot reach — this repository has both an SSH remote
  * (no agent under launchd) and a `nostr://` one needing a custom helper. So fetch
- * only the remote `baseRef` actually names, and let the rest be someone else's
- * problem.
+ * only the remote `baseRef` actually names.
+ *
+ * The remote has to be one that EXISTS, not merely the text before a slash: a
+ * local branch called `feature/x` is not a remote called `feature`, and guessing
+ * turned a fetch that would have worked into one that always fails and then
+ * silently branches from a stale tree.
  */
-export function fetchTarget(baseRef?: string): string[] {
-  const remote = baseRef?.includes("/") ? baseRef.split("/")[0] : undefined;
-  return remote ? [remote] : ["--all"];
+export function fetchTarget(
+  baseRef: string | undefined,
+  remotes: string[],
+): string[] {
+  const candidate = baseRef?.includes("/") ? baseRef.split("/")[0] : undefined;
+  return candidate && remotes.includes(candidate) ? [candidate] : ["--all"];
+}
+
+/** The clone's remotes, or none if git cannot say. */
+export async function listRemotes(cwd: string): Promise<string[]> {
+  try {
+    const { stdout } = await run("git", ["remote"], {
+      cwd,
+      timeout: GIT_TIMEOUT_MS,
+    });
+    return stdout.split("\n").filter((line) => line.trim() !== "");
+  } catch {
+    return [];
+  }
 }
 
 export interface WorktreeOptions {
@@ -118,10 +138,12 @@ export class WorktreeManager {
       // reads and edits an old tree while reporting it as current. Best effort:
       // a repo with no remote, or no network, still gets its worktree.
       try {
-        await run("git", ["fetch", "--quiet", ...fetchTarget(repo.baseRef)], {
-          cwd: repo.path,
-          timeout: GIT_TIMEOUT_MS,
-        });
+        const remotes = await listRemotes(repo.path);
+        await run(
+          "git",
+          ["fetch", "--quiet", ...fetchTarget(repo.baseRef, remotes)],
+          { cwd: repo.path, timeout: GIT_TIMEOUT_MS },
+        );
       } catch (error) {
         this.options.log?.(
           `[hex] worktree ${repoName}: could not fetch — branching from what is on disk (${

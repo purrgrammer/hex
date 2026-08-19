@@ -16,7 +16,8 @@ import { promisify } from "node:util";
 import { getEventListeners } from "node:events";
 import { HexStore } from "../store.js";
 import { WorktreeManager, worktreeName, fetchTarget } from "../worktree.js";
-import { RepoTools, truncateOutput, scrubEnv } from "../tools/repo-tools.js";
+import { RepoTools, truncateOutput } from "../tools/repo-tools.js";
+import { HostBackend, scrubEnv } from "../tools/exec-host.js";
 import { EXEC_TOOL, WRITE_TOOL } from "../tools/types.js";
 
 const run = promisify(execFile);
@@ -60,6 +61,7 @@ function tools(
 ) {
   return new RepoTools({
     worktrees: manager,
+    backend: new HostBackend(),
     repos,
     workspace,
     requestedBy: "f".repeat(64),
@@ -82,16 +84,26 @@ describe("worktree naming", () => {
 });
 
 describe("which remote gets fetched", () => {
+  const REMOTES = ["gh", "origin"];
+
   it("fetches only the remote baseRef names", () => {
     // `--all` fails as a whole if any remote fails, and a clone can carry one a
     // daemon cannot reach — an ssh remote with no agent, or a custom helper.
-    expect(fetchTarget("gh/main")).toEqual(["gh"]);
-    expect(fetchTarget("origin/develop")).toEqual(["origin"]);
+    expect(fetchTarget("gh/main", REMOTES)).toEqual(["gh"]);
+    expect(fetchTarget("origin/develop", REMOTES)).toEqual(["origin"]);
   });
 
   it("falls back to every remote when there is nothing to go on", () => {
-    expect(fetchTarget(undefined)).toEqual(["--all"]);
-    expect(fetchTarget("HEAD")).toEqual(["--all"]);
+    expect(fetchTarget(undefined, REMOTES)).toEqual(["--all"]);
+    expect(fetchTarget("HEAD", REMOTES)).toEqual(["--all"]);
+  });
+
+  it("does not mistake a slash in a branch name for a remote", () => {
+    // `feature/x` is a local branch, not a remote called `feature`; guessing
+    // turned a fetch that would have worked into one that always fails, and then
+    // branched from a stale tree without saying so.
+    expect(fetchTarget("feature/x", REMOTES)).toEqual(["--all"]);
+    expect(fetchTarget("refs/remotes/gh/main", REMOTES)).toEqual(["--all"]);
   });
 });
 

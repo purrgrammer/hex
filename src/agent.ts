@@ -14,6 +14,7 @@ import type { RoomContext } from "./context.js";
 import { ReplyGate } from "./policy.js";
 import { roomKey, type Inbound, type Transport } from "./transports/types.js";
 import { RoomTools } from "./tools/room-tools.js";
+import { EXEC_TOOL } from "./tools/types.js";
 import type { KnowledgeTools } from "./tools/knowledge.js";
 import type { RepoTools } from "./tools/repo-tools.js";
 import type { SessionTracker } from "./sessions.js";
@@ -69,14 +70,39 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** A turn that is running right now, and the handle to stop it. */
+/**
+ * Whatever is happening in a room right now, and the handle to stop it.
+ *
+ * One per room at every instant — it may be a turn, or an interrupt that is
+ * still stopping one. `tools` is absent for the second case, and that absence is
+ * load-bearing: only an abandoned TURN gets a stop notice, so an interrupt that
+ * replaced another interrupt does not report the same turn twice.
+ */
 interface TurnHandle {
   inbound: Inbound;
   controller: AbortController;
-  /** Resolves once the turn's `finally` has run and the room is released. */
+  /** Resolves once this occupant is finished and the room is free again. */
   done: Promise<void>;
-  /** Live, so whoever cancels can say what was actually being attempted. */
-  tools: RoomTools;
+  tools?: RoomTools;
+}
+
+/**
+ * What a cancelled turn had got through, in words.
+ *
+ * Refusals are skipped. The activity log records every call including ones the
+ * host turned down — a `respond` refused by the abort guard, for instance — and
+ * saying "killed mid-run" about a call that never ran undermines the one claim
+ * this notice exists to make.
+ */
+function describeWork(activity: { name: string; detail?: string }[]): string {
+  const real = activity.filter((call) => !call.name.startsWith("chat."));
+  const last = real[real.length - 1];
+  if (!last) return "I had not started anything yet.";
+  const what = `\`${last.name}${last.detail ? `: ${last.detail}` : ""}\``;
+  const count = `${real.length} tool call${real.length === 1 ? "" : "s"}`;
+  return last.name === EXEC_TOOL
+    ? `I got through ${count} — the last was ${what}, killed mid-run.`
+    : `I got through ${count} — the last was ${what}.`;
 }
 
 /** What Hex reacts with when someone stops it mid-task. */
@@ -119,13 +145,13 @@ export function runAgent(options: AgentOptions): RunningAgent {
 
     const verdict = options.gate.consider(inbound);
     if (verdict.reply) {
-      await runTurn(inbound, transport, session);
+      await occupy(inbound, transport, session, undefined);
       return;
     }
 
     // The one verdict that asks for action rather than silence.
     if (verdict.reason === "interrupt") {
-      await interrupt(inbound, transport, session);
+      await occupy(inbound, transport, session, turns.get(where));
       return;
     }
 
@@ -136,62 +162,97 @@ export function runAgent(options: AgentOptions): RunningAgent {
   };
 
   /**
-   * Someone said "not that — this".
+   * Take the room, and hold it until this message is finished with.
    *
-   * Order matters and each step earns its place: the 🛑 goes out first because
-   * its job is to cover the kill; the notice goes out only once the room is
-   * genuinely free, so it can say truthfully what stopped; and the notice is
-   * remembered and recorded before the steering turn starts, because that record
-   * IS the steering context — the next turn reads it as its own prior message.
+   * One occupant per room at every instant, and the handover is synchronous:
+   * the claim moves to the new message before anything is awaited. That is the
+   * whole correctness argument. Waiting for the old turn first — as this used to
+   * — released the claim while the stop notice was still publishing, and a
+   * message arriving in that window got a turn of its own which the pending
+   * interrupt then killed. The oldest instruction won and the newest was thrown
+   * away, which is the failure this mechanism exists to prevent.
+   *
+   * `previous` is whatever was in the room. It may be a running turn, or it may
+   * be another interrupt still stopping one — in which case the newest
+   * instruction wins and the one it replaced is left in the conversation for the
+   * turn that follows to read.
    */
-  const interrupt = async (
+  const occupy = async (
     inbound: Inbound,
     transport: Transport,
     session: { id: string; isNew: boolean } | undefined,
+    previous: TurnHandle | undefined,
   ) => {
     const where = roomKey(inbound.room);
-    const live = turns.get(where);
+    const controller = new AbortController();
+    const entry: TurnHandle = {
+      inbound,
+      controller,
+      // Replaced immediately below; the field exists so the entry can be
+      // registered before anything awaits it.
+      done: Promise.resolve(),
+    };
 
-    if (live) {
-      log(
-        `[hex] ${where}: interrupted by ${inbound.id.slice(0, 8)}… — stopping ${live.inbound.id.slice(0, 8)}…`,
-      );
-      live.controller.abort(new Error("interrupted"));
+    // Synchronous, both of them, before any await: this is the handover.
+    options.gate.begin(inbound);
+    turns.set(where, entry);
 
-      if (!options.dryRun && transport.react)
-        try {
-          await transport.react(inbound, STOP_EMOJI);
-        } catch (error) {
-          log(`[hex] ${where}: could not acknowledge — ${describe(error)}`);
+    const work = (async () => {
+      if (previous) {
+        log(
+          `[hex] ${where}: interrupted by ${inbound.id.slice(0, 8)}… — stopping ${previous.inbound.id.slice(0, 8)}…`,
+        );
+        previous.controller.abort(new Error("interrupted"));
+
+        if (!options.dryRun && transport.react)
+          try {
+            await transport.react(inbound, STOP_EMOJI);
+          } catch (error) {
+            log(`[hex] ${where}: could not acknowledge — ${describe(error)}`);
+          }
+
+        let slow = false;
+        await Promise.race([
+          previous.done,
+          new Promise<void>((wake) =>
+            setTimeout(() => {
+              slow = true;
+              wake();
+            }, SLOW_STOP_MS),
+          ),
+        ]);
+        if (slow) {
+          log(`[hex] ${where}: still stopping`);
+          await previous.done;
         }
 
-      let slow = false;
-      await Promise.race([
-        live.done,
-        new Promise<void>((wake) =>
-          setTimeout(() => {
-            slow = true;
-            wake();
-          }, SLOW_STOP_MS),
-        ),
-      ]);
-      if (slow) {
-        log(`[hex] ${where}: still stopping`);
-        await live.done;
+        // Only a real turn gets a notice. An interrupt that replaced another
+        // interrupt has nothing of its own to report, and announcing per
+        // interrupt rather than per abandoned turn is how the same turn came to
+        // be reported twice.
+        if (previous.tools)
+          await announceStop(inbound, transport, session, previous);
       }
 
-      await announceStop(inbound, transport, session, live);
-    }
+      // Superseded while we were stopping the last one: a newer message has
+      // taken the room, and it is the instruction that should run.
+      if (controller.signal.aborted) {
+        log(`[hex] ${where}: superseded before it started`);
+        return;
+      }
 
-    // Admitted without going back through `consider` — its id is in `seen` and
-    // must stay there. If the room was claimed again while we stopped, the newest
-    // instruction wins and this message becomes the interrupter.
-    const admit = options.gate.steer(inbound);
-    if (admit.reply) {
-      await runTurn(inbound, transport, session, true);
-      return;
+      await runTurn(inbound, transport, session, entry, previous !== undefined);
+    })();
+
+    entry.done = work;
+    try {
+      await work;
+    } finally {
+      // Only the occupant releases the room, and only if it is still the
+      // occupant — a turn that was taken over must not free its successor's
+      // claim.
+      if (turns.get(where) === entry) turns.delete(where);
     }
-    await interrupt(inbound, transport, session);
   };
 
   /**
@@ -205,14 +266,10 @@ export function runAgent(options: AgentOptions): RunningAgent {
     inbound: Inbound,
     transport: Transport,
     session: { id: string; isNew: boolean } | undefined,
-    live: TurnHandle,
+    previous: TurnHandle,
   ) => {
     const where = roomKey(inbound.room);
-    const calls = live.tools.activity;
-    const last = calls[calls.length - 1];
-    const did = last
-      ? `I got through ${calls.length} tool call${calls.length === 1 ? "" : "s"} — the last was \`${last.name}${last.detail ? `: ${last.detail}` : ""}\`, killed mid-run.`
-      : "I had not run anything yet.";
+    const did = describeWork(previous.tools?.activity ?? []);
     const text = `${STOP_EMOJI} Stopped. ${did} Anything already written or committed is still there — nothing was rolled back.`;
 
     if (options.dryRun) {
@@ -221,7 +278,7 @@ export function runAgent(options: AgentOptions): RunningAgent {
     }
 
     try {
-      const id = await transport.reply(live.inbound, text);
+      const id = await transport.reply(previous.inbound, text);
       // Remembered or Hex answers its own notice; recorded or the steering turn
       // has no idea what it abandoned.
       options.gate.remember(id);
@@ -232,7 +289,7 @@ export function runAgent(options: AgentOptions): RunningAgent {
           author: "",
           text,
           at: Math.floor(Date.now() / 1000),
-          replyToId: live.inbound.id,
+          replyToId: previous.inbound.id,
         });
     } catch (error) {
       log(`[hex] ${where}: could not say it stopped — ${describe(error)}`);
@@ -243,102 +300,100 @@ export function runAgent(options: AgentOptions): RunningAgent {
     inbound: Inbound,
     transport: Transport,
     session: { id: string; isNew: boolean } | undefined,
-    steered = false,
+    entry: TurnHandle,
+    steered: boolean,
   ) => {
     const where = roomKey(inbound.room);
-    options.gate.begin(inbound);
     let published = false;
+    const controller = entry.controller;
 
-    const controller = new AbortController();
-    const tools = new RoomTools({
-      transport,
-      incoming: inbound,
-      dryRun: options.dryRun,
-      log,
-      maxResponses: options.maxResponsesPerTurn,
-      knowledge: options.knowledge,
-      signal: controller.signal,
-      ...(options.capabilities?.(inbound, where) ?? {}),
-    });
+    try {
+      log(
+        `[hex] ${where}: ${steered ? "picking up" : "answering"} ${inbound.id.slice(0, 8)}…`,
+      );
 
-    const turn = (async () => {
-      try {
-        log(
-          `[hex] ${where}: ${steered ? "picking up" : "answering"} ${inbound.id.slice(0, 8)}…`,
-        );
+      // Built inside the try, so a throw here still releases the room. It used
+      // to sit outside it, where a throw left the claim held by a turn that no
+      // longer existed and every later message in that room deadlocked.
+      const tools = new RoomTools({
+        transport,
+        incoming: inbound,
+        dryRun: options.dryRun,
+        log,
+        maxResponses: options.maxResponsesPerTurn,
+        knowledge: options.knowledge,
+        signal: controller.signal,
+        ...(options.capabilities?.(inbound, where) ?? {}),
+      });
+      // Visible to whoever cancels this turn, so the notice can say what was
+      // actually being attempted.
+      entry.tools = tools;
 
-        // The ack goes out BEFORE the model is asked, because its whole job is
-        // to cover the seconds the model takes. Skipped when steering: the 🛑
-        // already went out, and two reactions on two messages is noise.
-        const ack = options.ackEmoji ?? ACK_EMOJI;
-        if (!steered && !options.dryRun && ack && transport.react) {
-          try {
-            await transport.react(inbound, ack);
-          } catch (error) {
-            log(`[hex] ${where}: could not acknowledge — ${describe(error)}`);
-          }
+      // The ack goes out BEFORE the model is asked, because its whole job is to
+      // cover the seconds the model takes. Skipped when steering: the 🛑 already
+      // went out, and two reactions on two messages is noise.
+      const ack = options.ackEmoji ?? ACK_EMOJI;
+      if (!steered && !options.dryRun && ack && transport.react) {
+        try {
+          await transport.react(inbound, ack);
+        } catch (error) {
+          log(`[hex] ${where}: could not acknowledge — ${describe(error)}`);
         }
-
-        const history = await options.context.history(
-          transport,
-          inbound,
-          session?.id,
-        );
-
-        const outcome = await options.brain.turn({
-          instructions: options.instructions,
-          history,
-          incoming: inbound,
-          tools,
-          signal: controller.signal,
-        });
-
-        published = tools.delivered;
-        for (const id of tools.deliveredIds) {
-          // Published before the abort is still published: a real event, and it
-          // must be remembered whether or not the turn was cut short.
-          options.gate.remember(id);
-          // And into the session, so a reply to it — today or after a restart —
-          // continues this conversation instead of opening a new one.
-          if (session && options.sessions)
-            options.sessions.recordOwn(session.id, {
-              id,
-              room: where,
-              author: "",
-              text: tools.deliveredText.get(id) ?? "",
-              at: Math.floor(Date.now() / 1000),
-              replyToId: inbound.id,
-            });
-        }
-
-        const note = outcome.note ? ` — ${outcome.note}` : "";
-        log(
-          controller.signal.aborted
-            ? `[hex] ${where}: cancelled${note}`
-            : published
-              ? `[hex] ${where}: answered${note}`
-              : `[hex] ${where}: said nothing${note}`,
-        );
-      } catch (error) {
-        // A cancel is not a failure. Keeping them apart is what lets FAILED keep
-        // meaning "something is actually wrong".
-        log(
-          controller.signal.aborted
-            ? `[hex] ${where}: cancelled mid-flight`
-            : `[hex] ${where}: FAILED — ${describe(error)}`,
-        );
-      } finally {
-        turns.delete(where);
-        // `published` false leaves the rate limit unspent, which is the point:
-        // a turn that produced nothing did not use the room's budget.
-        options.gate.end(inbound, published);
       }
-    })();
 
-    // Registered before the first await inside the turn, so an interrupt that
-    // arrives while the ack is in flight still finds a handle to stop.
-    turns.set(where, { inbound, controller, done: turn, tools });
-    await turn;
+      const history = await options.context.history(
+        transport,
+        inbound,
+        session?.id,
+      );
+
+      const outcome = await options.brain.turn({
+        instructions: options.instructions,
+        history,
+        incoming: inbound,
+        tools,
+        signal: controller.signal,
+      });
+
+      published = tools.delivered;
+      for (const id of tools.deliveredIds) {
+        // Published before the abort is still published: a real event, and it
+        // must be remembered whether or not the turn was cut short.
+        options.gate.remember(id);
+        // And into the session, so a reply to it — today or after a restart —
+        // continues this conversation instead of opening a new one.
+        if (session && options.sessions)
+          options.sessions.recordOwn(session.id, {
+            id,
+            room: where,
+            author: "",
+            text: tools.deliveredText.get(id) ?? "",
+            at: Math.floor(Date.now() / 1000),
+            replyToId: inbound.id,
+          });
+      }
+
+      const note = outcome.note ? ` — ${outcome.note}` : "";
+      log(
+        controller.signal.aborted
+          ? `[hex] ${where}: cancelled${note}`
+          : published
+            ? `[hex] ${where}: answered${note}`
+            : `[hex] ${where}: said nothing${note}`,
+      );
+    } catch (error) {
+      // A cancel is not a failure. Keeping them apart is what lets FAILED keep
+      // meaning "something is actually wrong".
+      log(
+        controller.signal.aborted
+          ? `[hex] ${where}: cancelled mid-flight`
+          : `[hex] ${where}: FAILED — ${describe(error)}`,
+      );
+    } finally {
+      // `published` false leaves the rate limit unspent, which is the point:
+      // a turn that produced nothing did not use the room's budget.
+      options.gate.end(inbound, published);
+    }
   };
 
   for (const transport of options.transports) {

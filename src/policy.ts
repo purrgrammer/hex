@@ -171,22 +171,6 @@ export class ReplyGate {
     return this.inFlight.get(roomKey(inbound.room));
   }
 
-  /**
-   * Admit a message that has already interrupted a turn.
-   *
-   * It cannot go back through `consider()` — its id is in `seen`, which is
-   * correct and must stay that way, or a second copy from another relay would
-   * cancel twice. The rate limit is deliberately not re-checked either: the turn
-   * this message replaced published nothing, so it spent no budget, and refusing
-   * the message someone just used to stop the agent would lose it in the exact
-   * place this whole mechanism exists to prevent.
-   */
-  steer(inbound: Inbound): Verdict {
-    return this.inFlight.has(roomKey(inbound.room))
-      ? { reply: false, reason: "in-flight" }
-      : { reply: true };
-  }
-
   /** Claim the room. One reply in flight per room, so a stall cannot fan out. */
   begin(inbound: Inbound): void {
     this.inFlight.set(roomKey(inbound.room), {
@@ -201,7 +185,12 @@ export class ReplyGate {
    */
   end(inbound: Inbound, published: boolean): void {
     const key = roomKey(inbound.room);
-    this.inFlight.delete(key);
+    // Only the holder releases the room. A turn that was taken over mid-flight
+    // still runs its own cleanup, and deleting by room alone let it free its
+    // successor's claim — which left the room open for the duration of the
+    // handover, exactly long enough for a third message to start a turn that the
+    // pending interrupt then killed.
+    if (this.inFlight.get(key)?.id === inbound.id) this.inFlight.delete(key);
     if (!published) return;
     const timestamps = this.recentReplies(key);
     timestamps.push(this.options.now());
