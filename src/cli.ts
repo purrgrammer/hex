@@ -11,6 +11,7 @@
 
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { basename } from "node:path";
 import { nip19 } from "nostr-tools";
 import { loadConfig } from "./config-file.js";
 import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
@@ -20,6 +21,8 @@ import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
 import type { TransportConfig } from "./config.js";
 import { Nip17Transport } from "./transports/nip17.js";
+import { Nip29Transport } from "./transports/nip29.js";
+import { imetaTag, upload } from "./blossom.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
@@ -40,7 +43,12 @@ Usage:
   hex check    [config]            validate config and dial every relay
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
   hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
-  hex dm       [config] <npub> "message"   send a private message, unprompted
+  hex send     [config] <target> "message" [--transport <name>]
+               [--attach <path>] [--no-encrypt]
+                                   say something unprompted. <target> is an npub
+                                   (nip-17) or <relay-host>'<group-id> (nip-29)
+  hex dm       [config] <npub> "message" [--attach <path>] [--no-encrypt]
+                                   the same thing, fixed to nip-17
   hex eve      [config] <session-id> [--host <url>] [--dry-run]
                                    follow an Eve session, publish it as events
   hex serve    [config] [--host <url>] [--no-reply]
@@ -126,6 +134,9 @@ async function main(): Promise<void> {
       "env-file": { type: "string" },
       host: { type: "string" },
       "no-reply": { type: "boolean", default: false },
+      attach: { type: "string", multiple: true },
+      transport: { type: "string" },
+      "no-encrypt": { type: "boolean", default: false },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -322,12 +333,131 @@ async function main(): Promise<void> {
        * finishing, a build breaking. Restricted to the DM allow-list, because
        * an agent that can message anyone is a spam engine with a signing key.
        */
-      case "dm": {
-        const dm = dmTransport(config.transports);
-        if (!dm) fail("this config has no nip-17 transport");
+      case "dm":
+      case "send": {
         const [who, ...words] = args;
         const text = words.join(" ").trim();
-        if (!who || !text) fail('usage: hex dm [config] <npub|hex> "message"');
+        if (!who)
+          fail(
+            'usage: hex send [config] <npub | <relay-host>\'<group-id>> "message"',
+          );
+
+        /**
+         * Which protocol, from the shape of the target.
+         *
+         * The two notations cannot be confused for one another — an npub is
+         * bech32 or 64 hex, a NIP-29 group is `<relay-host>'<group-id>` and
+         * NIP-29 itself writes it that way. So the transport is inferred and
+         * `--transport` is an override for the case where a target is
+         * ambiguous or a config offers two. `hex dm` forces nip-17, because
+         * that is what the word has always meant here.
+         */
+        const looksLikeGroup = who.includes("'");
+        const transportName =
+          command === "dm"
+            ? "nip-17"
+            : (values.transport ?? (looksLikeGroup ? "nip-29" : "nip-17"));
+
+        if (transportName !== "nip-17" && transportName !== "nip-29")
+          fail(
+            `--transport ${transportName} is not a transport this build has — nip-17 or nip-29`,
+          );
+        if (!text) fail("a message with no words in it says nothing");
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+
+        /**
+         * Files, uploaded before the message that points at them.
+         *
+         * Encrypted unless told otherwise IN A DM: that message is sealed and
+         * wrapped, and a plain image inside it is a public URL on a public
+         * host, which undoes the envelope for the one part of the message
+         * anyone actually looks at. A group message is already public, so
+         * encrypting its attachment hides it from the very people it is for —
+         * there, plain is the default and `--encrypt` is the override.
+         */
+        const attachments = values.attach ?? [];
+        const imetas: string[][] = [];
+        let body = text;
+
+        if (attachments.length > 0) {
+          const blossomConfig = config.tools?.blossom;
+          if (!blossomConfig?.servers.length)
+            fail(
+              "attaching a file needs `tools.blossom.servers` — there is no default host",
+            );
+          const encrypted = values["no-encrypt"]
+            ? false
+            : transportName === "nip-17" &&
+              blossomConfig.encryptByDefault !== false;
+
+          for (const path of attachments) {
+            const uploaded = await upload(path, {
+              servers: blossomConfig.servers,
+              signer: resolved.signer,
+              encrypted,
+              log: (line) => console.log(line),
+            });
+            imetas.push(imetaTag(uploaded));
+            body = body ? `${body}\n${uploaded.url}` : uploaded.url;
+            console.log(
+              `[hex] ${basename(path)} → ${uploaded.url}${encrypted ? " (encrypted)" : ""}`,
+            );
+          }
+        }
+
+        if (transportName === "nip-29") {
+          const [host, groupId] = who.includes("'")
+            ? (who.split("'", 2) as [string, string])
+            : fail(
+                `${who} is not a group — NIP-29 names one <relay-host>'<group-id>`,
+              );
+          const relay = host.startsWith("ws") ? host : `wss://${host}`;
+          const group = config.transports.find(
+            (t): t is Extract<TransportConfig, { type: "nip-29" }> =>
+              t.type === "nip-29",
+          );
+          if (!group) fail("this config has no nip-29 transport");
+          if (
+            !group.groups.some(
+              (configured) =>
+                configured.id === groupId &&
+                configured.relay.replace(/\/$/, "") === relay.replace(/\/$/, ""),
+            )
+          )
+            fail(
+              `${who} is not a group this config joins — add it to the nip-29 transport first`,
+            );
+
+          const transport = new Nip29Transport({
+            relays,
+            signer: resolved.signer,
+            pubkey: resolved.pubkey,
+            groups: group.groups,
+            mentions: config.mentions,
+            since: Math.floor(Date.now() / 1000),
+          });
+
+          if (values["dry-run"]) {
+            console.log(`would post to ${who}: ${body}`);
+          } else {
+            const id = await transport.post(
+              { transport: "nip-29", id: groupId, relay },
+              body,
+              imetas,
+            );
+            console.log(`sent ${id}`);
+          }
+          transport.stop();
+          await resolved.close();
+          return;
+        }
+
+        const dm = dmTransport(config.transports);
+        if (!dm) fail("this config has no nip-17 transport");
 
         const peer = /^[0-9a-f]{64}$/i.test(who)
           ? who.toLowerCase()
@@ -346,17 +476,11 @@ async function main(): Promise<void> {
             `${nip19.npubEncode(peer).slice(0, 16)}… is not on this config's DM allow list`,
           );
 
-        const resolved = await resolveSigner(config.identity.signer, {
-          baseDir: loaded.baseDir,
-          relays,
-        });
         const transport = new Nip17Transport({
           relays,
           signer: resolved.signer,
           pubkey: resolved.pubkey,
           inboxRelays: config.relays.dm,
-          // Live progress needs somewhere both sides can reach: a DM inbox relay
-          // may refuse kind 21059, and the head says where it went instead.
           relayHints: config.relays.dm,
           readRelays: config.relays.read,
           allow: dm.allow.map((allowed) => allowed.pubkey),
@@ -365,9 +489,10 @@ async function main(): Promise<void> {
         });
 
         if (values["dry-run"]) {
-          console.log(`would send to ${nip19.npubEncode(peer)}: ${text}`);
+          console.log(`would send to ${nip19.npubEncode(peer)}: ${body}`);
+          for (const tag of imetas) console.log(`  ${tag.join(" | ")}`);
         } else {
-          const id = await transport.send(peer, text);
+          const id = await transport.send(peer, body, undefined, imetas);
           console.log(`sent ${id}`);
         }
         transport.stop();

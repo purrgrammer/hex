@@ -223,6 +223,45 @@ export class Nip29Transport implements Transport {
   }
 
   /**
+   * Say something in a group nobody asked in.
+   *
+   * A kind 9 with no `q`, because there is nothing to quote — an unprompted
+   * message is not a reply to anything, and threading it under some arbitrary
+   * event would put it in the wrong conversation.
+   *
+   * To the group's relay ALONE, for the same reason a reply goes nowhere else:
+   * a kind 9 on a foreign relay is a public event no relay enforces and no
+   * member of the group will ever see.
+   */
+  async post(
+    room: Room,
+    text: string,
+    extraTags: string[][] = [],
+  ): Promise<string> {
+    const relay = room.relay;
+    if (!relay) throw new Error("a NIP-29 room needs its relay");
+
+    const event = await GroupMessageFactory.create({ id: room.id, relay }, text)
+      .modifyPublicTags((tags) => [...tags, ...extraTags])
+      .sign(this.options.signer);
+
+    const outcomes = await publishTo(
+      this.options.relays,
+      [relay],
+      event as NostrEvent,
+      this.options.publishTimeoutMs,
+    );
+    if (!outcomes.some((outcome) => outcome.ok))
+      throw new Error(
+        `the group relay did not accept the message: ${outcomes
+          .map((outcome) => outcome.message ?? "rejected")
+          .join("; ")}`,
+      );
+    this.rememberOwn(event.id);
+    return event.id;
+  }
+
+  /**
    * Reply in the room, threaded under what was said.
    *
    * Published to the group's relay ALONE: a kind 9 anywhere else is a public

@@ -105,6 +105,30 @@ export interface ToolsConfig {
     /** Exercise the whole path and publish nothing. */
     dryRun?: boolean;
   };
+  /**
+   * Putting a file where a reader can fetch it.
+   *
+   * Absent by default, and no default server list, for the same reason nothing
+   * else here has one: a blob is public and permanent once a host has it, and
+   * an agent that starts uploading because it was upgraded has published
+   * something nobody chose to publish. Naming the servers is the choice.
+   */
+  blossom?: {
+    /** Off unless true. */
+    enabled: boolean;
+    /** Where to PUT. Tried in order; the first that takes the blob wins. */
+    servers: string[];
+    perHour?: number;
+    /**
+     * Encrypt every upload unless a caller says otherwise.
+     *
+     * On by default once this section exists, because the failure it prevents
+     * is silent: a message is sealed and wrapped, and a plain image inside it
+     * is a public URL that undoes the envelope for the one part of the message
+     * anybody actually looks at.
+     */
+    encryptByDefault?: boolean;
+  };
 }
 
 export interface EveConfig {
@@ -372,7 +396,9 @@ function parseTranscript(value: unknown): TranscriptConfig | undefined {
 function parseTools(value: unknown): ToolsConfig | undefined {
   if (value === undefined) return undefined;
   const record = requireRecord(value, "tools");
-  if (record.publish === undefined) return {};
+  rejectUnknown(record, ["publish", "blossom"], "tools");
+  const blossom = parseBlossomTools(record.blossom);
+  if (record.publish === undefined) return blossom ? { blossom } : {};
   const publish = requireRecord(record.publish, "tools.publish");
 
   const kinds = publish.kinds;
@@ -395,6 +421,57 @@ function parseTools(value: unknown): ToolsConfig | undefined {
       perHour: perHour as number | undefined,
       dryRun: publish.dryRun === true,
     },
+    blossom,
+  };
+}
+
+function parseBlossomTools(
+  value: unknown,
+): NonNullable<ToolsConfig["blossom"]> | undefined {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, "tools.blossom");
+  rejectUnknown(
+    record,
+    ["enabled", "servers", "perHour", "encryptByDefault"],
+    "tools.blossom",
+  );
+
+  const servers = record.servers;
+  if (
+    !Array.isArray(servers) ||
+    servers.length === 0 ||
+    servers.some((url) => typeof url !== "string" || !url.trim())
+  )
+    throw new ConfigError(
+      "tools.blossom.servers must be a non-empty array of URLs — there is no default, because a guessed host is a public permanent home for someone's file",
+    );
+
+  for (const url of servers as string[]) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new ConfigError(`tools.blossom.servers: ${url} is not a URL`);
+    }
+    // A blob uploaded over http is a blob an intermediary saw, and for an
+    // encrypted one it is the ciphertext plus a URL that names it later.
+    if (parsed.protocol !== "https:")
+      throw new ConfigError(
+        `tools.blossom.servers: ${url} is not https, so its uploads cross the network in the open`,
+      );
+  }
+
+  const perHour = record.perHour;
+  if (perHour !== undefined && (typeof perHour !== "number" || perHour <= 0))
+    throw new ConfigError("tools.blossom.perHour must be a positive number");
+
+  return {
+    enabled: record.enabled === true,
+    servers: servers as string[],
+    perHour: perHour as number | undefined,
+    // Encryption is the default once this section exists, so an operator who
+    // wants public blobs has to say so.
+    encryptByDefault: record.encryptByDefault !== false,
   };
 }
 
