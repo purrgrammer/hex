@@ -12,6 +12,7 @@
 
 import type { Inbound, Transport } from "../transports/types.js";
 import type { KnowledgeTools } from "./knowledge.js";
+import type { PublishTools } from "./publish.js";
 import { nip19 } from "nostr-tools";
 
 import {
@@ -62,6 +63,14 @@ export interface RoomToolsOptions {
    * room can be served without them.
    */
   knowledge?: KnowledgeTools;
+  /**
+   * The write tools — signing and publishing as the agent.
+   *
+   * Absent by default and absent for good: an agent that can only read cannot
+   * embarrass its operator in public. Composed in exactly like the read tools,
+   * and subject to the same grants.
+   */
+  publish?: PublishTools;
   /**
    * Which tools this channel gets, as ids or `namespace.*`.
    *
@@ -227,6 +236,7 @@ export class RoomTools implements ToolHost {
     // what this channel was granted. Speaking itself is never filtered.
     const optional: ToolSpec[] = [];
     if (this.options.knowledge) optional.push(...this.options.knowledge.list());
+    if (this.options.publish) optional.push(...this.options.publish.list());
 
     specs.push(
       ...(this.options.grants
@@ -258,6 +268,8 @@ export class RoomTools implements ToolHost {
 
     if (this.options.knowledge?.handles(name))
       return this.options.knowledge.call(name, call.arguments);
+    if (this.options.publish?.handles(name))
+      return this.options.publish.call(name, call.arguments);
 
     switch (name) {
       case RESPOND_TOOL:

@@ -82,6 +82,31 @@ export interface TranscriptConfig {
  * A session's events are read from `<host>/eve/v1/session/<id>/stream`. No
  * default: a publisher that guesses the port silently follows nothing.
  */
+/**
+ * What the agent may do beyond reading.
+ *
+ * Absent means read-only, which is the right default: an agent that cannot write
+ * cannot embarrass its operator in public, and turning it on should be a
+ * decision someone made on purpose in a file.
+ */
+export interface ToolsConfig {
+  publish?: {
+    /** Off unless true. */
+    enabled: boolean;
+    /**
+     * Guarded kinds the operator is explicitly allowing.
+     *
+     * `GUARDED_KINDS` are refused otherwise: replaceable identity and relay
+     * lists silently redirect the agent, deletions destroy what they name, and
+     * the encrypted kinds are built by the transports rather than by hand.
+     */
+    kinds?: number[];
+    perHour?: number;
+    /** Exercise the whole path and publish nothing. */
+    dryRun?: boolean;
+  };
+}
+
 export interface EveConfig {
   host: string;
   /**
@@ -143,6 +168,7 @@ export interface HexConfig {
   state: StateConfig;
   transcript?: TranscriptConfig;
   eve?: EveConfig;
+  tools?: ToolsConfig;
   transports: TransportConfig[];
 }
 
@@ -343,6 +369,35 @@ function parseTranscript(value: unknown): TranscriptConfig | undefined {
   };
 }
 
+function parseTools(value: unknown): ToolsConfig | undefined {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, "tools");
+  if (record.publish === undefined) return {};
+  const publish = requireRecord(record.publish, "tools.publish");
+
+  const kinds = publish.kinds;
+  if (kinds !== undefined) {
+    if (
+      !Array.isArray(kinds) ||
+      kinds.some((kind) => typeof kind !== "number" || !Number.isInteger(kind))
+    )
+      throw new ConfigError("tools.publish.kinds must be an array of integers");
+  }
+
+  const perHour = publish.perHour;
+  if (perHour !== undefined && (typeof perHour !== "number" || perHour <= 0))
+    throw new ConfigError("tools.publish.perHour must be a positive number");
+
+  return {
+    publish: {
+      enabled: publish.enabled === true,
+      kinds: kinds as number[] | undefined,
+      perHour: perHour as number | undefined,
+      dryRun: publish.dryRun === true,
+    },
+  };
+}
+
 function parseEve(value: unknown): EveConfig | undefined {
   if (value === undefined) return undefined;
   const record = requireRecord(value, "eve");
@@ -513,6 +568,7 @@ export function parseConfig(input: unknown): HexConfig {
     state,
     transcript: parseTranscript(raw.transcript),
     eve: parseEve(raw.eve),
+    tools: parseTools(raw.tools),
     transports: parseTransports(raw.transports),
   };
 

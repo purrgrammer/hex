@@ -28,6 +28,7 @@ import { ToolBridge } from "./eve/bridge.js";
 import { Prices } from "./eve/pricing.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
 import { RoomTools } from "./tools/room-tools.js";
+import { PublishTools } from "./tools/publish.js";
 import { ReplyGate } from "./policy.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
@@ -603,6 +604,28 @@ async function main(): Promise<void> {
           ? new KnowledgeTools({ relays, readRelays: config.relays.read })
           : undefined;
 
+        /**
+         * The write tools, only if the config asked for them.
+         *
+         * What these produce is signed by the agent's key and cannot be
+         * recalled, so the default is read-only and turning it on is a decision
+         * someone made on purpose in a file.
+         */
+        const publishConfig = config.tools?.publish;
+        const publishing =
+          bridge && publishConfig?.enabled
+            ? new PublishTools({
+                signer: resolved.signer,
+                pubkey: resolved.pubkey,
+                relays,
+                publishRelays: config.relays.publish,
+                allowKinds: publishConfig.kinds,
+                perHour: publishConfig.perHour,
+                dryRun: publishConfig.dryRun,
+                log: (line) => console.log(line),
+              })
+            : undefined;
+
         const server = new EveServer({
           host,
           transport,
@@ -617,6 +640,7 @@ async function main(): Promise<void> {
                       incoming: inbound,
                       selfPubkey: resolved.pubkey,
                       knowledge,
+                      publish: publishing,
                       log: (line) => console.log(line),
                     }),
                 }
@@ -744,7 +768,7 @@ async function main(): Promise<void> {
 
         if (bridge)
           console.log(
-            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.who, chat.history, grimoire.help, nostr.req, nostr.resolve`,
+            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.who, chat.history, grimoire.help, nostr.req, nostr.resolve${publishing ? ` + nostr.publish, nostr.sign${publishConfig?.dryRun ? " (dry run)" : ""}` : ""}`,
           );
         console.log(`listening dms on ${config.relays.dm.join(", ")}`);
 

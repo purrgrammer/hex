@@ -78,6 +78,9 @@ export const HELP_TOOL = "grimoire.help";
 export const REQ_TOOL = "nostr.req";
 /** A bech32 entity turned into the person or event it names. */
 export const RESOLVE_TOOL = "nostr.resolve";
+/** Signing and publishing as the agent. Public, permanent, bounded. */
+export const PUBLISH_TOOL = "nostr.publish";
+export const SIGN_TOOL = "nostr.sign";
 /**
  * Every tool id that exists, so config can refuse one that does not.
  *
@@ -93,6 +96,8 @@ export const KNOWN_TOOLS: readonly string[] = [
   HELP_TOOL,
   REQ_TOOL,
   RESOLVE_TOOL,
+  PUBLISH_TOOL,
+  SIGN_TOOL,
 ];
 
 /**
