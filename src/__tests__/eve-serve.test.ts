@@ -41,16 +41,21 @@ const TURN = [
   { type: "turn.completed", data: { turnId: "turn_0" }, meta: { id: "evt_7" } },
 ];
 
-/**
- * The same session after a second question.
- *
- * A real host keeps appending, so a follow-up has new events to read. A fake that
- * served only the first turn would leave the second follow waiting on a stream
- * that never says anything again — which is a fault in the fake, not the code.
- */
-const TWO_TURNS = [
+/** Turn one, over: the state a session sits in between questions. */
+const FIRST_TURN = [
   ...TURN,
   { type: "session.waiting", data: {}, meta: { id: "evt_8" } },
+];
+
+/**
+ * What a second question appends.
+ *
+ * Appended when the continue POST arrives, not served from the start — because
+ * the whole question a follow-up asks is "which of these events are mine", and a
+ * fake that has already published the answer before the question was asked
+ * cannot pose it.
+ */
+const SECOND_TURN = [
   { type: "turn.started", data: { turnId: "turn_1" }, meta: { id: "evt_9" } },
   {
     type: "message.completed",
@@ -92,15 +97,32 @@ function inbound(id: string, text: string): Inbound {
 /** Distinct per fake host: two of them are two different Eves, not one. */
 let hostCounter = 0;
 
-function fakeEve(events = TURN, tailIndex = 0, sessionId?: string) {
+/**
+ * `tailIndex` is deliberately NOT the consumer's count of the same events.
+ *
+ * The real host's `x-eve-stream-tail-index` ran two below what a reader of the
+ * same stream had counted, and a boundary taken from it ended a turn on the
+ * previous turn's ending. Nothing may depend on this number agreeing with
+ * anything; it is served wrong here on purpose so that a change which starts
+ * trusting it fails.
+ */
+function fakeEve(
+  events = TURN,
+  tailIndex = 0,
+  sessionId?: string,
+  /** Appended when a message is sent, the way a real host answers one. */
+  later: typeof TURN = [],
+) {
   const posts: { path: string; body: unknown }[] = [];
   const encoder = new TextEncoder();
   const session = sessionId ?? `wrun_TEST_${(hostCounter += 1)}`;
+  const stored = [...events];
 
   const impl = (async (url: string | URL, init?: RequestInit) => {
     const path = new URL(String(url)).pathname;
     if (init?.method === "POST") {
       posts.push({ path, body: JSON.parse(String(init.body)) });
+      stored.push(...later);
       return {
         ok: true,
         status: 200,
@@ -117,14 +139,21 @@ function fakeEve(events = TURN, tailIndex = 0, sessionId?: string) {
         // Honour `startIndex`, as a real host does: the consumer numbers what it
         // reads from that offset, so serving from the beginning every time would
         // label the events wrongly and mask exactly the bug under test.
-        const start = Number(
+        let at = Number(
           new URL(String(url)).searchParams.get("startIndex") ?? 0,
         );
-        for (const event of events.slice(start))
-          yield encoder.encode(JSON.stringify(event) + "\n");
-        // A live follow never ends on its own; the server stops at the turn
-        // boundary, and hanging here is what proves it.
-        await new Promise(() => {});
+        // A live tail: whatever is stored, then whatever arrives, until the
+        // reader gives up. Ends only on an abort, as a real socket does — that
+        // is what the pre-message read waits for silence to decide.
+        const signal = init?.signal;
+        while (!signal?.aborted) {
+          if (at < stored.length) {
+            yield encoder.encode(JSON.stringify(stored[at]) + "\n");
+            at += 1;
+            continue;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
       })(),
     };
   }) as unknown as typeof fetch;
@@ -188,6 +217,9 @@ describe("EveServer", () => {
       transport: bus,
       reply,
       fetchImpl: eve.impl,
+      // The fake replays instantly; a real host would too. Kept short so the
+      // suite does not sit through the production quiet window.
+      drainQuietMs: 40,
       transcript: {
         agentPubkey: AGENT,
         slug: "hex",
@@ -270,7 +302,7 @@ describe("EveServer", () => {
   });
 
   it("continues one session for a follow-up rather than starting another", async () => {
-    const eve = fakeEve(TWO_TURNS, 8);
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const bus = transport();
     const out = sink();
     const server_ = server(eve, bus, out.impl);
@@ -299,8 +331,9 @@ describe("EveServer", () => {
      * says where turn one ended.
      */
     // Turn one ends at index 8 (`session.waiting`), so everything up to there is
-    // the previous turn's and must not end this one.
-    const eve = fakeEve(TWO_TURNS, 8);
+    // the previous turn's and must not end this one — and the host reports 6,
+    // as a real one does, which is the number that used to be believed.
+    const eve = fakeEve(FIRST_TURN, 6, undefined, SECOND_TURN);
     const bus = transport();
     const server_ = server(eve, bus, sink().impl);
 
@@ -317,7 +350,7 @@ describe("EveServer", () => {
      * session sat idle forever with nobody to close it, and the reader was shown
      * two unrelated runs for one conversation.
      */
-    const first = fakeEve(TWO_TURNS, 8);
+    const first = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     await server(first, transport(), sink().impl).handle(
       inbound("msg-1", "first"),
     );
@@ -325,7 +358,7 @@ describe("EveServer", () => {
 
     // A new server over the same store, serving the same session: a different
     // process, same disk, same Eve.
-    const second = fakeEve(TWO_TURNS, 8, first.session);
+    const second = fakeEve(FIRST_TURN, 8, first.session, SECOND_TURN);
     await server(second, transport(), sink().impl).handle(
       inbound("msg-2", "second"),
     );

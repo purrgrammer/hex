@@ -81,10 +81,20 @@ export interface ServeOptions {
     /** A fresh host per turn, bound to the message being answered. */
     host: (inbound: Inbound) => ToolHost;
   };
+  /** How long the pre-message read waits for silence. Injected in tests. */
+  drainQuietMs?: number;
   log?: (line: string) => void;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
 }
+
+/**
+ * How long a stored replay may pause before it counts as finished.
+ *
+ * Generous against a slow local read, and irrelevant to latency: this runs once
+ * per follow-up, on a session that is waiting and therefore silent.
+ */
+const DEFAULT_DRAIN_QUIET_MS = 1_500;
 
 interface Conversation {
   /** Eve's session id for this correspondent. */
@@ -213,7 +223,7 @@ export class EveServer {
        * one. The transcript still reads from its own cursor, so nothing published
        * is skipped; only the answer is required to come from after the question.
        */
-      after = await this.tailIndex(conversation.sessionId);
+      after = await this.drain(conversation);
       if (host) this.options.tools?.bridge.bind(conversation.sessionId, host);
       await this.sendMessage(conversation.sessionId, inbound.text);
       this.log(
@@ -348,24 +358,59 @@ export class EveServer {
    * A GET that is abandoned immediately: the connection is a live follow with no
    * end, and all this wants is `x-eve-stream-tail-index`.
    */
-  private async tailIndex(sessionId: string): Promise<number> {
-    const doFetch = this.options.fetchImpl ?? fetch;
-    const url = new URL(
-      `/eve/v1/session/${encodeURIComponent(sessionId)}/stream?includeTailIndex=1`,
-      this.options.host,
-    ).toString();
+  /**
+   * Read whatever is already stored, and report where that leaves the stream.
+   *
+   * This is where the turn boundary comes from, and it is measured in the same
+   * counter the follow uses — because it is the same read. It used to come from
+   * Eve's `x-eve-stream-tail-index`, which is a DIFFERENT number: two smaller,
+   * live, than the events the consumer had counted. The previous turn's
+   * `turn.completed` therefore landed one past the boundary and ended this turn
+   * before it had begun. A question was asked, a session ran, and nobody was
+   * answered.
+   *
+   * The header is not consulted at all now, not even to stop: an end-of-stored
+   * marker that is off by two is worse than no marker, because it looks right.
+   * What ends the drain is SILENCE — the session is waiting for the message that
+   * has not been sent yet, so it has nothing to say, and a stored replay arrives
+   * far faster than the quiet window.
+   *
+   * The events are handed to the transcript on the way past rather than skipped:
+   * a resumed conversation has a tail nobody published yet, and this is the only
+   * pass that will ever see it.
+   */
+  private async drain(conversation: Conversation): Promise<number> {
+    const quiet = this.options.drainQuietMs ?? DEFAULT_DRAIN_QUIET_MS;
     const controller = new AbortController();
-    try {
-      const response = await doFetch(url, { signal: controller.signal });
-      const tail = Number(response.headers.get("x-eve-stream-tail-index"));
-      return Number.isSafeInteger(tail) ? tail : -1;
-    } catch {
-      // Unknown means "do not filter", which is the safe direction: an answer
-      // repeated is better than an answer never sent.
-      return -1;
-    } finally {
+    const stop = () => {
       controller.abort();
+    };
+    this.options.signal?.addEventListener("abort", stop);
+    let timer = setTimeout(stop, quiet);
+
+    let last = conversation.transcript.streamIndex;
+    try {
+      for await (const { index, event } of streamSession({
+        host: this.options.host,
+        sessionId: conversation.sessionId,
+        startIndex: last,
+        signal: controller.signal,
+        fetchImpl: this.options.fetchImpl,
+      })) {
+        clearTimeout(timer);
+        timer = setTimeout(stop, quiet);
+        await conversation.transcript.handle(event, index);
+        last = index;
+      }
+    } catch {
+      // The abort is how this ends. Anything else that goes wrong leaves the
+      // boundary where the reading got to, which filters less rather than more:
+      // an answer repeated is better than an answer never sent.
+    } finally {
+      clearTimeout(timer);
+      this.options.signal?.removeEventListener("abort", stop);
     }
+    return last;
   }
 
   private async post(
