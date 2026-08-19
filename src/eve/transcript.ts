@@ -117,6 +117,16 @@ export class EveTranscript {
    */
   private atIndex = 0;
 
+  /**
+   * What this step has thought so far, and whether it has been published.
+   *
+   * Kept separately from `pending` because the reasoning is complete long before
+   * Eve says so: `reasoning.appended` carries `reasoningSoFar`, while
+   * `reasoning.completed` arrives after the tool result on a real stream.
+   */
+  private stepReasoning?: string;
+  private reasoningPublished = false;
+
   /** Tool calls seen this step, so a result can name the tool it answers. */
   private readonly calls = new Map<string, string>();
 
@@ -236,6 +246,9 @@ export class EveTranscript {
        * with. `modelId` carries the provider ahead of a slash when there is one.
        */
       case "step.started": {
+        // A new model call: whatever the last one thought is no longer pending.
+        this.stepReasoning = undefined;
+        this.reasoningPublished = false;
         const id = stringField(data, "modelId");
         if (id) {
           const slash = id.indexOf("/");
@@ -257,9 +270,17 @@ export class EveTranscript {
         break;
       }
 
-      case "reasoning.appended":
-        this.push("reasoning", stringField(data, "reasoningDelta") ?? "");
+      case "reasoning.appended": {
+        const delta = stringField(data, "reasoningDelta") ?? "";
+        // `reasoningSoFar` is the whole thing so far, which is what makes the
+        // reasoning available before `reasoning.completed` arrives — and on a
+        // real Eve stream that event comes AFTER the tool result.
+        this.stepReasoning =
+          stringField(data, "reasoningSoFar") ??
+          (this.stepReasoning ?? "") + delta;
+        this.push("reasoning", delta);
         break;
+      }
 
       case "message.appended":
         this.push("text", stringField(data, "messageDelta") ?? "");
@@ -267,7 +288,11 @@ export class EveTranscript {
 
       case "reasoning.completed": {
         const text = stringField(data, "reasoning");
-        if (text) this.pending.push({ type: "reasoning", text });
+        if (text) this.stepReasoning = text;
+        // Already published with this step's turn: saying it twice would put the
+        // same thinking in two turns.
+        if (text && !this.reasoningPublished)
+          this.pending.unshift({ type: "reasoning", text });
         break;
       }
 
@@ -414,6 +439,25 @@ export class EveTranscript {
       usage?: Usage;
     } = {},
   ): Promise<void> {
+    /**
+     * The reasoning goes out with the step it belongs to, even if Eve has not
+     * finished announcing it.
+     *
+     * On a real stream a step that calls a tool emits `actions.requested`, then
+     * `action.result`, and only THEN `reasoning.completed` — and this turn is
+     * flushed on the result, so waiting for the completed event published the
+     * thinking one turn late, attached to the step after the one that did it. A
+     * transcript that misattributes reasoning is worse than one that omits it.
+     */
+    if (role === "assistant" && !this.reasoningPublished) {
+      const already = this.pending.some((part) => part.type === "reasoning");
+      if (!already && this.stepReasoning)
+        this.pending.unshift({ type: "reasoning", text: this.stepReasoning });
+      // Published either way: a step's thinking belongs to one turn, and the
+      // path where `reasoning.completed` arrived in time must mark it too.
+      if (already || this.stepReasoning) this.reasoningPublished = true;
+    }
+
     if (this.pending.length === 0) return;
     const parts = this.pending.splice(0, this.pending.length);
     const said = parts

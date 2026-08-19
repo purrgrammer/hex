@@ -431,7 +431,8 @@ async function main(): Promise<void> {
             host,
             sessionId,
             startIndex: transcript.streamIndex,
-            follow: true,
+            // A live follow, which is the only mode the endpoint has.
+
             signal: abort.signal,
           }))
             await transcript.handle(event, index);

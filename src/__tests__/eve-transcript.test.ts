@@ -313,6 +313,109 @@ describe("EveTranscript", () => {
     second.close();
   });
 
+  it("attaches reasoning to the step that did it, not the one after", async () => {
+    /**
+     * Eve's REAL order for a step that calls a tool, read off a running
+     * `eve dev`: the call, then the result, and only THEN `reasoning.completed`.
+     * The assistant turn is flushed on the result, so waiting for the completed
+     * event published the thinking one turn late — attached to the step after the
+     * one that produced it, which is a transcript that lies about what the agent
+     * was thinking when it acted.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    const REAL_ORDER: EveEnvelope[] = [
+      { type: "session.started", data: {} },
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      { type: "message.received", data: { message: "ls", turnId: "turn_0" } },
+      {
+        type: "step.started",
+        data: {
+          modelId: "ppq/moonshotai/kimi-k3",
+          stepIndex: 0,
+          turnId: "turn_0",
+        },
+      },
+      {
+        type: "reasoning.appended",
+        data: {
+          reasoningDelta: "Run a shell ",
+          reasoningSoFar: "Run a shell ",
+        },
+      },
+      {
+        type: "reasoning.appended",
+        data: {
+          reasoningDelta: "command.",
+          reasoningSoFar: "Run a shell command.",
+        },
+      },
+      {
+        type: "actions.requested",
+        data: {
+          actions: [
+            {
+              kind: "tool-call",
+              callId: "bash_0",
+              toolName: "bash",
+              input: { command: "ls -la" },
+            },
+          ],
+          stepIndex: 0,
+          turnId: "turn_0",
+        },
+      },
+      {
+        type: "action.result",
+        data: {
+          result: {
+            kind: "tool-result",
+            callId: "bash_0",
+            toolName: "bash",
+            output: { exitCode: 0 },
+          },
+          stepIndex: 0,
+          turnId: "turn_0",
+        },
+      },
+      // After the result, which is the whole point.
+      {
+        type: "reasoning.completed",
+        data: { reasoning: "Run a shell command.", stepIndex: 0 },
+      },
+      {
+        type: "step.completed",
+        data: { finishReason: "tool-calls", stepIndex: 0, turnId: "turn_0" },
+      },
+    ];
+
+    let index = 0;
+    for (const event of REAL_ORDER) await pub.handle(event, ++index);
+    await pub.close("done");
+
+    const turns = sent.filter((s) => s.rumor.kind === 1777).map((s) => s.rumor);
+    const step = turns.find((t) => tag(t, "role") === "assistant")!;
+    expect(parts(step).map((p) => p.type)).toEqual(["reasoning", "tool_call"]);
+    expect(parts(step)[0]).toMatchObject({ text: "Run a shell command." });
+
+    // And exactly once: not repeated onto a later turn.
+    const reasoningTurns = turns.filter((t) =>
+      parts(t).some((p) => p.type === "reasoning"),
+    );
+    expect(reasoningTurns).toHaveLength(1);
+
+    // The provider is the route, and the model keeps its own path.
+    expect(step.tags.find((t) => t[0] === "model")).toEqual([
+      "model",
+      "moonshotai/kimi-k3",
+      "ppq",
+    ]);
+
+    store.close();
+  });
+
   it("does not ship the same head twice", async () => {
     // Eve announces one state from more than one direction — `session.started`
     // then `turn.started`, `session.completed` then the close on the way out —

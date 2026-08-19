@@ -9,6 +9,9 @@
  *
  * `fetch` and nothing else. Taking `eve/client` would mean taking the framework,
  * and the endpoint is the protocol.
+ *
+ * Both query parameters here are the endpoint's real ones — `startIndex` and
+ * `includeTailIndex` — read off a running `eve dev` rather than assumed.
  */
 
 import type { EveEnvelope } from "./types.js";
@@ -19,8 +22,17 @@ export interface StreamOptions {
   sessionId: string;
   /** Resume here. Omit to read from the beginning. */
   startIndex?: number;
-  /** Keep the connection open for events that have not happened yet. */
-  follow?: boolean;
+  /**
+   * Stop once the events that already exist have been read.
+   *
+   * The endpoint has NO `follow` parameter — it is always a live follow, and a
+   * request for a finished session stays open regardless. What it does have is
+   * `includeTailIndex`, which returns the index of the last stored event in a
+   * header; so a bounded read is "stop when you reach the tail", and that is what
+   * this implements. Verified against a running `eve dev`, which held a
+   * `follow=0` request open for two minutes and would have held it forever.
+   */
+  untilTail?: boolean;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
 }
@@ -38,7 +50,7 @@ export function streamUrl(options: StreamOptions): string {
   );
   if (options.startIndex !== undefined)
     url.searchParams.set("startIndex", String(options.startIndex));
-  if (options.follow === false) url.searchParams.set("follow", "0");
+  if (options.untilTail) url.searchParams.set("includeTailIndex", "1");
   return url.toString();
 }
 
@@ -63,6 +75,13 @@ export async function* streamSession(
     );
   if (!response.body) return;
 
+  // `x-eve-stream-tail-index` names the last stored event. Only meaningful when
+  // it was asked for; a header that is absent or unreadable means read on.
+  const tailHeader = options.untilTail
+    ? Number(response.headers.get("x-eve-stream-tail-index"))
+    : Number.NaN;
+  const tail = Number.isSafeInteger(tailHeader) ? tailHeader : undefined;
+
   let index = options.startIndex ?? 0;
   const decoder = new TextDecoder();
   let buffered = "";
@@ -86,6 +105,7 @@ export async function* streamSession(
       }
       index += 1;
       if (typeof event.type === "string") yield { index, event };
+      if (tail !== undefined && index >= tail) return;
     }
   }
 }
