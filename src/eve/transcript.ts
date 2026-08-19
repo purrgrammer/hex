@@ -29,12 +29,15 @@ import {
 } from "../nostr/encode.js";
 import type {
   AgentToolSpec,
+  Cost,
   Rumor,
   SessionStatus,
+  SubagentRef,
   TurnPart,
   TurnRole,
   Usage,
 } from "../nostr/types.js";
+import { isKnownPart } from "../nostr/types.js";
 import type { HexStore, StoredTranscript } from "../store.js";
 import {
   outputText,
@@ -126,6 +129,15 @@ export class EveTranscript {
    */
   private stepReasoning?: string;
   private reasoningPublished = false;
+
+  /**
+   * Child sessions this step started, by the call that started them.
+   *
+   * Collected across `subagent.called` and `subagent.started`, which name the
+   * session id and the subagent's name in either order, and drained onto the turn
+   * the step flushes.
+   */
+  private subagents = new Map<string, SubagentRef>();
 
   /** Durable ids of events already handled, so a replay is not republished. */
   private readonly seen = new Set<string>();
@@ -284,6 +296,29 @@ export class EveTranscript {
         break;
       }
 
+      /**
+       * A subagent was set running, and its work is somewhere else.
+       *
+       * `subagent.called` is where Eve names the child's session id alongside the
+       * tool call that spawned it. The child is a session of its own — own head,
+       * own chain — so this turn can only point at it, and the pointer is Eve's
+       * id rather than a Nostr address because the address depends on who
+       * followed the child and nobody may have.
+       */
+      case "subagent.called":
+      case "subagent.started": {
+        const callId = stringField(data, "callId");
+        const childSession = stringField(data, "sessionId");
+        const name = stringField(data, "subagentName");
+        if (callId && (childSession || name))
+          this.subagents.set(callId, {
+            callId,
+            session: childSession ?? this.subagents.get(callId)?.session ?? "",
+            name: name ?? this.subagents.get(callId)?.name,
+          });
+        break;
+      }
+
       case "message.received": {
         const text = stringField(data, "message") ?? "";
         if (!this.record.trigger)
@@ -378,10 +413,30 @@ export class EveTranscript {
           data.usage && typeof data.usage === "object"
             ? (data.usage as { costUsd?: number }).costUsd
             : undefined;
-        if (cost !== undefined) this.record.cost = cost.toFixed(6);
+        /**
+         * A step's cost goes on the step, and the session's is the SUM.
+         *
+         * It used to be assigned, so a ten-step session reported the cost of its
+         * last step — the smallest number in the run, presented as the total. And
+         * the turn carried nothing, so a reader auditing the spend could see what
+         * a session cost and never which step spent it.
+         *
+         * Kept as a fixed-point string because that is what goes on the wire, and
+         * parsing it back to add is exact at six decimal places for any bill a
+         * session can run up.
+         */
+        if (cost !== undefined) {
+          this.record.cost = (Number(this.record.cost ?? "0") + cost).toFixed(
+            6,
+          );
+        }
         await this.flush("assistant", {
           stop: stopFor(stringField(data, "finishReason")),
           usage,
+          cost:
+            cost === undefined
+              ? undefined
+              : { amount: cost.toFixed(6), currency: "USD" },
         });
         break;
       }
@@ -466,6 +521,8 @@ export class EveTranscript {
       stop?:
         "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
       usage?: Usage;
+      cost?: Cost;
+      subagents?: SubagentRef[];
     } = {},
   ): Promise<void> {
     /**
@@ -493,8 +550,21 @@ export class EveTranscript {
       .filter((part) => part.type === "text")
       .map((part) => String((part as { text?: unknown }).text ?? ""))
       .join(" ");
+    // Only the children this turn's own calls started: a pointer on a turn that
+    // did not spawn it is a reader following a link to the wrong place.
+    const called = new Set(
+      parts
+        .filter((part) => isKnownPart(part) && part.type === "tool_call")
+        .map((part) => (part as { id: string }).id),
+    );
+    const children = [...this.subagents.values()].filter((child) =>
+      called.has(child.callId),
+    );
+    for (const child of children) this.subagents.delete(child.callId);
+
     await this.append(role, parts, {
       ...extra,
+      subagents: children.length > 0 ? children : undefined,
       alt: said.slice(0, 280) || undefined,
     });
   }
@@ -506,6 +576,8 @@ export class EveTranscript {
       stop?:
         "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
       usage?: Usage;
+      cost?: Cost;
+      subagents?: SubagentRef[];
       alt?: string;
     } = {},
   ): Promise<void> {
@@ -526,6 +598,8 @@ export class EveTranscript {
         stop: extra.stop,
         model: role === "assistant" ? this.model : undefined,
         usage: extra.usage,
+        cost: extra.cost,
+        subagents: extra.subagents,
         alt: extra.alt,
       },
       { seq: next, prev: this.record.prev },

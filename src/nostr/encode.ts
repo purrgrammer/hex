@@ -142,6 +142,13 @@ export function buildTurn(
     ]);
   if (input.usage) tags.push(usageTag(input.usage));
   if (input.cost) tags.push(costTag(input.cost));
+  for (const child of input.subagents ?? [])
+    tags.push([
+      "subagent",
+      child.callId,
+      child.session,
+      ...(child.name ? [child.name] : []),
+    ]);
   for (const tool of tools) tags.push(["tool", tool]);
   if (input.alt) tags.push(["alt", input.alt]);
 

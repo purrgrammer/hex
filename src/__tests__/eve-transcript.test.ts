@@ -435,6 +435,128 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("sums a session's cost and puts each step's on its own turn", async () => {
+    // The session cost was ASSIGNED per step, so a ten-step run reported the cost
+    // of its last step — the smallest number in the run, presented as the total —
+    // and the turn carried nothing, so nobody could see which step spent it.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    const step = (index: number, costUsd: number): EveEnvelope[] => [
+      {
+        type: "step.started",
+        data: { modelId: "anthropic/claude-opus-5", stepIndex: index },
+      },
+      {
+        type: "message.completed",
+        data: {
+          message: `step ${index}`,
+          finishReason: "stop",
+          stepIndex: index,
+        },
+      },
+      {
+        type: "step.completed",
+        data: {
+          finishReason: "stop",
+          stepIndex: index,
+          turnId: "turn_0",
+          usage: { inputTokens: 10, outputTokens: 1, costUsd },
+        },
+      },
+    ];
+
+    let index = 0;
+    await pub.handle({ type: "session.started", data: {} }, ++index);
+    for (const event of [...step(0, 0.25), ...step(1, 0.5)])
+      await pub.handle(event, ++index);
+    await pub.close("done");
+
+    const turns = sent.filter((s) => s.rumor.kind === 1777).map((s) => s.rumor);
+    expect(turns.map((t) => t.tags.find((x) => x[0] === "cost"))).toEqual([
+      ["cost", "0.250000", "USD"],
+      ["cost", "0.500000", "USD"],
+    ]);
+
+    const head = sent.filter((s) => s.rumor.kind === 31777).at(-1)!.rumor;
+    expect(head.tags.find((t) => t[0] === "cost")).toEqual([
+      "cost",
+      "0.750000",
+      "USD",
+    ]);
+
+    store.close();
+  });
+
+  it("names the child session a subagent call started", async () => {
+    // A subagent's work is a separate session — own head, own chain — so the turn
+    // that spawned it can only point at it. Without the pointer the row is a dead
+    // end, which is exactly where a reader most wants to follow.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    await pub.handle({ type: "session.started", data: {} }, ++index);
+    await pub.handle(
+      {
+        type: "step.started",
+        data: { modelId: "anthropic/claude-opus-5", stepIndex: 0 },
+      },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "actions.requested",
+        data: {
+          actions: [
+            {
+              kind: "tool-call",
+              callId: "call_sub",
+              toolName: "agent",
+              input: { prompt: "audit" },
+            },
+          ],
+          stepIndex: 0,
+          turnId: "turn_0",
+        },
+      },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "subagent.called",
+        data: {
+          callId: "call_sub",
+          sessionId: "wrun_CHILD",
+          subagentName: "auditor",
+        },
+      },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "step.completed",
+        data: { finishReason: "tool-calls", stepIndex: 0, turnId: "turn_0" },
+      },
+      index + 1,
+    );
+
+    const turn = sent
+      .filter((s) => s.rumor.kind === 1777)
+      .map((s) => s.rumor)
+      .find((t) => t.tags.some((x) => x[0] === "subagent"))!;
+    expect(turn.tags.find((t) => t[0] === "subagent")).toEqual([
+      "subagent",
+      "call_sub",
+      "wrun_CHILD",
+      "auditor",
+    ]);
+
+    store.close();
+  });
+
   it("does not ship the same head twice", async () => {
     // Eve announces one state from more than one direction — `session.started`
     // then `turn.started`, `session.completed` then the close on the way out —

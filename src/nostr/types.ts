@@ -169,6 +169,26 @@ export interface StreamCursor {
 
 // ── Inputs (what a publisher hands the encoder) ──────────────────────────────
 
+/**
+ * A child session this turn set running.
+ *
+ * A subagent's work is a SEPARATE session: its own head, its own `seq` chain,
+ * its own address. So a turn that spawned one cannot contain it — it can only
+ * name it, and a reader follows the pointer if the child was published too.
+ *
+ * `session` is the runtime's own session id, not a Nostr address, because the
+ * address depends on who followed the child and nobody may have. A reader that
+ * holds the child's transcript can match on this; one that does not is told a
+ * subagent ran and where to look, which is more than silence.
+ */
+export interface SubagentRef {
+  /** The tool call that spawned it, which is also the row it belongs to. */
+  callId: string;
+  /** The runtime's session id for the child. */
+  session: string;
+  name?: string;
+}
+
 export interface AgentTurnInput {
   role: TurnRole;
   parts: TurnPart[];
@@ -177,6 +197,8 @@ export interface AgentTurnInput {
   model?: { id: string; provider?: string };
   usage?: Usage;
   cost?: Cost;
+  /** Child sessions this turn started, one tag each. */
+  subagents?: SubagentRef[];
   /** Plain-text rendering for clients that cannot parse the parts. */
   alt?: string;
   createdAt?: number;
