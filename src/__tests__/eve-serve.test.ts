@@ -41,6 +41,33 @@ const TURN = [
   { type: "turn.completed", data: { turnId: "turn_0" }, meta: { id: "evt_7" } },
 ];
 
+/**
+ * The same session after a second question.
+ *
+ * A real host keeps appending, so a follow-up has new events to read. A fake that
+ * served only the first turn would leave the second follow waiting on a stream
+ * that never says anything again — which is a fault in the fake, not the code.
+ */
+const TWO_TURNS = [
+  ...TURN,
+  { type: "session.waiting", data: {}, meta: { id: "evt_8" } },
+  { type: "turn.started", data: { turnId: "turn_1" }, meta: { id: "evt_9" } },
+  {
+    type: "message.completed",
+    data: {
+      message: "and the second answer.",
+      finishReason: "stop",
+      stepIndex: 0,
+    },
+    meta: { id: "evt_10" },
+  },
+  {
+    type: "turn.completed",
+    data: { turnId: "turn_1" },
+    meta: { id: "evt_11" },
+  },
+];
+
 function inbound(id: string, text: string): Inbound {
   return {
     id,
@@ -62,7 +89,7 @@ function inbound(id: string, text: string): Inbound {
 }
 
 /** A fake Eve: one POST to start or continue, one NDJSON stream to read. */
-function fakeEve(events = TURN) {
+function fakeEve(events = TURN, tailIndex = 0) {
   const posts: { path: string; body: unknown }[] = [];
   const encoder = new TextEncoder();
 
@@ -81,9 +108,15 @@ function fakeEve(events = TURN) {
       ok: true,
       status: 200,
       statusText: "OK",
-      headers: new Headers(),
+      headers: new Headers({ "x-eve-stream-tail-index": String(tailIndex) }),
       body: (async function* () {
-        for (const event of events)
+        // Honour `startIndex`, as a real host does: the consumer numbers what it
+        // reads from that offset, so serving from the beginning every time would
+        // label the events wrongly and mask exactly the bug under test.
+        const start = Number(
+          new URL(String(url)).searchParams.get("startIndex") ?? 0,
+        );
+        for (const event of events.slice(start))
           yield encoder.encode(JSON.stringify(event) + "\n");
         // A live follow never ends on its own; the server stops at the turn
         // boundary, and hanging here is what proves it.
@@ -229,7 +262,7 @@ describe("EveServer", () => {
   });
 
   it("continues one session for a follow-up rather than starting another", async () => {
-    const eve = fakeEve();
+    const eve = fakeEve(TWO_TURNS, 8);
     const bus = transport();
     const out = sink();
     const server_ = server(eve, bus, out.impl);
@@ -245,6 +278,51 @@ describe("EveServer", () => {
     // what set the run going, not the latest thing said to it.
     const head = out.sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
     expect(tag(head, "e")).toEqual(["e", "msg-1", "", "trigger"]);
+  });
+
+  it("answers a follow-up, rather than stopping on the last turn's ending", async () => {
+    /**
+     * The bug this closes, seen live: a follow-up resumed from the durable cursor,
+     * replayed the tail of the previous turn — `session.waiting` included — and
+     * ended instantly with "produced no answer to send", because a terminal event
+     * from the turn before is indistinguishable from one for this turn.
+     *
+     * The stream here replays turn one and then serves turn two, and the tail index
+     * says where turn one ended.
+     */
+    // Turn one ends at index 8 (`session.waiting`), so everything up to there is
+    // the previous turn's and must not end this one.
+    const eve = fakeEve(TWO_TURNS, 8);
+    const bus = transport();
+    const server_ = server(eve, bus, sink().impl);
+
+    await server_.handle(inbound("msg-1", "first"));
+    await server_.handle(inbound("msg-2", "second"));
+
+    expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
+  });
+
+  it("picks up the conversation a previous process was having", async () => {
+    /**
+     * Seen live: `serve` restarted, the peer-to-session map was in memory, and the
+     * next message opened a NEW session. The person's history was gone, the old
+     * session sat idle forever with nobody to close it, and the reader was shown
+     * two unrelated runs for one conversation.
+     */
+    const first = fakeEve(TWO_TURNS, 8);
+    await server(first, transport(), sink().impl).handle(
+      inbound("msg-1", "first"),
+    );
+    expect(first.posts.map((p) => p.path)).toEqual(["/eve/v1/session"]);
+
+    // A new server over the same store: a different process, same disk.
+    const second = fakeEve(TWO_TURNS, 8);
+    await server(second, transport(), sink().impl).handle(
+      inbound("msg-2", "second"),
+    );
+    expect(second.posts.map((p) => p.path)).toEqual([
+      "/eve/v1/session/wrun_TEST",
+    ]);
   });
 
   it("reports a failed turn instead of going quiet", async () => {

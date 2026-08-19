@@ -89,7 +89,8 @@ export function agentHome(root: string, pubkey: string): AgentHome {
 }
 
 /**
- * One table: where each published transcript stands.
+ * Two tables: where each published transcript stands, and which runtime session
+ * belongs to which correspondent.
  *
  * A home written by an older version also holds `sessions`, `messages`,
  * `participants` and `worktrees`, from when this package ran its own agent loop.
@@ -115,6 +116,12 @@ CREATE TABLE IF NOT EXISTS transcripts (
   cost        TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  peer       TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  last_at    INTEGER NOT NULL
+);
 `;
 
 export class HexStore {
@@ -138,6 +145,33 @@ export class HexStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * The runtime session a correspondent is talking to, if any.
+   *
+   * In the database rather than in memory, and the reason is not tidiness: held in
+   * memory, a restart forgot who was talking about what, so the next message
+   * opened a NEW session — the person's history gone, the old session left idle
+   * forever with nobody to close it, and the reader shown two unrelated runs for
+   * one conversation.
+   */
+  conversationFor(peer: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT session_id FROM conversations WHERE peer = ?")
+      .get(peer) as { session_id?: string } | undefined;
+    return row?.session_id;
+  }
+
+  /** Remember it, or move this correspondent to a different session. */
+  rememberConversation(peer: string, sessionId: string, at: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO conversations (peer, session_id, last_at) VALUES (?, ?, ?)
+         ON CONFLICT(peer) DO UPDATE SET
+           session_id = excluded.session_id, last_at = excluded.last_at`,
+      )
+      .run(peer, sessionId, at);
   }
 
   transcriptFor(sessionId: string): StoredTranscript | undefined {

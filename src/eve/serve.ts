@@ -14,9 +14,13 @@
  * that cannot read kind 31777 sees a message with no reply — so an operator
  * talking to plain clients turns it on.
  *
- * One Eve session per correspondent. A follow-up continues it, because that is
- * what a conversation is, and because Eve's session IS the context — reconstructing
- * history to feed it would be reimplementing the thing this package stopped doing.
+ * One Eve session per correspondent, remembered ON DISK. A follow-up continues it,
+ * because that is what a conversation is, and because Eve's session IS the context
+ * — reconstructing history to feed it would be reimplementing the thing this
+ * package stopped doing. Held in memory it survived exactly as long as the process:
+ * a restart opened a new session for the next message, leaving the old one idle
+ * forever with nobody to close it and the reader looking at two unrelated runs for
+ * one conversation.
  *
  * The stream is consumed HERE and fanned out: `EveTranscript` publishes, and a
  * small local reducer watches for the answer. Handing the transcript a callback
@@ -119,7 +123,7 @@ export class EveServer {
 
   private async turn(inbound: Inbound): Promise<void> {
     const peer = inbound.author;
-    let conversation = this.conversations.get(peer);
+    let conversation = this.conversations.get(peer) ?? this.resume(peer);
 
     /**
      * Say "seen" before doing anything slow.
@@ -138,6 +142,14 @@ export class EveServer {
           ),
         );
 
+    /**
+     * The index a terminal event has to beat to end THIS turn.
+     *
+     * A new session has no history to replay, so nothing needs beating; a
+     * follow-up does, and the value is where the stream stood before the message
+     * went in.
+     */
+    let after: number;
     if (!conversation) {
       const sessionId = await this.createSession(inbound.text);
       const transcript = new EveTranscript(
@@ -155,15 +167,32 @@ export class EveServer {
       transcript.trigger = inbound.id;
       conversation = { sessionId, transcript };
       this.conversations.set(peer, conversation);
+      this.options.transcript.store.rememberConversation(
+        peer,
+        sessionId,
+        Math.floor(Date.now() / 1000),
+      );
       this.log(`[hex] ${short(peer)} → eve session ${sessionId}`);
+      after = -1;
     } else {
+      /**
+       * Where the stream stood BEFORE the message was sent.
+       *
+       * Without this, a follow-up ended instantly with no answer. Resuming from
+       * the durable cursor replays the tail of the previous turn — including its
+       * `session.waiting` — and the follow stopped on it, because a terminal
+       * event from the turn before looks exactly like a terminal event for this
+       * one. The transcript still reads from its own cursor, so nothing published
+       * is skipped; only the answer is required to come from after the question.
+       */
+      after = await this.tailIndex(conversation.sessionId);
       await this.sendMessage(conversation.sessionId, inbound.text);
       this.log(
         `[hex] ${short(peer)} → continuing eve session ${conversation.sessionId}`,
       );
     }
 
-    const answer = await this.follow(conversation, inbound);
+    const answer = await this.follow(conversation, inbound, after);
     this.log(
       `[hex] ${short(peer)} ← ${sessionAddress(
         this.options.transcript.agentPubkey,
@@ -197,6 +226,8 @@ export class EveServer {
   private async follow(
     conversation: Conversation,
     inbound: Inbound,
+    /** Ignore terminal events at or below this index: they are the last turn's. */
+    after: number,
   ): Promise<string | undefined> {
     let answer: string | undefined;
     let failed: string | undefined;
@@ -210,6 +241,8 @@ export class EveServer {
         fetchImpl: this.options.fetchImpl,
       })) {
         await conversation.transcript.handle(event, index);
+
+        if (index <= after) continue;
 
         const data = payload(event);
         if (event.type === "message.completed")
@@ -237,6 +270,25 @@ export class EveServer {
     return answer;
   }
 
+  /**
+   * Pick up a conversation a previous process was having.
+   *
+   * The transcript is rebuilt from its own row, so the `seq` chain continues where
+   * it left off rather than forking, and the trigger it already published stays
+   * the message that opened the run.
+   */
+  private resume(peer: string): Conversation | undefined {
+    const sessionId = this.options.transcript.store.conversationFor(peer);
+    if (!sessionId) return undefined;
+    const conversation = {
+      sessionId,
+      transcript: new EveTranscript({ ...this.options.transcript }, sessionId),
+    };
+    this.conversations.set(peer, conversation);
+    this.log(`[hex] ${short(peer)} → resumed eve session ${sessionId}`);
+    return conversation;
+  }
+
   private async createSession(text: string): Promise<string> {
     const response = await this.post("/eve/v1/session", { message: text });
     const id =
@@ -249,6 +301,32 @@ export class EveServer {
     await this.post(`/eve/v1/session/${encodeURIComponent(sessionId)}`, {
       message: text,
     });
+  }
+
+  /**
+   * How far the stream has got, from the header Eve returns for it.
+   *
+   * A GET that is abandoned immediately: the connection is a live follow with no
+   * end, and all this wants is `x-eve-stream-tail-index`.
+   */
+  private async tailIndex(sessionId: string): Promise<number> {
+    const doFetch = this.options.fetchImpl ?? fetch;
+    const url = new URL(
+      `/eve/v1/session/${encodeURIComponent(sessionId)}/stream?includeTailIndex=1`,
+      this.options.host,
+    ).toString();
+    const controller = new AbortController();
+    try {
+      const response = await doFetch(url, { signal: controller.signal });
+      const tail = Number(response.headers.get("x-eve-stream-tail-index"));
+      return Number.isSafeInteger(tail) ? tail : -1;
+    } catch {
+      // Unknown means "do not filter", which is the safe direction: an answer
+      // repeated is better than an answer never sent.
+      return -1;
+    } finally {
+      controller.abort();
+    }
   }
 
   private async post(
