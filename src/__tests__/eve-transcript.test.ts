@@ -265,6 +265,25 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("keeps the status Eve last reported when the follower just leaves", async () => {
+    // A dropped connection is not a finished session. The endpoint is a live
+    // follow with no end of its own, so the stream ending means the SOCKET ended
+    // — and a head that claims `done` because undici raised `terminated` is a lie
+    // no reader can detect.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    await pub.handle({ type: "session.started", data: {} }, 1);
+    await pub.handle({ type: "input.requested", data: {} }, 2);
+    await pub.close();
+
+    const head = sent.filter((s) => s.rumor.kind === 31777).at(-1)!.rumor;
+    expect(tag(head, "status")).toBe("awaiting-input");
+
+    store.close();
+  });
+
   it("holds awaiting-input on the head, which no turn can say", async () => {
     const store = HexStore.open(agentHome(home, AGENT).db);
     const { impl, sent } = sink();

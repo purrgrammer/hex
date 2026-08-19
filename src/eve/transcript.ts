@@ -432,8 +432,13 @@ export class EveTranscript {
     }
   }
 
-  /** Close a session this process is done with, whatever Eve last said. */
-  async close(status: SessionStatus = "done"): Promise<void> {
+  /**
+   * Stop following.
+   *
+   * With no status the head keeps whatever Eve last reported, which is what a
+   * dropped connection means: the follower left, the session did not end.
+   */
+  async close(status?: SessionStatus): Promise<void> {
     await this.flush("assistant");
     // Let whatever is still queued go out before the head says the session is
     // over — a delta arriving after `done` describes work already reported.
@@ -442,7 +447,7 @@ export class EveTranscript {
       this.log(
         `[hex] ${this.deltaDropped} delta(s) dropped keeping up with the stream; every one is repeated in its turn`,
       );
-    await this.status(status);
+    await this.status(status ?? (this.record.status as SessionStatus));
   }
 
   private push(

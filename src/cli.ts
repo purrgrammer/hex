@@ -56,6 +56,35 @@ function dmTransport(transports: TransportConfig[]) {
   );
 }
 
+/**
+ * Did the stream just end, rather than fail?
+ *
+ * undici reports a body the far side closed as a bare `TypeError: terminated`,
+ * with the real reason on `cause`. It is indistinguishable from a crash by type
+ * alone, which is why this is a named check and not a `catch {}`.
+ */
+function isDisconnect(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.message === "terminated") return true;
+  const code = (error as { cause?: { code?: string } }).cause?.code;
+  return (
+    code === "UND_ERR_SOCKET" ||
+    code === "ECONNRESET" ||
+    code === "ECONNREFUSED" ||
+    code === "EPIPE"
+  );
+}
+
+function describeDisconnect(error: unknown): string {
+  const cause = (error as { cause?: { code?: string; message?: string } })
+    ?.cause;
+  return (
+    cause?.message ??
+    cause?.code ??
+    (error instanceof Error ? error.message : String(error))
+  );
+}
+
 function fail(message: string): never {
   console.error(`hex: ${message}`);
   process.exit(1);
@@ -426,22 +455,39 @@ async function main(): Promise<void> {
         process.once("SIGINT", () => stop("SIGINT"));
         process.once("SIGTERM", () => stop("SIGTERM"));
 
+        /**
+         * Why the follow ended, which is not the same as how the session ended.
+         *
+         * The endpoint is a live follow with no end of its own, so the stream
+         * finishing means the CONNECTION finished — the dev server closed it, the
+         * network went away, undici raised its opaque `terminated`. None of that
+         * is the agent being done, and a head that claims `done` because a socket
+         * dropped is a lie a reader cannot detect. So a disconnect leaves the
+         * status exactly where Eve last put it, and a restart resumes from the
+         * cursor.
+         */
+        let disconnected = false;
         try {
           for await (const { index, event } of streamSession({
             host,
             sessionId,
             startIndex: transcript.streamIndex,
-            // A live follow, which is the only mode the endpoint has.
-
             signal: abort.signal,
           }))
             await transcript.handle(event, index);
+          disconnected = true;
         } catch (error) {
-          // An aborted fetch is the operator's Ctrl-C, not a failure.
-          if (!abort.signal.aborted) throw error;
+          if (abort.signal.aborted) {
+            // The operator's Ctrl-C, not a failure.
+          } else if (isDisconnect(error)) {
+            disconnected = true;
+            console.log(`stream ended: ${describeDisconnect(error)}`);
+          } else throw error;
         }
 
-        await transcript.close(interrupted ? "aborted" : "done");
+        if (interrupted) await transcript.close("aborted");
+        else if (disconnected) await transcript.close();
+        else await transcript.close("done");
         transport?.stop();
         store.close();
         await resolved.close();
