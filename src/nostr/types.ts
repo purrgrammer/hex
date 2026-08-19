@@ -333,6 +333,8 @@ export interface SessionHeadInput {
    * somewhere is written down.
    */
   deltaRelays?: string[];
+  /** The protocol and room this run is happening in. */
+  channel?: { transport: string; id?: string };
   /** `31779:<agent>:<slug>` — what this agent is, as opposed to what it is doing. */
   definition?: string;
   alt?: string;

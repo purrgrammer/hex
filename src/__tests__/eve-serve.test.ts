@@ -276,6 +276,29 @@ describe("EveServer", () => {
     });
   }
 
+  it("says which protocol and which room the session is running in", async () => {
+    /**
+     * A transcript read later is read away from the conversation that produced
+     * it, so "where did this happen" is not answerable from context. The room's
+     * identifier is written in its own protocol's notation — a pubkey for a
+     * NIP-17 conversation — so a client can act on it rather than parse a shape
+     * invented here.
+     */
+    const eve = fakeEve();
+    const bus = transport();
+    const { impl, sent } = sink();
+    await server(eve, bus, impl).handle(inbound("m1", "how many kinds?"));
+
+    const head = sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
+    expect(tag(head, "transport")).toEqual(["transport", "nip-17"]);
+    expect(tag(head, "channel")).toEqual(["channel", PEER]);
+
+    // Unindexed on purpose: a single-letter tag would let a relay group every
+    // session an agent ever ran with one person, which is the association the
+    // gift wrap exists to withhold.
+    expect(head.tags.some((t) => t[0] === "t" || t[0] === "h")).toBe(false);
+  });
+
   it("puts a parked run's question to the room, and reads the reply as its answer", async () => {
     /**
      * Two failures in one, and the first is the one nobody sees. A run that

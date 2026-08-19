@@ -269,6 +269,24 @@ export function buildSessionHead(
       input.model.id,
       ...(input.model.provider ? [input.model.provider] : []),
     ]);
+  /**
+   * Where this run is happening, in two parts.
+   *
+   * `transport` is the protocol — a reader that knows what a NIP-29 group is
+   * can offer to open one, and a reader that does not can at least say what it
+   * cannot show. `channel` is the room within it, in that protocol's own
+   * notation: a pubkey for a NIP-17 conversation, `<relay>'<group-id>` for a
+   * NIP-29 group, exactly as NIP-29 writes a group identifier.
+   *
+   * Unindexed. A single-letter tag would let a relay group every session an
+   * agent ran in one room, which is a social graph the gift wrap exists to
+   * withhold — and no reader needs to query by it, since a reader holding the
+   * head already holds the session.
+   */
+  if (input.channel) {
+    tags.push(["transport", input.channel.transport]);
+    if (input.channel.id) tags.push(["channel", input.channel.id]);
+  }
   if (input.usage) tags.push(usageTag(input.usage));
   if (input.cost) tags.push(costTag(input.cost));
   // What the run is blocked on. Indexable would leak to a relay that a session

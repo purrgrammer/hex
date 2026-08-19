@@ -123,6 +123,22 @@ interface Boundary {
   finished: Set<string>;
 }
 
+/**
+ * The room a message arrived in, written the way its protocol writes rooms.
+ *
+ * Two `nostr:` conversations with the same person are one channel; two groups
+ * on different relays with the same id are two, which is exactly why NIP-29
+ * puts the host in the identifier.
+ */
+function channelOf(inbound: Inbound): { transport: string; id?: string } {
+  const room = inbound.room;
+  if (room.transport === "nip-29" && room.relay) {
+    const host = room.relay.replace(/^wss?:\/\//, "").replace(/\/$/, "");
+    return { transport: room.transport, id: `${host}'${room.id}` };
+  }
+  return { transport: room.transport, id: room.id };
+}
+
 /** A question a run stopped on, reduced to what a chat message needs. */
 interface Asked {
   requestId: string;
@@ -480,6 +496,15 @@ export class EveServer {
        * every reader who saw the first one would have to notice the difference.
        */
       transcript.trigger = inbound.id;
+      /**
+       * And where it is happening, in the protocol's own notation.
+       *
+       * A NIP-29 group is named `<relay-host>'<group-id>` by NIP-29 itself, so
+       * that is what goes on the wire rather than a shape invented here — a
+       * reader that wants to open the room can hand it straight to a client.
+       * A NIP-17 conversation is named by the person on the other end.
+       */
+      transcript.channel = channelOf(inbound);
       conversation = { sessionId, transcript, finished: new Set() };
       this.conversations.set(peer, conversation);
       this.options.transcript.store.rememberConversation(

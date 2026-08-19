@@ -185,6 +185,14 @@ export class EveTranscript {
   /** Tool calls seen this step, so a result can name the tool it answers. */
   private readonly calls = new Map<string, string>();
 
+  /**
+   * Where this run is happening. Set by whoever started it, once.
+   *
+   * `hex eve` following a session by id has no room at all, and says so by
+   * leaving this unset rather than by guessing at one.
+   */
+  channel?: { transport: string; id?: string };
+
   /** How full the window was when compaction was asked for, until it completes. */
   private compactingAt?: number;
 
@@ -1224,6 +1232,7 @@ export class EveTranscript {
           : undefined,
         deltaRelays:
           this.options.deltas === false ? undefined : this.options.deltaRelays,
+        channel: this.channel,
         /**
          * Whichever definition describes this run.
          *
