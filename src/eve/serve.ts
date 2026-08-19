@@ -96,10 +96,22 @@ export interface ServeOptions {
  */
 const DEFAULT_DRAIN_QUIET_MS = 1_500;
 
+/**
+ * Where a turn begins: how far the stream was read, and what had already ended.
+ *
+ * The index alone was not enough — see `follow`.
+ */
+interface Boundary {
+  last: number;
+  finished: Set<string>;
+}
+
 interface Conversation {
   /** Eve's session id for this correspondent. */
   sessionId: string;
   transcript: EveTranscript;
+  /** Turn ids known to have ended, so a replayed ending cannot end another turn. */
+  finished: Set<string>;
 }
 
 /**
@@ -183,7 +195,7 @@ export class EveServer {
      */
     const host = this.options.tools?.host(inbound);
 
-    let after: number;
+    let boundary: Boundary;
     if (!conversation) {
       const sessionId = await this.createSession(inbound.text);
       const transcript = new EveTranscript(
@@ -199,7 +211,7 @@ export class EveServer {
        * every reader who saw the first one would have to notice the difference.
        */
       transcript.trigger = inbound.id;
-      conversation = { sessionId, transcript };
+      conversation = { sessionId, transcript, finished: new Set() };
       this.conversations.set(peer, conversation);
       this.options.transcript.store.rememberConversation(
         peer,
@@ -207,23 +219,21 @@ export class EveServer {
         Math.floor(Date.now() / 1000),
       );
       this.log(`[hex] ${short(peer)} → eve session ${sessionId}`);
-      after = -1;
+      boundary = { last: -1, finished: new Set() };
       // Bound as soon as the id exists. The runtime cannot call a tool before it
       // has thought, so a round trip's head start is enough — and a call that
       // does arrive first is refused politely rather than misrouted.
       if (host) this.options.tools?.bridge.bind(sessionId, host);
     } else {
       /**
-       * Where the stream stood BEFORE the message was sent.
+       * What the stream had already said before the message went in.
        *
-       * Without this, a follow-up ended instantly with no answer. Resuming from
-       * the durable cursor replays the tail of the previous turn — including its
-       * `session.waiting` — and the follow stopped on it, because a terminal
-       * event from the turn before looks exactly like a terminal event for this
-       * one. The transcript still reads from its own cursor, so nothing published
-       * is skipped; only the answer is required to come from after the question.
+       * Both halves matter, and each closed a live failure: an index, because a
+       * resumed follow replays the previous turn's tail; and the ids of the
+       * turns already ended, because Eve replays that tail AGAIN once the new
+       * message arrives, after the index boundary and before this turn starts.
        */
-      after = await this.drain(conversation);
+      boundary = await this.drain(conversation);
       if (host) this.options.tools?.bridge.bind(conversation.sessionId, host);
       await this.sendMessage(conversation.sessionId, inbound.text);
       this.log(
@@ -231,7 +241,7 @@ export class EveServer {
       );
     }
 
-    const answer = await this.follow(conversation, inbound, after);
+    const answer = await this.follow(conversation, inbound, boundary);
     this.log(
       `[hex] ${short(peer)} ← ${sessionAddress(
         this.options.transcript.agentPubkey,
@@ -275,11 +285,14 @@ export class EveServer {
   private async follow(
     conversation: Conversation,
     inbound: Inbound,
-    /** Ignore terminal events at or below this index: they are the last turn's. */
-    after: number,
+    /** Where the pre-message read got to, and which turns had already ended. */
+    boundary: Boundary,
   ): Promise<string | undefined> {
     let answer: string | undefined;
     let failed: string | undefined;
+    const finished = new Set(boundary.finished);
+    /** The turn this message started, once it has announced itself. */
+    let ours: string | undefined;
 
     try {
       for await (const { index, event } of streamSession({
@@ -291,20 +304,46 @@ export class EveServer {
       })) {
         await conversation.transcript.handle(event, index);
 
-        if (index <= after) continue;
+        if (index <= boundary.last) continue;
 
         const data = payload(event);
+        const turnId = stringField(data, "turnId");
+
+        /**
+         * A turn ends once. Eve says so twice.
+         *
+         * Resuming a session replays the previous turn's ending — a fresh
+         * `turn.completed` and `session.waiting`, new event ids, slightly
+         * different text, arriving AFTER this message was sent and BEFORE this
+         * turn starts. No position can separate those from this turn's ending,
+         * because they genuinely come later. Only the `turnId` can, so that is
+         * what decides: a turn already known to have ended cannot end again.
+         */
+        if (turnId && finished.has(turnId)) continue;
+
+        if (event.type === "turn.started" && turnId) ours = turnId;
+
         if (event.type === "message.completed")
           answer = stringField(data, "message") ?? answer;
         if (event.type === "turn.failed" || event.type === "session.failed")
           failed = stringField(data, "message") ?? "the turn failed";
 
-        if (
-          event.type === "turn.completed" ||
-          event.type === "turn.failed" ||
-          event.type === "session.waiting"
-        )
-          break;
+        if (event.type === "turn.completed" || event.type === "turn.failed") {
+          if (turnId) finished.add(turnId);
+          // A turn ending is only OUR turn ending when it is our turn. Before
+          // this message's turn has announced itself, an ending belongs to
+          // whatever came before it.
+          if (!turnId || turnId === ours) break;
+          continue;
+        }
+
+        // `session.waiting` and `session.failed` name no turn, so they are read
+        // as this turn's only once this turn exists. A session waiting before
+        // ours began is the one it was already waiting in.
+        if (event.type === "session.waiting" || event.type === "session.failed") {
+          if (ours) break;
+          continue;
+        }
       }
     } catch (error) {
       // A dropped stream is not a failed turn, but it does mean this process
@@ -329,9 +368,17 @@ export class EveServer {
   private resume(peer: string): Conversation | undefined {
     const sessionId = this.options.transcript.store.conversationFor(peer);
     if (!sessionId) return undefined;
-    const conversation = {
+    const conversation: Conversation = {
       sessionId,
       transcript: new EveTranscript({ ...this.options.transcript }, sessionId),
+      /**
+       * Nothing is known to have ended, because this process did not watch it.
+       *
+       * The pre-message read fills this in: it passes the previous turn's ending
+       * on its way to the boundary, which is exactly where that knowledge comes
+       * from after a restart.
+       */
+      finished: new Set(),
     };
     this.conversations.set(peer, conversation);
     this.log(`[hex] ${short(peer)} → resumed eve session ${sessionId}`);
@@ -379,7 +426,7 @@ export class EveServer {
    * a resumed conversation has a tail nobody published yet, and this is the only
    * pass that will ever see it.
    */
-  private async drain(conversation: Conversation): Promise<number> {
+  private async drain(conversation: Conversation): Promise<Boundary> {
     const quiet = this.options.drainQuietMs ?? DEFAULT_DRAIN_QUIET_MS;
     const controller = new AbortController();
     const stop = () => {
@@ -389,6 +436,7 @@ export class EveServer {
     let timer = setTimeout(stop, quiet);
 
     let last = conversation.transcript.streamIndex;
+    const finished = new Set(conversation.finished);
     try {
       for await (const { index, event } of streamSession({
         host: this.options.host,
@@ -401,6 +449,10 @@ export class EveServer {
         timer = setTimeout(stop, quiet);
         await conversation.transcript.handle(event, index);
         last = index;
+        if (event.type === "turn.completed" || event.type === "turn.failed") {
+          const turnId = stringField(payload(event), "turnId");
+          if (turnId) finished.add(turnId);
+        }
       }
     } catch {
       // The abort is how this ends. Anything else that goes wrong leaves the
@@ -410,7 +462,8 @@ export class EveServer {
       clearTimeout(timer);
       this.options.signal?.removeEventListener("abort", stop);
     }
-    return last;
+    conversation.finished = finished;
+    return { last, finished };
   }
 
   private async post(

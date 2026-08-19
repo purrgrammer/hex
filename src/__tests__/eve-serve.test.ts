@@ -122,7 +122,9 @@ function fakeEve(
     const path = new URL(String(url)).pathname;
     if (init?.method === "POST") {
       posts.push({ path, body: JSON.parse(String(init.body)) });
-      stored.push(...later);
+      // Only a CONTINUE appends: creating a session with the first message is
+      // what produced the events already stored.
+      if (path !== "/eve/v1/session") stored.push(...later);
       return {
         ok: true,
         status: 200,
@@ -334,6 +336,37 @@ describe("EveServer", () => {
     // the previous turn's and must not end this one — and the host reports 6,
     // as a real one does, which is the number that used to be believed.
     const eve = fakeEve(FIRST_TURN, 6, undefined, SECOND_TURN);
+    const bus = transport();
+    const server_ = server(eve, bus, sink().impl);
+
+    await server_.handle(inbound("msg-1", "first"));
+    await server_.handle(inbound("msg-2", "second"));
+
+    expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
+  });
+
+  it("does not end a turn on the previous turn's ending, replayed", async () => {
+    /**
+     * The live failure, in the shape Eve actually produced it.
+     *
+     * Resuming a session replays the previous turn's ending: a second
+     * `turn.completed` for `turn_0` with a NEW event id, arriving after the
+     * message was sent and before this turn starts. No index separates those —
+     * they genuinely come later — so the follow ended on `turn_0`, and the
+     * person who asked got a reaction and nothing else while the agent worked on.
+     *
+     * The turn id is the only thing that tells them apart.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, [
+      // Eve says goodbye to turn_0 a second time, on the way in.
+      {
+        type: "turn.completed",
+        data: { turnId: "turn_0" },
+        meta: { id: "evt_replay_1" },
+      },
+      { type: "session.waiting", data: {}, meta: { id: "evt_replay_2" } },
+      ...SECOND_TURN,
+    ]);
     const bus = transport();
     const server_ = server(eve, bus, sink().impl);
 
