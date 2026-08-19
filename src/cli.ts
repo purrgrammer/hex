@@ -8,6 +8,7 @@
  * eve      — follow an Eve session and publish it as events.
  */
 
+import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { nip19 } from "nostr-tools";
 import { loadConfig } from "./config-file.js";
@@ -92,8 +93,23 @@ async function main(): Promise<void> {
     return;
   }
 
-  const [command, configArg] = positionals;
-  const configPath = configArg ?? "hex.config.json";
+  /**
+   * `[config]` is optional, so tell it apart from the command's own arguments.
+   *
+   * Positionally it cannot be done: `hex eve ses_01ABC` and
+   * `hex eve ./other.json` have the same shape. A config is a path — it ends in
+   * `.json`, or it exists on disk — and anything else is the command's argument.
+   * Without this, the documented `hex eve <session-id>` form failed with ENOENT
+   * on the session id.
+   */
+  const [command, ...rest] = positionals;
+  const first = rest[0];
+  const looksLikeConfig =
+    first !== undefined &&
+    (first.endsWith(".json") || first.includes("/") || existsSync(first));
+  const configPath = looksLikeConfig ? first : "hex.config.json";
+  const args = looksLikeConfig ? rest.slice(1) : rest;
+
   const loaded = await loadConfig(configPath);
   const { config } = loaded;
 
@@ -247,8 +263,8 @@ async function main(): Promise<void> {
       case "dm": {
         const dm = dmTransport(config.transports);
         if (!dm) fail("this config has no nip-17 transport");
-        const [, , who, ...rest] = positionals;
-        const text = rest.join(" ").trim();
+        const [who, ...words] = args;
+        const text = words.join(" ").trim();
         if (!who || !text) fail('usage: hex dm [config] <npub|hex> "message"');
 
         const peer = /^[0-9a-f]{64}$/i.test(who)
@@ -304,7 +320,7 @@ async function main(): Promise<void> {
         if (!host)
           fail("no Eve host — set `eve.host` in the config or pass --host");
 
-        const [, , sessionId] = positionals;
+        const [sessionId] = args;
         if (!sessionId)
           fail("usage: hex eve [config] <session-id> [--host <url>]");
 

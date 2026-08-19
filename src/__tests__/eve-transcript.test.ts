@@ -13,15 +13,28 @@ const AGENT = "9".repeat(64);
 const OPERATOR = "1".repeat(64);
 const SESSION = "ses_01KYJBZA88B4M9XN3RTC5FDGHJ";
 
-function sink() {
+function sink(options: { deliver?: () => boolean; slow?: boolean } = {}) {
   const sent: { rumor: Rumor; ephemeral: boolean }[] = [];
+  /** How many publishes are in flight at once, and the worst it ever got. */
+  let inFlight = 0;
+  let peakInFlight = 0;
   const impl: RumorSink = {
-    publishRumor: async (rumor, _recipients, options) => {
-      sent.push({ rumor, ephemeral: options?.ephemeral ?? false });
-      return { delivered: [OPERATOR], undeliverable: [] };
+    publishRumor: async (rumor, _recipients, opts) => {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      // A macrotask, not a microtask: a publish that takes a real turn of the
+      // loop is what lets a fire-and-forget caller pile up behind it.
+      if (options.slow) await new Promise((resolve) => setTimeout(resolve, 0));
+      else await Promise.resolve();
+      inFlight -= 1;
+      const delivered = options.deliver ? options.deliver() : true;
+      sent.push({ rumor, ephemeral: opts?.ephemeral ?? false });
+      return delivered
+        ? { delivered: [OPERATOR], undeliverable: [] }
+        : { delivered: [], undeliverable: [OPERATOR] };
     },
   };
-  return { impl, sent };
+  return { impl, sent, peak: () => peakInFlight };
 }
 
 const tag = (rumor: Rumor, name: string) =>
@@ -296,6 +309,82 @@ describe("EveTranscript", () => {
       .filter((s) => s.rumor.kind === 31777)
       .map((s) => JSON.stringify(s.rumor.tags));
     expect(new Set(heads).size).toBe(heads.length);
+
+    store.close();
+  });
+
+  it("leaves seq free when a turn reaches nobody, rather than a hole", async () => {
+    // Burning a number on an event that exists nowhere is the one failure that
+    // cannot be repaired: the next turn's `prev` names nothing, and every
+    // conforming reader must read the chain as broken or forged.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    let deliver = false;
+    const { impl, sent } = sink({ deliver: () => deliver });
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    for (const event of RUN.slice(0, 3)) await pub.handle(event, ++index);
+
+    // The turn was built and offered, and reached nobody.
+    expect(sent.some((s) => s.rumor.kind === 1777)).toBe(true);
+    expect(store.transcriptFor(SESSION)?.seq ?? 0).toBe(0);
+
+    // The next turn to land takes the number the failed one did not keep, so
+    // the chain stays contiguous and `prev` names an event that exists.
+    deliver = true;
+    for (const event of RUN.slice(3)) await pub.handle(event, ++index);
+    const turns = sent.filter((s) => s.rumor.kind === 1777).slice(1);
+    const seqs = turns.map(
+      (t) => t.rumor.tags.find((x) => x[0] === "seq")?.[1],
+    );
+    expect(seqs[0]).toBe("1");
+    expect(new Set(seqs).size).toBe(seqs.length);
+
+    store.close();
+  });
+
+  it("republishes a terminal head whose first attempt failed", async () => {
+    // `session.completed` then the close on the way out fingerprint identically
+    // within the same second, so suppressing before delivery threw away the one
+    // retry the shutdown path structurally has — leaving a head that says
+    // `active` forever.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    let deliver = false;
+    const { impl, sent } = sink({ deliver: () => deliver });
+    const pub = publisher(store, impl);
+
+    await pub.handle({ type: "session.started", data: {} }, 1);
+    await pub.handle({ type: "session.completed", data: {} }, 2);
+    const failed = sent.filter((s) => s.rumor.kind === 31777).length;
+
+    deliver = true;
+    await pub.close("done");
+    const heads = sent.filter((s) => s.rumor.kind === 31777);
+    expect(heads.length).toBeGreaterThan(failed);
+    expect(tag(heads.at(-1)!.rumor, "status")).toBe("done");
+
+    store.close();
+  });
+
+  it("publishes deltas one at a time however fast they arrive", async () => {
+    // The coalescer flushes synchronously on its byte threshold, so
+    // fire-and-forget put dozens of publishes in flight at once — each a seal
+    // through a signer that takes one call at a time, and its own socket.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const s = sink({ slow: true });
+    const pub = publisher(store, s.impl);
+
+    let index = 0;
+    await pub.handle({ type: "session.started", data: {} }, ++index);
+    await pub.handle({ type: "turn.started", data: { turnId: "t" } }, ++index);
+    for (let i = 0; i < 60; i++)
+      await pub.handle(
+        { type: "message.appended", data: { messageDelta: "x".repeat(200) } },
+        ++index,
+      );
+    await pub.close("done");
+
+    expect(s.peak()).toBe(1);
 
     store.close();
   });

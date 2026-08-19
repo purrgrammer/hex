@@ -19,7 +19,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 
-import { DeltaCoalescer } from "../nostr/coalesce.js";
+import { DeltaCoalescer, type CoalescedDelta } from "../nostr/coalesce.js";
 import { fitTurn } from "../nostr/blob.js";
 import {
   buildAgentDefinition,
@@ -72,6 +72,9 @@ export interface EveTranscriptOptions {
   clearTimer?: (handle: unknown) => void;
 }
 
+/** How many coalesced deltas may wait behind the one being published. */
+const MAX_QUEUED_DELTAS = 4;
+
 const sha256 = (text: string) =>
   createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -109,10 +112,36 @@ export class EveTranscript {
     };
     this.coalescer = new DeltaCoalescer({
       emit: (delta) => {
-        void this.sendDelta(delta);
+        this.queueDelta(delta);
       },
       setTimer: options.setTimer,
       clearTimer: options.clearTimer,
+    });
+  }
+
+  /**
+   * Deltas leave one at a time, and at most a few wait their turn.
+   *
+   * The coalescer flushes synchronously on its byte threshold, so a
+   * fire-and-forget send put dozens of publishes in flight at once — each one a
+   * seal through a signer that handles one call at a time, a kind-10050 lookup,
+   * and its own socket. A delta is worth nothing once it is late, so the queue is
+   * short and the overflow is DROPPED rather than buffered: everything a delta
+   * carried is repeated in the turn that closes it.
+   */
+  private deltaTail: Promise<void> = Promise.resolve();
+  private deltaQueued = 0;
+  private deltaDropped = 0;
+
+  private queueDelta(delta: CoalescedDelta): void {
+    if (this.deltaQueued >= MAX_QUEUED_DELTAS) {
+      this.deltaDropped += 1;
+      return;
+    }
+    this.deltaQueued += 1;
+    this.deltaTail = this.deltaTail.then(async () => {
+      this.deltaQueued -= 1;
+      await this.sendDelta(delta);
     });
   }
 
@@ -306,6 +335,13 @@ export class EveTranscript {
   /** Close a session this process is done with, whatever Eve last said. */
   async close(status: SessionStatus = "done"): Promise<void> {
     await this.flush("assistant");
+    // Let whatever is still queued go out before the head says the session is
+    // over — a delta arriving after `done` describes work already reported.
+    await this.deltaTail;
+    if (this.deltaDropped > 0)
+      this.log(
+        `[hex] ${this.deltaDropped} delta(s) dropped keeping up with the stream; every one is repeated in its turn`,
+      );
     await this.status(status);
   }
 
@@ -372,9 +408,29 @@ export class EveTranscript {
       { pubkey: this.options.recipients[0] ?? this.options.agentPubkey },
     );
 
-    // The cursor advances once the event exists, whether or not a relay took it:
-    // reusing a number would publish two events at one `seq`, which reads as a
-    // forgery rather than a retry.
+    /**
+     * The cursor commits only once the turn has reached somebody.
+     *
+     * Advancing first was wrong in the way that cannot be repaired: a relay down
+     * for thirty seconds burned two numbers, the next turn's `prev` named an event
+     * on no relay, and every conforming reader is required to read that as a
+     * broken or forged chain — the same permanent hole `encode.ts` cites as the
+     * reason a head and a delta take no `seq` at all.
+     *
+     * Nothing landed means the event exists nowhere, so the number is still free
+     * and reusing it forges nothing. And because the stream cursor is not
+     * persisted either, a restart re-reads the Eve event that produced this turn
+     * and publishes it again — which is the retry, without a queue to keep
+     * honest.
+     */
+    const landed = await this.send(rumor, `turn ${next}`);
+    if (!landed) {
+      this.log(
+        `[hex] transcript turn ${next} reached nobody, so seq ${next} stays free — a restart republishes it`,
+      );
+      return;
+    }
+
     this.record.seq = next;
     this.record.prev = rumor.id;
     if (extra.usage) {
@@ -384,8 +440,6 @@ export class EveTranscript {
       this.record.cacheWrite += extra.usage.cacheWrite;
     }
     this.options.store.saveTranscript(this.record);
-
-    await this.send(rumor, `turn ${next}`);
   }
 
   private async status(status: SessionStatus): Promise<void> {
@@ -441,10 +495,14 @@ export class EveTranscript {
       },
     );
 
+    // Recorded AFTER the send, not before: a terminal head whose delivery failed
+    // must not be suppressed on the one retry the shutdown path structurally has
+    // — `session.completed` then `close()` within the same second fingerprint
+    // identically, and a head that says `active` forever is a lie no reader can
+    // detect.
     const fingerprint = JSON.stringify(rumor.tags);
     if (fingerprint === this.lastHead) return;
-    this.lastHead = fingerprint;
-    await this.send(rumor, "head");
+    if (await this.send(rumor, "head")) this.lastHead = fingerprint;
   }
 
   private async sendDelta(delta: {
@@ -481,28 +539,33 @@ export class EveTranscript {
     await this.send(rumor, `delta ${delta.turn}.${delta.part}`, true);
   }
 
+  /** Send one rumor. Returns whether it reached at least one recipient. */
   private async send(
     rumor: Rumor,
     what: string,
     ephemeral = false,
-  ): Promise<void> {
-    if (this.options.recipients.length === 0) return;
+  ): Promise<boolean> {
+    if (this.options.recipients.length === 0) return false;
     try {
-      const { undeliverable } = await this.options.sink.publishRumor(
+      const { delivered, undeliverable } = await this.options.sink.publishRumor(
         rumor,
         this.options.recipients,
-        { ephemeral },
+        {
+          ephemeral,
+        },
       );
       if (undeliverable.length > 0)
         this.log(
           `[hex] transcript ${what} did not reach ${undeliverable.length} recipient(s)`,
         );
+      return delivered.length > 0;
     } catch (error) {
       this.log(
         `[hex] transcript ${what} failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      return false;
     }
   }
 }

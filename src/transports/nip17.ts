@@ -43,6 +43,14 @@ import {
 } from "../relays.js";
 import type { Inbound, Room, Transport } from "./types.js";
 
+/**
+ * How long a peer's inbox list is trusted without asking again.
+ *
+ * A kind 10050 is replaceable but effectively static; five minutes is short
+ * enough that moving your inbox takes effect within one session.
+ */
+const INBOX_TTL_MS = 5 * 60_000;
+
 /** NIP-17 kinds. */
 export const KIND_GIFT_WRAP = 1059;
 /** The same envelope a relay must not store, for a payload nobody needs twice. */
@@ -284,8 +292,28 @@ export class Nip17Transport implements Transport {
    *
    * Their kind 10050, and nothing else — not their NIP-65 relays, not Hex's.
    * A wrap delivered where they do not read is a message that was never sent.
+   *
+   * Cached, because a transcript publishes many events to one recipient and the
+   * answer barely changes: uncached, one streaming turn was up to two hundred
+   * REQs for the same replaceable event, and each could stall the publish behind
+   * it for the full request timeout if a read relay accepted and went quiet.
+   * An empty answer is NOT cached — that is the case worth asking again about.
    */
   private async inboxOf(pubkey: string): Promise<string[]> {
+    const cached = this.inboxes.get(pubkey);
+    if (cached && Date.now() - cached.at < INBOX_TTL_MS) return cached.relays;
+
+    const relays = await this.lookupInbox(pubkey);
+    if (relays.length > 0) this.inboxes.set(pubkey, { relays, at: Date.now() });
+    return relays;
+  }
+
+  private readonly inboxes = new Map<
+    string,
+    { relays: string[]; at: number }
+  >();
+
+  private async lookupInbox(pubkey: string): Promise<string[]> {
     const events = await requestEvents(
       this.options.relays,
       this.options.readRelays,
