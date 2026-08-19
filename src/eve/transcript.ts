@@ -127,6 +127,9 @@ export class EveTranscript {
   private stepReasoning?: string;
   private reasoningPublished = false;
 
+  /** Durable ids of events already handled, so a replay is not republished. */
+  private readonly seen = new Set<string>();
+
   /** Tool calls seen this step, so a result can name the tool it answers. */
   private readonly calls = new Map<string, string>();
 
@@ -222,8 +225,29 @@ export class EveTranscript {
    * an upgrade into an outage.
    */
   async handle(event: EveEnvelope, index?: number): Promise<void> {
-    const data = payload(event);
     if (index !== undefined) this.atIndex = index;
+
+    /**
+     * An event Eve has already given us is dropped, keyed on its durable id.
+     *
+     * Eve's stream replays: a real run emitted `reasoning.completed`,
+     * `message.completed` and `step.completed` for one step TWICE, under the same
+     * `evt_` ids, and the transcript published the answer twice as two turns. Eve
+     * ships `createEventDeduper` for precisely this and documents why the window
+     * is unbounded — a bounded one cannot survive a rewind past its capacity,
+     * because evicting the oldest id re-admits it and the whole replay cascades
+     * back in. A retried step is NOT a duplicate; it re-emits under new ids.
+     *
+     * Only ids are held, and only for one followed session, so the set is small
+     * next to what a turn already costs.
+     */
+    const id = event.meta?.id;
+    if (id !== undefined) {
+      if (this.seen.has(id)) return;
+      this.seen.add(id);
+    }
+
+    const data = payload(event);
 
     switch (event.type) {
       case "session.started":

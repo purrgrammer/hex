@@ -513,6 +513,48 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("drops an event Eve replays, rather than publishing it twice", async () => {
+    /**
+     * Eve's stream replays. A real run emitted `reasoning.completed`,
+     * `message.completed` and `step.completed` for one step twice under the SAME
+     * `evt_` ids, and the transcript published the answer as two turns. Eve ships
+     * `createEventDeduper` for this and keys it on the durable `meta.id`.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    const answer: EveEnvelope = {
+      type: "message.completed",
+      data: { message: "done", finishReason: "stop", stepIndex: 0 },
+      meta: { id: "evt_01ANSWER" },
+    };
+    const closed: EveEnvelope = {
+      type: "step.completed",
+      data: { finishReason: "stop", stepIndex: 0, turnId: "turn_0" },
+      meta: { id: "evt_01STEP" },
+    };
+
+    let index = 0;
+    await pub.handle(
+      { type: "session.started", data: {}, meta: { id: "evt_01START" } },
+      ++index,
+    );
+    await pub.handle(answer, ++index);
+    await pub.handle(closed, ++index);
+    // The replay: same events, same ids, at the indices they arrive on again.
+    await pub.handle(answer, index + 1);
+    await pub.handle(closed, index + 2);
+    await pub.close("done");
+
+    const answers = sent
+      .filter((s) => s.rumor.kind === 1777)
+      .filter((s) => s.rumor.content.includes("done"));
+    expect(answers).toHaveLength(1);
+
+    store.close();
+  });
+
   it("ignores an event type it has never heard of", async () => {
     const store = HexStore.open(agentHome(home, AGENT).db);
     const { impl, sent } = sink();
