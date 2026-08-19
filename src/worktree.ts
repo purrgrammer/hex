@@ -126,7 +126,18 @@ export class WorktreeManager {
     const existing = this.options.store.worktreeFor(workspace, repoName);
     // A row whose directory is gone — someone tidied up, or a disk moved — is
     // stale, not authoritative. Rebuild at the same path and branch.
-    if (existing && existsSync(existing.path)) return existing;
+    if (existing && existsSync(existing.path)) {
+      // The mirror of the refusal in `CloneManager`, and the direction that
+      // actually gets taken: flipping a toolset back to `host-worktree` is the
+      // obvious move when the container runtime breaks, and without this the host
+      // backend would run `bash -lc` inside the container's clone — where nothing
+      // fetches work back to the operator and no line says so.
+      if (existing.isolation && existing.isolation !== "host-worktree")
+        throw new Error(
+          `this conversation's ${repoName} checkout was made for ${existing.isolation} (${existing.path}) but the toolset now says host-worktree — start a new conversation, or move the work; nothing was run`,
+        );
+      return existing;
+    }
 
     const hash = worktreeName(workspace);
     const branch = `hex/${hash}`;

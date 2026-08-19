@@ -228,4 +228,28 @@ describe("parseConfig", () => {
   it("reports invalid JSON as a config error", () => {
     expect(() => parseConfigText("{ not json")).toThrow(ConfigError);
   });
+
+  it("leaves the transcript off unless it is configured", () => {
+    // An agent that starts mailing its transcripts because it was upgraded has
+    // leaked a conversation nobody asked it to send.
+    expect(parseConfig(minimal).transcript).toBeUndefined();
+  });
+
+  it("reads a transcript section, and refuses one with nobody to read it", () => {
+    const transcript = parseConfig({
+      ...minimal,
+      transcript: { to: ["a".repeat(64)] },
+    }).transcript;
+
+    expect(transcript).toEqual({
+      to: ["a".repeat(64)],
+      slug: "hex",
+      deltas: true,
+      announce: true,
+    });
+
+    expect(() =>
+      parseConfig({ ...minimal, transcript: { to: [] } }),
+    ).toThrow(/transcript\.to/);
+  });
 });

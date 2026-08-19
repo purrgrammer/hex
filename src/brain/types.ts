@@ -9,6 +9,30 @@ export interface ContextMessage {
   at: number;
 }
 
+/**
+ * Told what a turn is doing, while it does it.
+ *
+ * Deliberately in Hex's own vocabulary and not any wire format's: the brain
+ * reports thinking, calls and results, and whoever is listening decides what
+ * that means. `transcript.ts` maps it onto events; a test maps it onto nothing.
+ *
+ * No method may throw and none may block — a listener that fails must not fail
+ * the turn it is watching.
+ */
+export interface TurnObserver {
+  /** The model's prose for this step, which is not what it says to the room. */
+  thinking?(text: string): void;
+  /** A tool the model decided to call. */
+  toolCall?(call: { id: string; name: string; arguments: unknown }): void;
+  /** What that call returned. */
+  toolResult?(result: {
+    id: string;
+    name: string;
+    ok: boolean;
+    output: string;
+  }): void;
+}
+
 export interface BrainRequest {
   instructions: string;
   /** Oldest first, already bounded by `context.messages`. */
@@ -29,6 +53,8 @@ export interface BrainRequest {
    * rollback, and nothing here pretends otherwise.
    */
   signal?: AbortSignal;
+  /** Optional. A turn behaves identically whether or not anyone is watching. */
+  observer?: TurnObserver;
 }
 
 export interface TurnOutcome {

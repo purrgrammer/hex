@@ -46,6 +46,35 @@ export interface StoredSession {
 }
 
 /** A checkout one conversation works in, so a restart finds it again. */
+/**
+ * Where a published transcript stands.
+ *
+ * The cursor is the reason this table exists. A restart that resumed at `seq` 1
+ * would publish a second chain under the same session, and every reader is
+ * required to read that as a FORK — so the counter and the id it chains from
+ * have to outlive the process. `nostr_id` is the 32-byte session id on the wire,
+ * kept apart from Hex's own room-scoped session id, which is not 32 bytes and is
+ * not something to hand a relay.
+ */
+export interface StoredTranscript {
+  sessionId: string;
+  room: string;
+  nostrId: string;
+  seq: number;
+  prev?: string;
+  turn: number;
+  status: string;
+  /** The event that started this run, kept so a republished head still names it. */
+  trigger?: string;
+  startedAt: number;
+  endedAt?: number;
+  inTokens: number;
+  outTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost?: string;
+}
+
 export interface StoredWorktree {
   /** The room the checkout belongs to. See `RepoToolsOptions.workspace`. */
   workspace: string;
@@ -128,6 +157,25 @@ CREATE TABLE IF NOT EXISTS participants (
   PRIMARY KEY (session_id, pubkey)
 );
 CREATE INDEX IF NOT EXISTS participants_pubkey ON participants (pubkey);
+
+CREATE TABLE IF NOT EXISTS transcripts (
+  session_id TEXT PRIMARY KEY,
+  room       TEXT NOT NULL,
+  nostr_id   TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  prev       TEXT,
+  turn       INTEGER NOT NULL,
+  status     TEXT NOT NULL,
+  trigger    TEXT,
+  started_at INTEGER NOT NULL,
+  ended_at   INTEGER,
+  in_tokens  INTEGER NOT NULL DEFAULT 0,
+  out_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  cost       TEXT
+);
+CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 
 CREATE TABLE IF NOT EXISTS worktrees (
   workspace  TEXT NOT NULL,
@@ -229,6 +277,78 @@ export class HexStore {
         worktree.branch,
         worktree.createdAt,
         worktree.isolation ?? "host-worktree",
+      );
+  }
+
+  transcriptFor(sessionId: string): StoredTranscript | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM transcripts WHERE session_id = ?`)
+      .get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      sessionId: String(row.session_id),
+      room: String(row.room),
+      nostrId: String(row.nostr_id),
+      seq: Number(row.seq),
+      prev: row.prev == null ? undefined : String(row.prev),
+      turn: Number(row.turn),
+      status: String(row.status),
+      trigger: row.trigger == null ? undefined : String(row.trigger),
+      startedAt: Number(row.started_at),
+      endedAt: row.ended_at == null ? undefined : Number(row.ended_at),
+      inTokens: Number(row.in_tokens),
+      outTokens: Number(row.out_tokens),
+      cacheRead: Number(row.cache_read),
+      cacheWrite: Number(row.cache_write),
+      cost: row.cost == null ? undefined : String(row.cost),
+    };
+  }
+
+  /** Sessions with a head that never reached a terminal status. */
+  openTranscripts(): StoredTranscript[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT session_id FROM transcripts WHERE status NOT IN ('done', 'error', 'aborted')`,
+        )
+        .all() as { session_id: string }[]
+    )
+      .map((row) => this.transcriptFor(row.session_id))
+      .filter((t): t is StoredTranscript => !!t);
+  }
+
+  /** Write the cursor. Called after every publish, so a crash loses one event. */
+  saveTranscript(transcript: StoredTranscript): void {
+    this.db
+      .prepare(
+        `INSERT INTO transcripts (
+           session_id, room, nostr_id, seq, prev, turn, status, trigger,
+           started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
+           cost
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
+           status = excluded.status, ended_at = excluded.ended_at,
+           in_tokens = excluded.in_tokens, out_tokens = excluded.out_tokens,
+           cache_read = excluded.cache_read, cache_write = excluded.cache_write,
+           cost = excluded.cost`,
+      )
+      .run(
+        transcript.sessionId,
+        transcript.room,
+        transcript.nostrId,
+        transcript.seq,
+        transcript.prev ?? null,
+        transcript.turn,
+        transcript.status,
+        transcript.trigger ?? null,
+        transcript.startedAt,
+        transcript.endedAt ?? null,
+        transcript.inTokens,
+        transcript.outTokens,
+        transcript.cacheRead,
+        transcript.cacheWrite,
+        transcript.cost ?? null,
       );
   }
 

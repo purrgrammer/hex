@@ -146,6 +146,29 @@ export interface Nip17PeerConfig {
   toolset?: string;
 }
 
+/**
+ * Publish what Hex did, to the people named here (NIP-xx: Agent Sessions).
+ *
+ * Absent means nothing is published. Opt-in deliberately: an agent that starts
+ * mailing its transcripts because it was upgraded is one that leaked a
+ * conversation nobody asked it to send.
+ */
+export interface TranscriptConfig {
+  /** Who receives it. Hex keeps a copy in its own inbox regardless. */
+  to: string[];
+  /** The `d` tag of the agent's definition. Defaults to `hex`. */
+  slug: string;
+  /**
+   * Stream progress as it happens, on wraps a relay must not store.
+   *
+   * On by default: without it a watcher sees nothing until a turn finishes, and
+   * a turn that runs a build takes minutes.
+   */
+  deltas: boolean;
+  /** Publish the kind-31779 definition at startup. */
+  announce: boolean;
+}
+
 export type TransportConfig =
   | {
       type: "nip-29";
@@ -209,6 +232,7 @@ export interface HexConfig {
   context: { messages: number };
   limits: { repliesPerRoomPerHour: number };
   state: StateConfig;
+  transcript?: TranscriptConfig;
   repos: RepoConfig[];
   /** Named grants, by the key each was declared under. */
   toolsets: Map<string, ToolsetConfig>;
@@ -478,6 +502,24 @@ function parsePubkey(value: unknown, path: string): string {
     }
   }
   throw new ConfigError(`${path} must be an npub or a 64-character hex pubkey`);
+}
+
+function parseTranscript(value: unknown): TranscriptConfig | undefined {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, "transcript");
+
+  const to = record.to;
+  if (!Array.isArray(to) || to.length === 0)
+    throw new ConfigError(
+      "transcript.to must name at least one recipient — a transcript with nobody to read it is work for nothing",
+    );
+
+  return {
+    to: to.map((entry, index) => parsePubkey(entry, `transcript.to[${index}]`)),
+    slug: record.slug === undefined ? "hex" : requireString(record.slug, "transcript.slug"),
+    deltas: record.deltas === undefined ? true : record.deltas === true,
+    announce: record.announce === undefined ? true : record.announce === true,
+  };
 }
 
 function parseRepos(value: unknown): RepoConfig[] {
@@ -782,6 +824,7 @@ export function parseConfig(input: unknown): HexConfig {
       "context",
       "limits",
       "state",
+      "transcript",
       "repos",
       "toolsets",
       "container",
@@ -868,6 +911,7 @@ export function parseConfig(input: unknown): HexConfig {
     context,
     limits,
     state,
+    transcript: parseTranscript(raw.transcript),
     repos,
     toolsets,
     container,

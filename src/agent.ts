@@ -18,6 +18,7 @@ import { EXEC_TOOL } from "./tools/types.js";
 import type { KnowledgeTools } from "./tools/knowledge.js";
 import type { RepoTools } from "./tools/repo-tools.js";
 import type { SessionTracker } from "./sessions.js";
+import type { TranscriptPublisher } from "./transcript.js";
 
 /** What Hex reacts with while it is working on an answer. */
 export const ACK_EMOJI = "👀";
@@ -54,6 +55,14 @@ export interface AgentOptions {
     /** The room key: what a workspace is keyed by, and it outlives a session. */
     workspace: string,
   ) => { grants?: string[]; repo?: RepoTools };
+  /**
+   * Publish what happened, as events (NIP-xx).
+   *
+   * Optional and entirely one-way: a turn runs identically whether or not a
+   * transcript is being written, and a relay that will not take one is a line in
+   * the log rather than a failed answer.
+   */
+  transcript?: TranscriptPublisher;
   /** Emoji for the "working on it" reaction. Empty string disables the ack. */
   ackEmoji?: string;
   log?: (line: string) => void;
@@ -347,13 +356,40 @@ export function runAgent(options: AgentOptions): RunningAgent {
         session?.id,
       );
 
+      // The transcript opens on the session, not the turn: a follow-up an hour
+      // later is the same session and continues the same chain.
+      const transcript = options.transcript;
+      const sessionId = session?.id ?? `${where}#${inbound.id.slice(0, 16)}`;
+      if (transcript) {
+        await transcript.open(sessionId, inbound.room, inbound.text.slice(0, 80), {
+          id: inbound.id,
+        });
+        transcript.startTurn(sessionId);
+        await transcript.append(
+          sessionId,
+          "user",
+          [{ type: "text", text: inbound.text }],
+          { alt: `${inbound.author.slice(0, 8)}…: ${inbound.text.slice(0, 200)}` },
+        );
+      }
+
       const outcome = await options.brain.turn({
         instructions: options.instructions,
         history,
         incoming: inbound,
         tools,
         signal: controller.signal,
+        observer: transcript?.observer(sessionId),
       });
+
+      // Back to idle, or aborted if this turn was cut short. A failed turn does
+      // not end a session — the next message continues it — so `error` is not
+      // used here; the failure is on the turn.
+      if (transcript)
+        await transcript.status(
+          sessionId,
+          controller.signal.aborted ? "aborted" : "idle",
+        );
 
       published = tools.delivered;
       for (const id of tools.deliveredIds) {
