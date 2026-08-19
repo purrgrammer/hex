@@ -374,7 +374,17 @@ export class EveTranscript {
       case "subagent.called":
       case "subagent.started": {
         const callId = stringField(data, "callId");
-        const childSession = stringField(data, "sessionId");
+        /**
+         * `childSessionId` is what Eve calls it.
+         *
+         * This read `sessionId`, which is never there, so every subagent tag
+         * named a call and pointed at nothing — the one piece of information
+         * that makes a child transcript findable. Both spellings are read
+         * because being wrong about this is silent: a tag with an empty session
+         * looks exactly like a subagent that had not started yet.
+         */
+        const childSession =
+          stringField(data, "childSessionId") ?? stringField(data, "sessionId");
         const name = stringField(data, "subagentName");
         if (callId && (childSession || name))
           this.subagents.set(callId, {
@@ -536,6 +546,19 @@ export class EveTranscript {
 
       case "authorization.required":
         await this.status("payment-required");
+        break;
+
+      /**
+       * The sign-in resolved, whichever way it went.
+       *
+       * Without this the head stayed `payment-required` for the life of the
+       * session — a reader told to go and authorise something that was
+       * authorised ten minutes ago, and no event would ever have corrected it.
+       * The turn is still running either way; a declined one fails next and
+       * that failure is what settles the head.
+       */
+      case "authorization.completed":
+        await this.status("active");
         break;
 
       case "turn.completed":

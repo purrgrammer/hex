@@ -493,6 +493,46 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("clears awaiting-authorisation when the sign-in resolves", async () => {
+    /**
+     * `authorization.required` put the head in `payment-required` and nothing
+     * ever took it out, so a reader was told to go and authorise something that
+     * had been authorised ten minutes earlier — for the life of the session.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+    const statusOf = () => {
+      const head = sent
+        .map((s) => s.rumor)
+        .filter((r) => r.kind === 31777)
+        .at(-1)!;
+      return head.tags.find((t) => t[0] === "status")?.[1];
+    };
+
+    let index = 0;
+    await pub.handle({ type: "session.started", data: {} }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "authorization.required",
+        data: { name: "github", authorization: { url: "https://example" } },
+      },
+      ++index,
+    );
+    expect(statusOf()).toBe("payment-required");
+
+    await pub.handle(
+      { type: "authorization.completed", data: { outcome: "authorized" } },
+      ++index,
+    );
+    expect(statusOf()).toBe("active");
+    store.close();
+  });
+
   it("names the child session a subagent call started", async () => {
     // A subagent's work is a separate session — own head, own chain — so the turn
     // that spawned it can only point at it. Without the pointer the row is a dead
@@ -531,9 +571,12 @@ describe("EveTranscript", () => {
     await pub.handle(
       {
         type: "subagent.called",
+        // `childSessionId` is Eve's own name for it. The test asserted
+        // `sessionId` — the same wrong guess the code made — so both were wrong
+        // together and the suite was green.
         data: {
           callId: "call_sub",
-          sessionId: "wrun_CHILD",
+          childSessionId: "wrun_CHILD",
           subagentName: "auditor",
         },
       },
