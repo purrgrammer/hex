@@ -482,6 +482,18 @@ export class EveTranscript {
         if (this.record.saidTurn === turnId) break;
         this.record.saidTurn = turnId;
         const text = stringField(data, "message") ?? "";
+        /**
+         * The first thing asked is what this run is called.
+         *
+         * Until now the head's title was the runtime's own session id, which
+         * says nothing a person can use — a client listing twenty sessions
+         * showed twenty `wrun_…` strings and no way to tell which was which.
+         * Only the FIRST message titles the run: a later one steers the same
+         * conversation, and renaming a session mid-flight moves it under
+         * whoever is reading the list.
+         */
+        if (!this.record.title && text.trim())
+          this.record.title = summarise(text);
         await this.append("user", [{ type: "text", text }], {
           alt: text.slice(0, 200),
         });
@@ -1208,7 +1220,7 @@ export class EveTranscript {
       this.options.agentPubkey,
       this.record.nostrId,
       {
-        title: title ?? this.sessionId,
+        title: title ?? this.record.title ?? this.sessionId,
         status: this.record.status as SessionStatus,
         operator: {
           pubkey: this.options.recipients[0] ?? this.options.agentPubkey,
@@ -1340,6 +1352,22 @@ export class EveTranscript {
 }
 
 /** A run that ended is not waiting for anybody. */
+/**
+ * A message reduced to a line that can head a list.
+ *
+ * First line only, and short: a prompt can be a page, and a title that wraps is
+ * a title that pushes everything else off the row. Cut on a word boundary where
+ * there is one, because a title severed mid-word reads as corruption rather
+ * than as an abbreviation.
+ */
+function summarise(text: string, limit = 72): string {
+  const line = text.trim().split(/\r?\n/)[0]?.trim() ?? "";
+  if (line.length <= limit) return line;
+  const cut = line.slice(0, limit);
+  const space = cut.lastIndexOf(" ");
+  return `${space > limit / 2 ? cut.slice(0, space) : cut}…`;
+}
+
 function isTerminal(status: SessionStatus): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }

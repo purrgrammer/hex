@@ -276,6 +276,45 @@ describe("EveServer", () => {
     });
   }
 
+  it("names the run after what was asked, not after the runtime's id", async () => {
+    /**
+     * The head's title was the runtime session id, so a client listing twenty
+     * sessions showed twenty `wrun_…` strings and no way to tell which was
+     * which. Only the FIRST message titles a run — a later one steers the same
+     * conversation, and renaming a session mid-flight moves it under whoever is
+     * reading the list.
+     *
+     * Taken from the stream's `message.received` rather than from the inbound
+     * DM, because the stream is what the runtime actually received: a resumed
+     * or steered session is titled by the same event either way.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, [
+      { type: "turn.started", data: { turnId: "turn_1" }, meta: { id: "evt_9" } },
+      {
+        type: "message.received",
+        data: { message: "now delete it", turnId: "turn_1" },
+        meta: { id: "evt_9b" },
+      },
+      {
+        type: "turn.completed",
+        data: { turnId: "turn_1" },
+        meta: { id: "evt_11" },
+      },
+    ]);
+    const bus = transport();
+    const { impl, sent } = sink();
+    const hex = server(eve, bus, impl);
+
+    await hex.handle(inbound("m1", "how many kinds are there?"));
+    const first = sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
+    expect(tag(first, "title")).toEqual(["title", "which relays serve 30166?"]);
+
+    // A second message steers the same run. It must not rename it.
+    await hex.handle(inbound("m2", "now delete it", "m1"));
+    const later = sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
+    expect(tag(later, "title")).toEqual(["title", "which relays serve 30166?"]);
+  });
+
   it("says which protocol and which room the session is running in", async () => {
     /**
      * A transcript read later is read away from the conversation that produced
