@@ -15,6 +15,7 @@ import type { NostrEvent } from "nostr-tools";
 import type { HexConfig, ProfileConfig, RelayRoles } from "./config.js";
 import type { ISigner } from "./signer.js";
 import { publishTo, requestNewest, type HexRelays } from "./relays.js";
+import { authenticateOwn } from "./nostr/own-relay-auth.js";
 
 export interface EventTemplate {
   kind: number;
@@ -127,6 +128,8 @@ export interface AnnounceOptions {
   lookupTimeoutMs?: number;
   /** Deadline per relay for each publish. */
   publishTimeoutMs?: number;
+  /** Where to report a relay that wanted NIP-42, or refused it. */
+  log?: (line: string) => void;
 }
 
 /**
@@ -189,63 +192,82 @@ export async function announceIdentity(
   const templates = buildIdentityTemplates(config, now());
   const results: AnnounceResult[] = [];
 
-  for (const template of templates) {
-    const missing = await relaysMissing(
-      relays,
-      pubkey,
-      config.relays.publish,
-      template,
-      options.lookupTimeoutMs,
-    );
+  /**
+   * Armed before the first lookup, because an outbox relay that requires NIP-42
+   * to write answers a publish with nothing at all — `announce` reported a
+   * timeout against one, which reads as an unreachable relay rather than a
+   * locked one. Signing in as Hex here reveals nothing: every event about to go
+   * out is signed by Hex and says so.
+   */
+  const auth = authenticateOwn({
+    pool: relays.pool,
+    relays: config.relays.publish,
+    signer,
+    log: options.log,
+  });
 
-    if (missing.length === 0) {
-      results.push({ kind: template.kind, action: "unchanged" });
-      continue;
-    }
-
-    if (options.dryRun) {
-      results.push({
-        kind: template.kind,
-        action: "published",
-        detail: `dry run — would send to ${missing.join(", ")}`,
-      });
-      continue;
-    }
-
-    try {
-      const event = await signer.signEvent(template);
-      const outcomes = await publishTo(
+  try {
+    for (const template of templates) {
+      const missing = await relaysMissing(
         relays,
-        missing,
-        event as NostrEvent,
-        options.publishTimeoutMs,
+        pubkey,
+        config.relays.publish,
+        template,
+        options.lookupTimeoutMs,
       );
-      const accepted = outcomes.filter((outcome) => outcome.ok);
-      if (accepted.length === 0) {
+
+      if (missing.length === 0) {
+        results.push({ kind: template.kind, action: "unchanged" });
+        continue;
+      }
+
+      if (options.dryRun) {
         results.push({
           kind: template.kind,
-          action: "failed",
-          detail: outcomes
-            .map(
-              (outcome) => `${outcome.relay}: ${outcome.message ?? "rejected"}`,
-            )
-            .join("; "),
+          action: "published",
+          detail: `dry run — would send to ${missing.join(", ")}`,
         });
         continue;
       }
-      results.push({
-        kind: template.kind,
-        action: "published",
-        detail: `${accepted.length}/${outcomes.length} relays accepted`,
-      });
-    } catch (error) {
-      results.push({
-        kind: template.kind,
-        action: "failed",
-        detail: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
 
-  return results;
+      try {
+        const event = await signer.signEvent(template);
+        const outcomes = await publishTo(
+          relays,
+          missing,
+          event as NostrEvent,
+          options.publishTimeoutMs,
+        );
+        const accepted = outcomes.filter((outcome) => outcome.ok);
+        if (accepted.length === 0) {
+          results.push({
+            kind: template.kind,
+            action: "failed",
+            detail: outcomes
+              .map(
+                (outcome) =>
+                  `${outcome.relay}: ${outcome.message ?? "rejected"}`,
+              )
+              .join("; "),
+          });
+          continue;
+        }
+        results.push({
+          kind: template.kind,
+          action: "published",
+          detail: `${accepted.length}/${outcomes.length} relays accepted`,
+        });
+      } catch (error) {
+        results.push({
+          kind: template.kind,
+          action: "failed",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return results;
+  } finally {
+    auth.close();
+  }
 }

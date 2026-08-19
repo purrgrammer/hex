@@ -45,6 +45,13 @@ export type MockRelayBehaviour =
    */
   | { kind: "auth-to-write" }
   /**
+   * Challenge on connect, refuse every REQ until this socket has AUTHed, then
+   * serve normally. This is what an inbox relay that protects its users' mail
+   * actually does — `auth-required` above never relents, so it can prove a
+   * client copes with a wall but not that it got through one.
+   */
+  | { kind: "auth-to-read"; events?: NostrEvent[] }
+  /**
    * Refuse every REQ with a CLOSED carrying NO machine-readable prefix, and
    * accept publishes.
    *
@@ -76,7 +83,8 @@ export async function startMockRelay(
     socket.on("close", () => sockets.delete(socket));
     if (
       behaviour.kind === "auth-required" ||
-      behaviour.kind === "auth-to-write"
+      behaviour.kind === "auth-to-write" ||
+      behaviour.kind === "auth-to-read"
     )
       socket.send(JSON.stringify(["AUTH", "challenge-string"]));
     // Who this socket has authenticated as, if anyone.
@@ -95,6 +103,16 @@ export async function startMockRelay(
         if (behaviour.kind === "silent") return;
         const subscriptionId = rest[0] as string;
         if (behaviour.kind === "auth-required") {
+          socket.send(
+            JSON.stringify([
+              "CLOSED",
+              subscriptionId,
+              "auth-required: authenticate to read",
+            ]),
+          );
+          return;
+        }
+        if (behaviour.kind === "auth-to-read" && !authenticatedAs) {
           socket.send(
             JSON.stringify([
               "CLOSED",

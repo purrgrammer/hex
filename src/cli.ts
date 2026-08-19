@@ -267,7 +267,7 @@ async function main(): Promise<void> {
           resolved.signer,
           resolved.pubkey,
           config,
-          { dryRun: values["dry-run"] },
+          { dryRun: values["dry-run"], log: (line) => console.log(line) },
         );
         for (const result of results)
           console.log(

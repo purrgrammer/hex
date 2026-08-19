@@ -29,7 +29,12 @@ export interface ResolvedSigner {
 }
 
 /** Permissions a bunker must grant. Kinds Hex signs, and nothing wider. */
-export const BUNKER_SIGN_KINDS = [0, 7, 9, 9021, 10002, 10050, 1059, 13];
+export const BUNKER_SIGN_KINDS = [
+  0, 7, 9, 9021, 10002, 10050, 1059, 13,
+  // NIP-42. A relay that requires authentication to serve Hex its own mailbox
+  // gets nothing signed without this, and the inbox silently stays empty.
+  22242,
+];
 
 /** How long to wait for a remote signer to answer the connect. */
 export const BUNKER_CONNECT_TIMEOUT_MS = 30_000;

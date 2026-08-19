@@ -35,6 +35,7 @@ import { PrivateKeySigner } from "applesauce-signers";
 import { finalizeEvent, generateSecretKey } from "nostr-tools/pure";
 import { encrypt as nip44Encrypt, getConversationKey } from "nostr-tools/nip44";
 import type { ISigner } from "../signer.js";
+import { authenticateOwn } from "../nostr/own-relay-auth.js";
 import {
   publishTo,
   requestEvents,
@@ -161,6 +162,7 @@ export class Nip17Transport implements Transport {
 
   private readonly inbox = new Subject<Inbound>();
   private subscription?: { unsubscribe(): void };
+  private inboxAuth?: { close(): void };
   /** Wraps already opened. Decrypting costs a signer round trip. */
   private readonly seen = new Set<string>();
   private readonly ownRumorIds = new Set<string>();
@@ -299,6 +301,19 @@ export class Nip17Transport implements Transport {
   }
 
   start(): Observable<Inbound> {
+    /**
+     * Before the REQ, not after: an inbox relay that requires NIP-42 to read
+     * answers an unauthenticated subscription with nothing at all — no EVENT,
+     * no EOSE, no CLOSED — so a subscription opened first would simply hang and
+     * look like a quiet mailbox.
+     */
+    this.inboxAuth = authenticateOwn({
+      pool: this.options.relays.pool,
+      relays: this.options.inboxRelays,
+      signer: this.options.signer,
+      log: (line) => this.log(line),
+    });
+
     const filter = {
       kinds: [KIND_GIFT_WRAP],
       "#p": [this.options.pubkey],
@@ -720,6 +735,7 @@ export class Nip17Transport implements Transport {
 
   stop(): void {
     this.subscription?.unsubscribe();
+    this.inboxAuth?.close();
     this.inbox.complete();
   }
 }
