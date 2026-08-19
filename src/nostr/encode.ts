@@ -11,6 +11,7 @@ import { getEventHash } from "nostr-tools";
 import {
   KIND_AGENT_DEFINITION,
   KIND_DELTA,
+  KIND_SESSION_CONTROL,
   KIND_SESSION_HEAD,
   KIND_TURN,
 } from "./kinds.js";
@@ -22,6 +23,7 @@ import type {
   Cost,
   DeltaInput,
   Rumor,
+  SessionControlInput,
   SessionHeadInput,
   SessionRef,
   UnsignedRumor,
@@ -192,6 +194,43 @@ export function buildDelta(
     created_at: now(input.createdAt),
     tags,
     content: input.delta === "heartbeat" ? "" : input.text,
+  });
+}
+
+// ── Session control ─────────────────────────────────────────────────────────
+
+/**
+ * An instruction to a running session, authored by its operator.
+ *
+ * The `a` tag is the session it acts on and the `p` tag is the agent that must
+ * act — both, because the agent finds it by `p` and files it by `a`. Authorship
+ * is the whole security story: a reader MUST check this event's author against
+ * the `operator` on the session's own head before honouring a word of it.
+ */
+export function buildSessionControl(
+  operatorPubkey: string,
+  session: SessionRef,
+  input: SessionControlInput,
+): Rumor {
+  const tags: string[][] = [
+    sessionTag(session),
+    ["p", session.agent],
+    ["command", input.command],
+  ];
+
+  if (input.request) tags.push(["request", input.request]);
+  if (input.turn) tags.push(["turn", input.turn]);
+  if (input.option) tags.push(["option", input.option]);
+  tags.push(["alt", input.alt ?? `Session control: ${input.command}`]);
+
+  return stamp({
+    kind: KIND_SESSION_CONTROL,
+    pubkey: operatorPubkey,
+    created_at: now(input.createdAt),
+    tags,
+    // Free text belongs in content rather than a tag: a steer is a message, and
+    // a message is the one thing this family always puts in content.
+    content: input.text ?? "",
   });
 }
 

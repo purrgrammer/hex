@@ -458,6 +458,58 @@ describe("EveServer", () => {
     expect(out.sent.some((rumor) => rumor.kind === 1777)).toBe(true);
   });
 
+  it("carries each control verb to the route that serves it", async () => {
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.handle(inbound("msg-1", "first"));
+    const before = eve.posts.length;
+
+    const base = { id: "", operator: PEER, agent: AGENT, session: eve.session };
+    await server_.control({ ...base, id: "c1", command: "respond", request: "req_1", option: "approve" });
+    await server_.control({ ...base, id: "c2", command: "steer", text: "do the other thing" });
+    await server_.control({ ...base, id: "c3", command: "cancel", turn: "turn_0" });
+    await server_.control({ ...base, id: "c4", command: "compact" });
+    await server_.control({ ...base, id: "c5", command: "clear" });
+
+    const sent = eve.posts.slice(before);
+    expect(sent.map((post) => post.path)).toEqual([
+      `/eve/v1/session/${eve.session}`,
+      `/eve/v1/session/${eve.session}`,
+      `/eve/v1/session/${eve.session}/cancel`,
+      `/eve/v1/session/${eve.session}/compact`,
+      `/eve/v1/session/${eve.session}/clear`,
+    ]);
+    // A response resolves the request it names and never steers; a message
+    // steers and resolves nothing. Sending the wrong one is the whole bug this
+    // shape exists to prevent.
+    expect(sent[0]!.body).toEqual({
+      inputResponses: [{ requestId: "req_1", optionId: "approve" }],
+    });
+    expect(sent[1]!.body).toEqual({ message: "do the other thing" });
+    expect(sent[2]!.body).toEqual({ turnId: "turn_0" });
+  });
+
+  it("obeys a redelivered command once", async () => {
+    // Four relays hand over the same wrap four times. A `cancel` obeyed twice
+    // stops a turn that had nothing to do with it.
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.handle(inbound("msg-1", "first"));
+    const before = eve.posts.length;
+
+    const twice = {
+      id: "c1",
+      operator: PEER,
+      agent: AGENT,
+      session: eve.session,
+      command: "cancel" as const,
+    };
+    await server_.control(twice);
+    await server_.control(twice);
+
+    expect(eve.posts.slice(before)).toHaveLength(1);
+  });
+
   it("picks up the conversation a previous process was having", async () => {
     /**
      * Seen live: `serve` restarted, the peer-to-session map was in memory, and the

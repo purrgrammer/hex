@@ -34,6 +34,7 @@ import { payload, stringField } from "./types.js";
 import { sessionAddress } from "../nostr/encode.js";
 import type { ToolBridge } from "./bridge.js";
 import type { ToolHost } from "../tools/types.js";
+import type { SessionControl } from "../nostr/decode-control.js";
 import type { Inbound } from "../transports/types.js";
 
 /** What this needs of a transport: answer a message, and acknowledge one. */
@@ -131,6 +132,15 @@ export class EveServer {
    */
   private readonly queues = new Map<string, Promise<void>>();
 
+  /**
+   * Control events already carried out, bounded and FIFO.
+   *
+   * Four relays hand over the same wrap four times, and every one of these does
+   * something. Obeying a `cancel` twice stops a turn that had nothing to do with
+   * it.
+   */
+  private readonly obeyed = seenOnce(500);
+
   constructor(private readonly options: ServeOptions) {}
 
   private log(line: string): void {
@@ -200,6 +210,83 @@ export class EveServer {
           `[hex] could not catch up ${record.sessionId}: ${message(error)}`,
         );
       }
+    }
+  }
+
+  /**
+   * Carry out an instruction from the operator.
+   *
+   * Every verb is a route Eve already exposes; nothing here invents a capability.
+   * The two that matter are `respond` and `steer`, and their difference is the
+   * reason this exists at all: a structured response resolves the request it
+   * names and never steers, while a plain message steers — cancelling the
+   * running turn — and does not resolve anything. With several requests open the
+   * runtime refuses to guess which one a bare message addresses, so an answer has
+   * to carry its own id, which is exactly what a chat reply cannot do.
+   *
+   * Already-obeyed commands are dropped rather than repeated: four relays deliver
+   * the same wrap four times, and a `cancel` obeyed twice stops a turn that had
+   * nothing to do with it.
+   */
+  async control(control: SessionControl): Promise<void> {
+    if (!this.obeyed.admit(control.id)) return;
+
+    const path = `/eve/v1/session/${encodeURIComponent(control.session)}`;
+    const say = (what: string) =>
+      this.log(`[hex] ${short(control.operator)} → ${what}`);
+
+    try {
+      switch (control.command) {
+        case "respond": {
+          if (!control.request) {
+            this.log("[hex] a respond with no request id names nothing to answer");
+            return;
+          }
+          await this.post(path, {
+            inputResponses: [
+              {
+                requestId: control.request,
+                ...(control.option ? { optionId: control.option } : {}),
+                ...(control.text ? { text: control.text } : {}),
+              },
+            ],
+          });
+          say(`answered ${control.request}`);
+          break;
+        }
+
+        case "steer": {
+          if (!control.text) {
+            this.log("[hex] a steer with no message would say nothing");
+            return;
+          }
+          await this.post(path, { message: control.text });
+          say("steered the run");
+          break;
+        }
+
+        case "cancel":
+          await this.post(`${path}/cancel`,
+            control.turn ? { turnId: control.turn } : {});
+          say("stopped the run");
+          break;
+
+        case "compact":
+          await this.post(`${path}/compact`, {});
+          say("compacted the context");
+          break;
+
+        case "clear":
+          await this.post(`${path}/clear`, {});
+          say("cleared the context");
+          break;
+      }
+    } catch (error) {
+      // Said out loud rather than thrown: one refused instruction must not take
+      // down the reader that would carry the next one.
+      this.log(
+        `[hex] could not ${control.command} ${short(control.session)}: ${message(error)}`,
+      );
     }
   }
 
@@ -600,3 +687,21 @@ export class EveServer {
 const short = (pubkey: string) => `${pubkey.slice(0, 8)}…`;
 const message = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
+
+/** A bounded memory of ids, oldest forgotten first. */
+function seenOnce(limit: number) {
+  const ids = new Set<string>();
+  const order: string[] = [];
+  return {
+    admit(id: string): boolean {
+      if (ids.has(id)) return false;
+      ids.add(id);
+      order.push(id);
+      if (order.length > limit) {
+        const oldest = order.shift();
+        if (oldest) ids.delete(oldest);
+      }
+      return true;
+    },
+  };
+}

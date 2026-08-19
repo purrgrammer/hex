@@ -25,6 +25,7 @@ import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 import { EveServer } from "./eve/serve.js";
 import { ToolBridge } from "./eve/bridge.js";
+import { parseSessionControl } from "./nostr/decode-control.js";
 import { Prices } from "./eve/pricing.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
 import { RoomTools } from "./tools/room-tools.js";
@@ -573,6 +574,27 @@ async function main(): Promise<void> {
           readRelays: config.relays.read,
           allow: dm.allow.map((peer) => peer.pubkey),
           since: startedAt,
+          /**
+           * Instructions from the operator, on the same wraps as the messages.
+           *
+           * Not gated by the reply gate: a control event is not a question and
+           * costs no model turn, so `before-start` and the rate limit — which
+           * exist to stop a backlog spending money — would only make a stop
+           * button unreliable. What it IS gated by is authorship, in
+           * `parseSessionControl`.
+           */
+          onRumor: (rumor) => {
+            const read = parseSessionControl(rumor as never, {
+              agent: resolved.pubkey,
+              operator: transcriptConfig.to[0] ?? resolved.pubkey,
+            });
+            if (!read) return;
+            if ("refused" in read) {
+              console.log(`[hex] control ignored: ${read.refused}`);
+              return;
+            }
+            void server.control(read.control);
+          },
           log: (line) => console.log(line),
         });
 

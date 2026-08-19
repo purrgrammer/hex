@@ -64,12 +64,31 @@ export const KIND_DM_RELAYS = 10050;
 /** How many of a conversation's wraps to read at startup. */
 const BACKFILL_LIMIT = 200;
 
+/** A rumor that opened and verified, whatever kind it turned out to be. */
+export interface OpenedRumor {
+  id: string;
+  kind: number;
+  pubkey: string;
+  created_at: number;
+  tags: string[][];
+  content: string;
+}
+
 export interface Nip17TransportOptions {
   relays: HexRelays;
   signer: ISigner;
   pubkey: string;
   /** Hex's own inbox — the same relays its kind 10050 announces. */
   inboxRelays: string[];
+  /**
+   * Every non-chat rumor this inbox opens.
+   *
+   * Optional, because a transport with nobody listening for them simply drops
+   * them as it always did. The rumor's author has been proven by the seal before
+   * this fires; whether it is AUTHORISED is the listener's question, not this
+   * one's.
+   */
+  onRumor?: (rumor: OpenedRumor) => void;
   /**
    * Where an ephemeral wrap goes besides the recipient's own inbox.
    *
@@ -232,7 +251,19 @@ export class Nip17Transport implements Transport {
       return null;
     }
 
-    if (rumor.kind !== KIND_PRIVATE_MESSAGE) return null;
+    /**
+     * Not a chat message, but somebody's rumor all the same.
+     *
+     * A private inbox carries more than conversation — a session control event
+     * rides the same wrap to the same key — and this is the one place that has
+     * already opened the wrap and checked the seal. Handing it on here rather
+     * than opening a second subscription means one socket, one dedupe and one
+     * authorship check for everything that arrives.
+     */
+    if (rumor.kind !== KIND_PRIVATE_MESSAGE) {
+      this.options.onRumor?.(rumor as unknown as OpenedRumor);
+      return null;
+    }
     /**
      * Hex's own copy of what it sent, delivered back by its own inbox.
      *

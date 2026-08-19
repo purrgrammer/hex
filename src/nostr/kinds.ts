@@ -31,6 +31,21 @@ export const KIND_TURN = 1777;
 export const KIND_DELTA = 21777;
 
 /**
+ * Session Control — regular, authored by the OPERATOR rather than the agent.
+ *
+ * The only kind here that makes an agent act rather than describing what it did,
+ * which is why its authorisation is a decode-time rule and not a call site: a
+ * control event is honoured only from the pubkey the session's own head names as
+ * `operator`.
+ *
+ * One kind carrying a `command` tag rather than a kind per verb, for the same
+ * reason a turn carries `role` rather than one kind per role. The usual argument
+ * for splitting — that a relay can filter on kind — buys nothing here: the
+ * channel is wrapped, so no relay can see any of it, and the verb set grows.
+ */
+export const KIND_SESSION_CONTROL = 1779;
+
+/**
  * 1778 is deliberately unused. It held a "milestone" — a coarse stored progress
  * line — until it turned out to restate what the turn beside it already said.
  * What it alone could carry moved onto the head's `status`. Burned rather than
@@ -43,6 +58,7 @@ export const AGENT_SESSION_KINDS = [
   KIND_SESSION_HEAD,
   KIND_TURN,
   KIND_DELTA,
+  KIND_SESSION_CONTROL,
 ] as const;
 
 /**
@@ -59,6 +75,7 @@ export const STORED_AGENT_KINDS = [
   KIND_AGENT_DEFINITION,
   KIND_SESSION_HEAD,
   KIND_TURN,
+  KIND_SESSION_CONTROL,
 ] as const;
 
 export function isAgentSessionKind(kind: number): boolean {

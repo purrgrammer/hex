@@ -265,6 +265,41 @@ export interface DeltaInput {
   createdAt?: number;
 }
 
+/**
+ * What an operator can tell a running session to do.
+ *
+ * Every verb maps onto something the runtime already exposes; nothing here
+ * invents a capability. There is deliberately no `pause`: a run parks only
+ * because something asked for input, and a verb that cannot be honoured is worse
+ * than one that does not exist.
+ */
+export type SessionCommand =
+  | "respond"
+  | "steer"
+  | "cancel"
+  | "compact"
+  | "clear";
+
+export interface SessionControlInput {
+  command: SessionCommand;
+  /**
+   * What this acts on, so a redelivered command cannot act twice.
+   *
+   * `respond` names the request it answers — the runtime refuses to guess when
+   * several are open. `cancel` MAY name the turn it stops; without one it stops
+   * whatever is running, which is only safe because a command whose target has
+   * already settled is ignored.
+   */
+  request?: string;
+  turn?: string;
+  /** The chosen option's id, for a `respond` to a question with options. */
+  option?: string;
+  /** Free text: the answer for `respond`, the message for `steer`. */
+  text?: string;
+  alt?: string;
+  createdAt?: number;
+}
+
 export interface SessionHeadInput {
   title: string;
   status: SessionStatus;
