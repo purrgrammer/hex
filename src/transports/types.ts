@@ -47,8 +47,18 @@ export interface Transport {
   readonly name: TransportName;
   /** One stream for every room this transport serves. */
   start(): Observable<Inbound>;
-  /** Bounded newest-first history, for context. */
-  history(room: Room, limit: number): Promise<Inbound[]>;
+  /**
+   * Bounded history, oldest last, for context.
+   *
+   * `includeOwn` keeps the transport's own past messages, which the live stream
+   * always drops. A thread without the agent's own replies in it is half a
+   * conversation, and the half that is missing is the half it wrote.
+   */
+  history(
+    room: Room,
+    limit: number,
+    options?: { includeOwn?: boolean },
+  ): Promise<Inbound[]>;
   /**
    * One message by id, for walking a thread back past what is in memory.
    *

@@ -17,6 +17,7 @@ import { nip19 } from "nostr-tools";
 import {
   canonicalId,
   filterTools,
+  HISTORY_TOOL,
   REACT_TOOL,
   RESPOND_TOOL,
   WHO_TOOL,
@@ -36,6 +37,7 @@ import {
  */
 export type RoomToolsTransport = Pick<Transport, "reply"> & {
   react?: Transport["react"];
+  history?: Transport["history"];
 };
 
 export interface RoomToolsOptions {
@@ -46,6 +48,13 @@ export interface RoomToolsOptions {
   log?: (line: string) => void;
   /** Cap on deliveries in one turn, so a confused model cannot flood a room. */
   maxResponses?: number;
+  /**
+   * Hex's own pubkey, so history can say which half it wrote.
+   *
+   * Optional: a host built without it still reads the thread, and simply does
+   * not label the sides.
+   */
+  selfPubkey?: string;
   /**
    * The read tools — NIPs, kinds, REQs, bech32.
    *
@@ -78,6 +87,13 @@ export interface RoomToolsOptions {
  * refusal and stop rather than retry.
  */
 const DEFAULT_MAX_RESPONSES = 1;
+
+/** How far back the conversation is read when the model names no number. */
+const DEFAULT_HISTORY = 20;
+/** Hard bound: the result is fed back as JSON and has to fit in a context. */
+const MAX_HISTORY = 100;
+/** Per message, so one essay cannot crowd out the shape of the exchange. */
+const MAX_HISTORY_CHARS = 1_000;
 
 /** The one detail worth keeping per call, for the cancel notice. */
 function describeCall(args: Record<string, unknown>): string | undefined {
@@ -180,6 +196,33 @@ export class RoomTools implements ToolHost {
         " a pubkey, and never answer about \"my posts\" from an unfiltered query.",
     });
 
+    // Only when the transport can actually read back. A protocol with no
+    // history simply does not offer one, rather than offering an empty list a
+    // model would read as "nothing was said".
+    if (this.options.transport.history)
+      specs.push({
+        name: HISTORY_TOOL,
+        description:
+          "What was said in this conversation before now, oldest first, " +
+          "including your own past replies. Read it before answering anything " +
+          "that refers to earlier — you are given one message, not the thread.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: `How many messages back. Defaults to ${DEFAULT_HISTORY}, hard bound ${MAX_HISTORY}.`,
+            },
+          },
+          additionalProperties: false,
+        },
+        prompt:
+          "`chat.history` is the conversation so far, your own replies" +
+          " included. Anything that refers to earlier — \"as I said\", \"that" +
+          " one\", a pronoun with no antecedent — is a reason to read it rather" +
+          " than to guess.",
+      });
+
     // Whatever else the runtime can do, offered alongside speaking — and only
     // what this channel was granted. Speaking itself is never filtered.
     const optional: ToolSpec[] = [];
@@ -223,6 +266,8 @@ export class RoomTools implements ToolHost {
         return this.react(call.arguments);
       case WHO_TOOL:
         return this.who();
+      case HISTORY_TOOL:
+        return this.history(call.arguments);
       default:
         // Named back, because a model that guessed a tool name can correct itself.
         return {
@@ -310,6 +355,57 @@ export class RoomTools implements ToolHost {
         note: "Resolve the npub for their profile; use the hex pubkey as an author in a filter.",
       }),
     };
+  }
+
+  /**
+   * The conversation so far, oldest first.
+   *
+   * Trimmed per message rather than truncated as a whole: a reader needs the
+   * SHAPE of the exchange more than it needs every word of one long message, and
+   * dropping the recent end to fit an old essay is the opposite of useful.
+   */
+  private async history(args: Record<string, unknown>): Promise<ToolResult> {
+    const read = this.options.transport.history;
+    if (!read)
+      return { ok: false, output: "this room cannot be read back" };
+
+    const asked =
+      typeof args.limit === "number" && args.limit > 0
+        ? Math.floor(args.limit)
+        : DEFAULT_HISTORY;
+    const limit = Math.min(asked, MAX_HISTORY);
+
+    try {
+      const messages = await read(this.room, limit, { includeOwn: true });
+      return {
+        ok: true,
+        output: JSON.stringify({
+          count: messages.length,
+          messages: messages.map((message) => ({
+            id: message.id,
+            author: message.author,
+            // Said plainly, so the model does not have to compare pubkeys to
+            // work out which half of the conversation it wrote.
+            mine:
+              this.options.selfPubkey !== undefined &&
+              message.author === this.options.selfPubkey,
+            at: message.createdAt,
+            text:
+              message.text.length > MAX_HISTORY_CHARS
+                ? `${message.text.slice(0, MAX_HISTORY_CHARS)}…[truncated]`
+                : message.text,
+            ...(message.replyToId ? { replyTo: message.replyToId } : {}),
+          })),
+        }),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        output: `could not read the conversation: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
   }
 
   private async react(args: Record<string, unknown>): Promise<ToolResult> {

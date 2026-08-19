@@ -3,7 +3,12 @@ import type { NostrEvent } from "nostr-tools";
 import { RoomTools } from "../tools/room-tools.js";
 import { nip19 } from "nostr-tools";
 
-import { REACT_TOOL, RESPOND_TOOL, WHO_TOOL } from "../tools/types.js";
+import {
+  HISTORY_TOOL,
+  REACT_TOOL,
+  RESPOND_TOOL,
+  WHO_TOOL,
+} from "../tools/types.js";
 import type { Inbound, Room, Transport } from "../transports/types.js";
 
 const ROOM: Room = {
@@ -12,6 +17,7 @@ const ROOM: Room = {
   relay: "wss://g.example/",
 };
 const AUTHOR = "b".repeat(64);
+const SELF = "c".repeat(64);
 
 const INBOUND: Inbound = {
   id: "event-1",
@@ -60,6 +66,7 @@ describe("RoomTools.list", () => {
       RESPOND_TOOL,
       REACT_TOOL,
       WHO_TOOL,
+      HISTORY_TOOL,
     ]);
 
     // A protocol without reactions simply does not advertise one.
@@ -70,7 +77,49 @@ describe("RoomTools.list", () => {
     expect(withoutReact.list().map((spec) => spec.name)).toEqual([
       RESPOND_TOOL,
       WHO_TOOL,
+      HISTORY_TOOL,
     ]);
+  });
+
+  it("reads the thread with both halves in it", async () => {
+    /**
+     * A runtime is handed one message, so anything that refers to earlier is
+     * either repeated or invented. And a thread without the agent's own replies
+     * is half a conversation — the half that is missing being the half it wrote.
+     */
+    const past = [
+      { ...INBOUND, id: "m1", text: "what is kind 30023" },
+      { ...INBOUND, id: "m2", author: SELF, text: "a long-form article" },
+      { ...INBOUND, id: "m3", text: "and its d tag?" },
+    ];
+    const tools = new RoomTools({
+      transport: { ...transport(), history: async () => past },
+      incoming: INBOUND,
+      selfPubkey: SELF,
+    });
+
+    expect(tools.list().map((spec) => spec.name)).toContain(HISTORY_TOOL);
+
+    const result = await tools.call({ name: "chat_history", arguments: {} });
+    const read = JSON.parse(result.output) as {
+      count: number;
+      messages: { id: string; mine: boolean; text: string }[];
+    };
+
+    expect(read.count).toBe(3);
+    // Which half it wrote, said plainly rather than left to a pubkey comparison.
+    expect(read.messages.map((m) => m.mine)).toEqual([false, true, false]);
+    expect(read.messages[0]!.text).toBe("what is kind 30023");
+  });
+
+  it("does not offer history a transport cannot provide", () => {
+    // An empty list would read as "nothing was said", which is a different and
+    // much worse answer than "this room cannot be read back".
+    const tools = new RoomTools({
+      transport: { reply: async () => "reply-id" },
+      incoming: INBOUND,
+    });
+    expect(tools.list().map((spec) => spec.name)).not.toContain(HISTORY_TOOL);
   });
 
   it("names the correspondent from the message, not from the model", async () => {

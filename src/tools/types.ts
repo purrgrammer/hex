@@ -64,6 +64,14 @@ export const REACT_TOOL = "chat.react";
  * into a person.
  */
 export const WHO_TOOL = "chat.who";
+/**
+ * What was said before now.
+ *
+ * A runtime is handed one message. Everything the pair agreed three messages ago
+ * is context it does not have and cannot ask for — so it either repeats itself
+ * or invents what it was told.
+ */
+export const HISTORY_TOOL = "chat.history";
 /** NIPs, kinds — grimoire's own documentation, fetched rather than recalled. */
 export const HELP_TOOL = "grimoire.help";
 /** A REQ against relays. Read-only. */
@@ -81,6 +89,7 @@ export const KNOWN_TOOLS: readonly string[] = [
   RESPOND_TOOL,
   REACT_TOOL,
   WHO_TOOL,
+  HISTORY_TOOL,
   HELP_TOOL,
   REQ_TOOL,
   RESOLVE_TOOL,

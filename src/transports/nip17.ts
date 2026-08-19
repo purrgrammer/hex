@@ -207,9 +207,23 @@ export class Nip17Transport implements Transport {
    * — including a wrap that will not open, which is normal: an inbox holds wraps
    * for keys Hex does not have.
    */
-  private async toInbound(wrap: NostrEvent): Promise<Inbound | null> {
-    if (this.seen.has(wrap.id)) return null;
-    this.seen.add(wrap.id);
+  private async toInbound(
+    wrap: NostrEvent,
+    options: { dedupe?: boolean; includeOwn?: boolean } = {},
+  ): Promise<Inbound | null> {
+    /**
+     * The dedupe belongs to the LIVE stream, not to reading history.
+     *
+     * Four relays hand over the same wrap four times and only one of them is a
+     * message, so the stream remembers what it has opened. History borrowed that
+     * memory and was therefore destructive: every wrap the stream had already
+     * seen came back null, so a second read of a conversation returned the
+     * handful of messages that arrived while nobody was watching.
+     */
+    if (options.dedupe !== false) {
+      if (this.seen.has(wrap.id)) return null;
+      this.seen.add(wrap.id);
+    }
 
     let rumor: Rumor;
     try {
@@ -219,8 +233,15 @@ export class Nip17Transport implements Transport {
     }
 
     if (rumor.kind !== KIND_PRIVATE_MESSAGE) return null;
-    // Hex's own copy of what it sent, delivered back by its own inbox.
-    if (rumor.pubkey === this.options.pubkey) return null;
+    /**
+     * Hex's own copy of what it sent, delivered back by its own inbox.
+     *
+     * Dropped on the stream — answering yourself is how a bot talks to itself
+     * forever — and KEPT when reading history, because half a conversation is
+     * not a conversation. What the agent said last time is most of the context
+     * for what it is being asked now.
+     */
+    if (rumor.pubkey === this.options.pubkey && !options.includeOwn) return null;
 
     if (!this.allows(rumor.pubkey)) {
       this.log(
@@ -278,7 +299,11 @@ export class Nip17Transport implements Transport {
    * wrap says nothing about who is inside it — the sender is only known once it
    * is decrypted.
    */
-  async history(room: Room, limit: number): Promise<Inbound[]> {
+  async history(
+    room: Room,
+    limit: number,
+    options: { includeOwn?: boolean } = {},
+  ): Promise<Inbound[]> {
     const wraps = await requestEvents(
       this.options.relays,
       this.options.inboxRelays,
@@ -295,7 +320,14 @@ export class Nip17Transport implements Transport {
     // page of history with it. A rejection here is one message missing from a
     // backfill, not an empty backfill.
     const opened = (
-      await Promise.allSettled(wraps.map((wrap) => this.toInbound(wrap)))
+      await Promise.allSettled(
+        wraps.map((wrap) =>
+          this.toInbound(wrap, {
+            dedupe: false,
+            includeOwn: options.includeOwn,
+          }),
+        ),
+      )
     ).map((result) => (result.status === "fulfilled" ? result.value : null));
     return opened
       .filter((inbound): inbound is Inbound => inbound !== null)
