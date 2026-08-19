@@ -96,6 +96,9 @@ describe("the environment inside", () => {
       "GIT_AUTHOR_NAME",
       "GIT_COMMITTER_EMAIL",
       "GIT_COMMITTER_NAME",
+      "GIT_CONFIG_COUNT",
+      "GIT_CONFIG_KEY_0",
+      "GIT_CONFIG_VALUE_0",
       "HOME",
       "LANG",
       "TERM",
@@ -105,6 +108,14 @@ describe("the environment inside", () => {
   it("carries no name that could hold a secret", () => {
     for (const entry of envs(args()))
       expect(entry).not.toMatch(/NSEC|API_KEY|SECRET|TOKEN|PASSWORD/i);
+  });
+
+  it("tells git the checkout is safe, or every git command refuses", () => {
+    // The mount root arrives root-owned while its contents are the host uid, so
+    // git calls it dubious ownership and refuses to read the repository at all.
+    const entries = envs(args());
+    expect(entries).toContain("GIT_CONFIG_KEY_0=safe.directory");
+    expect(entries).toContain(`GIT_CONFIG_VALUE_0=${WORK_DIR}`);
   });
 
   it("gives git an identity, or every task fails on its last step", () => {

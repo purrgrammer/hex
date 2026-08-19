@@ -123,6 +123,17 @@ export function buildRunArgs(
     "GIT_COMMITTER_NAME=Hex",
     "-e",
     "GIT_COMMITTER_EMAIL=hex@localhost",
+    // The mount's root arrives owned by root even when its contents are the
+    // host uid, so git calls the checkout dubiously owned and refuses EVERY
+    // command in it — which is most of a coding task. Passed as config through
+    // the environment rather than written into the mounted home, so nothing has
+    // to be seeded on disk for git to work.
+    "-e",
+    "GIT_CONFIG_COUNT=1",
+    "-e",
+    "GIT_CONFIG_KEY_0=safe.directory",
+    "-e",
+    `GIT_CONFIG_VALUE_0=${WORK_DIR}`,
     config.image,
     "bash",
     "-lc",
@@ -137,8 +148,35 @@ export function containerName(id: string): string {
 
 export class ContainerBackend implements ExecBackend {
   readonly isolation: Isolation = "container";
+  /** Workspaces whose mount has been shown to arrive. Checked once each. */
+  private readonly mountChecked = new Set<string>();
 
   constructor(private readonly options: ContainerBackendOptions) {}
+
+  /**
+   * Prove the checkout actually arrived inside the container.
+   *
+   * A bind mount of a path the runtime cannot share does not fail — it silently
+   * presents an EMPTY directory. Every command then runs in nothing, and the
+   * model is told "fatal: not a git repository" about a checkout that is sitting
+   * on disk perfectly intact. On macOS this is real and easy to hit: Docker
+   * Desktop does not propagate the per-user `/var/folders/…/T` that `tmpdir()`
+   * returns, so the whole conversation silently does nothing.
+   *
+   * Checked once per workspace, and turned into an error that names the cause.
+   */
+  private async checkMount(request: ExecRequest, work: string): Promise<void> {
+    if (this.mountChecked.has(request.id)) return;
+    const probe = await this.run(
+      { ...request, command: "test -e /work/.git && echo mounted" },
+      { skipMountCheck: true },
+    );
+    if (!probe.output.includes("mounted"))
+      throw new Error(
+        `the checkout at ${work} is not visible inside the container — the runtime cannot share that path. Move the agent's home somewhere it can (a directory under $HOME), or add the path to the runtime's file sharing.`,
+      );
+    this.mountChecked.add(request.id);
+  }
 
   /**
    * Refuse to start rather than fall back.
@@ -170,12 +208,20 @@ export class ContainerBackend implements ExecBackend {
     }
   }
 
-  async run(request: ExecRequest): Promise<CommandResult> {
+  async run(
+    request: ExecRequest,
+    options: { skipMountCheck?: boolean } = {},
+  ): Promise<CommandResult> {
     const { config } = this.options;
-    const name = containerName(request.id);
+    const work = this.options.mountFor(request);
+    if (!options.skipMountCheck) await this.checkMount(request, work);
+
+    const name = containerName(
+      options.skipMountCheck ? `${request.id}-probe` : request.id,
+    );
     const args = buildRunArgs(config, {
       name,
-      work: this.options.mountFor(request),
+      work,
       home: this.options.homeFor(request),
       agent: this.options.agent,
       workspace: request.id,
