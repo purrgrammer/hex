@@ -87,6 +87,39 @@ export interface ToolResultPart {
   truncated?: Truncation;
 }
 
+/**
+ * A question the run is blocked on, in the transcript that asked it.
+ *
+ * The history of being asked belongs in a turn; whether it is still open belongs
+ * on the head, which names the open ids. Carried in full — prompt, options and
+ * the tool it acts on — because a reader that cannot see the options cannot
+ * answer, and a reader that cannot answer watches a session stay stuck.
+ */
+export interface InputRequestPart {
+  type: "input_request";
+  requestId: string;
+  prompt: string;
+  /** `tool-approval` | `question` | `session-limit`, per the runtime. */
+  requestKind?: string;
+  /** `confirmation` | `select` | `text` — how the asker meant it to look. */
+  display?: string;
+  /** Whether an answer may be typed rather than chosen. */
+  allowFreeform?: boolean;
+  options?: { id: string; label: string; description?: string; style?: string }[];
+  /** The tool call being approved, when that is what this is. */
+  tool?: { name: string; callId?: string };
+}
+
+/** What became of it, so a transcript read later is not left hanging. */
+export interface InputResolvedPart {
+  type: "input_resolved";
+  requestId: string;
+  /** `answered` | `approved` | `denied` | `ignored` | `invalid`. */
+  outcome: string;
+  /** What was chosen or typed, when the runtime reports it. */
+  response?: { optionId?: string; text?: string };
+}
+
 export interface ImagePart {
   type: "image";
   url: string;
@@ -96,7 +129,13 @@ export interface ImagePart {
 
 /** The part types this revision defines. */
 export type ContentPart =
-  TextPart | ReasoningPart | ToolCallPart | ToolResultPart | ImagePart;
+  | TextPart
+  | ReasoningPart
+  | ToolCallPart
+  | ToolResultPart
+  | InputRequestPart
+  | InputResolvedPart
+  | ImagePart;
 
 /** A part whose `type` this build does not know. */
 export interface UnknownPart {
@@ -118,6 +157,8 @@ const KNOWN_PART_TYPES: ReadonlySet<string> = new Set([
   "reasoning",
   "tool_call",
   "tool_result",
+  "input_request",
+  "input_resolved",
   "image",
 ]);
 
@@ -241,6 +282,13 @@ export interface SessionHeadInput {
   model?: { id: string; provider?: string };
   usage?: Usage;
   cost?: Cost;
+  /**
+   * Requests the run is blocked on, by id, newest state of affairs.
+   *
+   * On the head rather than only in a turn because "is this session waiting for
+   * me" is current state, and a turn is history. Empty means nothing is open.
+   */
+  pending?: string[];
   /**
    * Relays this session's ephemeral deltas are published to.
    *

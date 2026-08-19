@@ -26,6 +26,8 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
+import { TERMINAL_STATUSES } from "./nostr/types.js";
+
 /**
  * Where a published transcript stands.
  *
@@ -55,6 +57,14 @@ export interface StoredTranscript {
   cacheRead: number;
   cacheWrite: number;
   cost?: string;
+  /**
+   * Requests the runtime is blocked on, by id.
+   *
+   * Durable because a blocked session outlives the process watching it: held in
+   * memory, a restart caught the session up, saw the turn epilogue, and
+   * republished a run that is waiting on a person as finished.
+   */
+  pending?: string[];
   /**
    * The running total includes a figure nobody billed.
    *
@@ -121,7 +131,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
   out_tokens  INTEGER NOT NULL DEFAULT 0,
   cache_read  INTEGER NOT NULL DEFAULT 0,
   cache_write INTEGER NOT NULL DEFAULT 0,
-  cost        TEXT
+  cost        TEXT,
+  pending     TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 
@@ -148,6 +159,19 @@ export class HexStore {
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec("PRAGMA foreign_keys = ON");
     db.exec(SCHEMA);
+    /**
+     * A column added after homes existed in the wild.
+     *
+     * `CREATE TABLE IF NOT EXISTS` leaves an older table exactly as it was, so a
+     * new column has to be added to it explicitly. Checked rather than attempted
+     * and swallowed: an error nobody reads is how a schema silently diverges.
+     */
+    const columns = (
+      db.prepare(`PRAGMA table_info(transcripts)`).all() as { name: string }[]
+    ).map((column) => column.name);
+    if (!columns.includes("pending"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN pending TEXT`);
+
     return new HexStore(db);
   }
 
@@ -203,6 +227,7 @@ export class HexStore {
       cacheRead: Number(row.cache_read),
       cacheWrite: Number(row.cache_write),
       cost: row.cost == null ? undefined : String(row.cost),
+      pending: parsePending(row.pending),
     };
   }
 
@@ -211,9 +236,12 @@ export class HexStore {
     return (
       this.db
         .prepare(
-          `SELECT session_id FROM transcripts WHERE status NOT IN ('done', 'error', 'aborted')`,
+          // The one list of terminal statuses, not a fourth copy of it.
+          `SELECT session_id FROM transcripts WHERE status NOT IN (${TERMINAL_STATUSES.map(
+            () => "?",
+          ).join(", ")})`,
         )
-        .all() as { session_id: string }[]
+        .all(...TERMINAL_STATUSES) as { session_id: string }[]
     )
       .map((row) => this.transcriptFor(row.session_id))
       .filter((t): t is StoredTranscript => !!t);
@@ -226,15 +254,15 @@ export class HexStore {
         `INSERT INTO transcripts (
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
-           cost
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           cost, pending
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
            status = excluded.status, trigger = excluded.trigger,
            stream_index = excluded.stream_index, ended_at = excluded.ended_at,
            in_tokens = excluded.in_tokens, out_tokens = excluded.out_tokens,
            cache_read = excluded.cache_read, cache_write = excluded.cache_write,
-           cost = excluded.cost`,
+           cost = excluded.cost, pending = excluded.pending`,
       )
       .run(
         transcript.sessionId,
@@ -252,6 +280,27 @@ export class HexStore {
         transcript.cacheRead,
         transcript.cacheWrite,
         transcript.cost ?? null,
+        transcript.pending?.length ? JSON.stringify(transcript.pending) : null,
       );
+  }
+}
+
+/**
+ * The pending list, defensively.
+ *
+ * A column added later is null on every row written before it, and a hand-edited
+ * database is a database. Anything that will not parse into a list of strings is
+ * read as "nothing pending" — which errs towards a session that looks finished
+ * rather than one that is stuck asking a question nobody can see.
+ */
+function parsePending(value: unknown): string[] | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return undefined;
+    const ids = parsed.filter((id): id is string => typeof id === "string");
+    return ids.length ? ids : undefined;
+  } catch {
+    return undefined;
   }
 }

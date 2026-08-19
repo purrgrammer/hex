@@ -37,7 +37,7 @@ import type {
   TurnRole,
   Usage,
 } from "../nostr/types.js";
-import { isKnownPart } from "../nostr/types.js";
+import { isKnownPart, TERMINAL_STATUSES } from "../nostr/types.js";
 import type { Prices } from "./pricing.js";
 import type { HexStore, StoredTranscript } from "../store.js";
 import {
@@ -170,6 +170,15 @@ export class EveTranscript {
   /** Durable ids of events already handled, so a replay is not republished. */
   private readonly seen = new Set<string>();
 
+  /**
+   * Requests the run is blocked on.
+   *
+   * Seeded from the stored record, because a blocked session outlives the
+   * process watching it: held only in memory, a restart caught the session up,
+   * read the turn epilogue, and republished a run waiting on a person as done.
+   */
+  private readonly openRequests: Set<string>;
+
   /** Tool calls seen this step, so a result can name the tool it answers. */
   private readonly calls = new Map<string, string>();
 
@@ -195,6 +204,7 @@ export class EveTranscript {
       cacheWrite: 0,
     };
     this.savedIndex = this.record.streamIndex;
+    this.openRequests = new Set(this.record.pending ?? []);
     this.coalescer = new DeltaCoalescer({
       emit: (delta) => {
         this.queueDelta(delta);
@@ -534,14 +544,128 @@ export class EveTranscript {
         break;
       }
 
-      case "input.requested":
-        // The run is blocked on a human, which is a state the head can hold and
-        // a turn cannot: there is no message to attach it to yet.
+      /**
+       * The run is blocked on a person, and says what it is blocked on.
+       *
+       * Both halves matter. The QUESTION goes in a turn, because being asked is
+       * something that happened and history is what turns are for. Which
+       * questions are still OPEN goes on the head, because that is current state
+       * — and because the epilogue that follows a parked turn is byte-identical
+       * to the one that follows a finished turn, so nothing else can tell a
+       * reader that this session is waiting rather than done.
+       */
+      case "input.requested": {
+        const requests = Array.isArray(data.requests) ? data.requests : [];
+        const parts: TurnPart[] = [];
+        for (const raw of requests) {
+          const request = asRecord(raw);
+          const requestId = request && stringField(request, "requestId");
+          if (!request || !requestId) continue;
+          this.openRequests.add(requestId);
+          const action = asRecord(request.action);
+          parts.push({
+            type: "input_request",
+            requestId,
+            prompt: stringField(request, "prompt") ?? "",
+            requestKind: stringField(request, "kind"),
+            display: stringField(request, "display"),
+            allowFreeform: request.allowFreeform === true,
+            options: optionsOf(request.options),
+            tool: action
+              ? {
+                  name: stringField(action, "toolName") ?? "",
+                  callId: stringField(action, "callId"),
+                }
+              : undefined,
+          });
+        }
+        if (parts.length > 0)
+          await this.append("assistant", parts, {
+            alt: `Waiting on you: ${
+              parts[0] && "prompt" in parts[0]
+                ? String(parts[0].prompt)
+                : "a question"
+            }`,
+          });
         await this.status("awaiting-input");
         break;
+      }
 
-      case "input.resolved":
+      case "input.resolved": {
+        const resolutions = Array.isArray(data.resolutions)
+          ? data.resolutions
+          : [];
+        const parts: TurnPart[] = [];
+        for (const raw of resolutions) {
+          const resolution = asRecord(raw);
+          const requestId = resolution && stringField(resolution, "requestId");
+          if (!resolution || !requestId) continue;
+          this.openRequests.delete(requestId);
+          const response = asRecord(resolution.response);
+          parts.push({
+            type: "input_resolved",
+            requestId,
+            outcome: stringField(resolution, "outcome") ?? "answered",
+            response: response
+              ? {
+                  optionId: stringField(response, "optionId"),
+                  text: stringField(response, "text"),
+                }
+              : undefined,
+          });
+        }
+        if (parts.length > 0)
+          await this.append("user", parts, { alt: "Answered." });
         await this.status("active");
+        break;
+      }
+
+      /**
+       * A structured result, which is the turn's actual answer when a schema
+       * asked for one. Carried as text because the transcript's parts are prose
+       * and JSON, and a reader that wants the object parses it back.
+       */
+      case "result.completed": {
+        const result = data.result;
+        if (result !== undefined)
+          this.pending.push({
+            type: "text",
+            text: typeof result === "string" ? result : JSON.stringify(result),
+          });
+        break;
+      }
+
+      /**
+       * A subagent finished. Correlated by `callId`, because the event carries
+       * no child session id — and recorded rather than dropped so a reader can
+       * see that a delegated piece of work came back at all.
+       */
+      case "subagent.completed": {
+        const callId = stringField(data, "callId");
+        const output = stringField(data, "output");
+        if (callId && output)
+          this.pending.push({
+            type: "tool_result",
+            id: callId,
+            name: stringField(data, "subagentName") ?? "agent",
+            ok: true,
+            output,
+          });
+        break;
+      }
+
+      /**
+       * The context was summarised out from under the run.
+       *
+       * Not a status — the session is neither blocked nor finished — but a
+       * reader of a long transcript otherwise cannot tell why the agent stopped
+       * remembering something it was told.
+       */
+      case "compaction.completed":
+        this.pending.push({
+          type: "text",
+          text: "[the conversation so far was summarised to fit the context window]",
+        });
         break;
 
       case "authorization.required":
@@ -772,10 +896,27 @@ export class EveTranscript {
   }
 
   private async status(status: SessionStatus): Promise<void> {
-    const terminal =
-      status === "done" || status === "error" || status === "aborted";
-    this.record.status = status;
+    /**
+     * An open question outranks the epilogue that follows it.
+     *
+     * Eve parks a request with `input.requested`, then emits `turn.completed`
+     * and `session.waiting` — the same pair a finished turn emits, with the same
+     * payload. Taking the last event at its word wrote `idle` over
+     * `awaiting-input` milliseconds after it was set, and published a session
+     * waiting on its operator as done. Only the open-request set knows better,
+     * so it decides, and a terminal status still wins: a run that ended cannot
+     * be waiting for anybody.
+     */
+    const asked =
+      this.openRequests.size > 0 && !isTerminal(status)
+        ? "awaiting-input"
+        : status;
+    const terminal = isTerminal(asked);
+    this.record.status = asked;
     this.record.endedAt = terminal ? Math.floor(Date.now() / 1000) : undefined;
+    this.record.pending = this.openRequests.size
+      ? [...this.openRequests]
+      : undefined;
     await this.head();
   }
 
@@ -815,6 +956,7 @@ export class EveTranscript {
         started: this.record.startedAt,
         ended: this.record.endedAt,
         model: this.model,
+        pending: this.record.pending,
         usage,
         cost: this.record.cost
           ? {
@@ -919,4 +1061,33 @@ export class EveTranscript {
       return false;
     }
   }
+}
+
+/** A run that ended is not waiting for anybody. */
+function isTerminal(status: SessionStatus): boolean {
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** The choices offered, keeping only what a reader can actually render. */
+function optionsOf(
+  value: unknown,
+): { id: string; label: string; description?: string; style?: string }[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const options = value
+    .map((raw) => asRecord(raw))
+    .filter((option): option is Record<string, unknown> => !!option)
+    .map((option) => ({
+      id: stringField(option, "id") ?? "",
+      label: stringField(option, "label") ?? "",
+      description: stringField(option, "description"),
+      style: stringField(option, "style"),
+    }))
+    .filter((option) => option.id);
+  return options.length ? options : undefined;
 }

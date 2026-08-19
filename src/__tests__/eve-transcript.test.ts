@@ -493,6 +493,103 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("stays awaiting-input when the turn epilogue says otherwise", async () => {
+    /**
+     * The load-bearing one.
+     *
+     * Eve parks a question with `input.requested`, then emits `turn.completed`
+     * and `session.waiting` — and `session.waiting` is byte-identical whether a
+     * turn finished or is blocked on a human. So `awaiting-input` lived for one
+     * event and `idle` was written over it milliseconds later: a session waiting
+     * on the operator, published as done, with the question never published at
+     * all.
+     *
+     * The head's status is derived from the open requests, not from whichever
+     * event arrived last.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+    const statusOf = () =>
+      sent
+        .map((s) => s.rumor)
+        .filter((r) => r.kind === 31777)
+        .at(-1)!
+        .tags.find((t) => t[0] === "status")?.[1];
+
+    let index = 0;
+    await pub.handle({ type: "session.started", data: {} }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "input.requested",
+        data: {
+          turnId: "turn_0",
+          requests: [
+            {
+              requestId: "req_1",
+              kind: "tool-approval",
+              display: "confirmation",
+              allowFreeform: false,
+              prompt: "Approve tool call: bash",
+              options: [
+                { id: "approve", label: "Approve" },
+                { id: "cancel", label: "Cancel" },
+              ],
+              action: { kind: "tool-call", callId: "call_1", toolName: "bash", input: {} },
+            },
+          ],
+        },
+      },
+      ++index,
+    );
+    expect(statusOf()).toBe("awaiting-input");
+
+    // Eve's own epilogue for a parked turn. It used to end the session.
+    await pub.handle(
+      { type: "turn.completed", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle({ type: "session.waiting", data: {} }, ++index);
+    expect(statusOf()).toBe("awaiting-input");
+
+    // The head names what is open, so a reader knows what to answer.
+    const head = sent.map((s) => s.rumor).filter((r) => r.kind === 31777).at(-1)!;
+    expect(head.tags.filter((t) => t[0] === "input").map((t) => t[1])).toEqual([
+      "req_1",
+    ]);
+
+    // And the question itself is in the transcript, with its options.
+    const asked = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 1777)
+      .flatMap((r) => JSON.parse(r.content) as { type: string }[])
+      .find((part) => part.type === "input_request") as
+      | { prompt: string; options: { id: string }[] }
+      | undefined;
+    expect(asked?.prompt).toBe("Approve tool call: bash");
+    expect(asked?.options.map((o) => o.id)).toEqual(["approve", "cancel"]);
+
+    // Answered, and the run is live again.
+    await pub.handle(
+      {
+        type: "input.resolved",
+        data: {
+          turnId: "turn_0",
+          resolutions: [
+            { requestId: "req_1", kind: "tool-approval", outcome: "approved" },
+          ],
+        },
+      },
+      ++index,
+    );
+    expect(statusOf()).toBe("active");
+    store.close();
+  });
+
   it("clears awaiting-authorisation when the sign-in resolves", async () => {
     /**
      * `authorization.required` put the head in `payment-required` and nothing

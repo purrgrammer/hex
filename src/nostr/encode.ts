@@ -232,6 +232,10 @@ export function buildSessionHead(
     ]);
   if (input.usage) tags.push(usageTag(input.usage));
   if (input.cost) tags.push(costTag(input.cost));
+  // What the run is blocked on. Indexable would leak to a relay that a session
+  // is stuck and when, which the wrap exists to hide; unindexed is enough,
+  // because a reader holding the head already holds the session.
+  for (const requestId of input.pending ?? []) tags.push(["input", requestId]);
   for (const url of input.deltaRelays ?? []) tags.push(["delta-relay", url]);
   if (input.definition) tags.push(["agent", input.definition]);
   if (input.alt) tags.push(["alt", input.alt]);
