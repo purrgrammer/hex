@@ -25,6 +25,7 @@ import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 import { EveServer } from "./eve/serve.js";
 import { ToolBridge } from "./eve/bridge.js";
+import { Prices } from "./eve/pricing.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
 import { RoomTools } from "./tools/room-tools.js";
 import { ReplyGate } from "./policy.js";
@@ -159,6 +160,26 @@ async function main(): Promise<void> {
     console.log(`env     ${env.path} (${env.applied.join(", ")})`);
 
   const relays = createRelays();
+
+  /**
+   * A price list, so a provider that reports no cost still gets one.
+   *
+   * Built here because two commands publish transcripts. Loaded lazily by the
+   * first estimate and refreshed on its own schedule; a failure is a log line
+   * and a blank cost, never a stalled transcript.
+   */
+  const pricingConfig = config.eve?.pricing;
+  const prices = pricingConfig
+    ? new Prices({
+        url: pricingConfig.url,
+        token: pricingConfig.tokenEnv
+          ? process.env[pricingConfig.tokenEnv]
+          : undefined,
+        log: (line) => console.log(line),
+      })
+    : undefined;
+  // Warm it now so the first step of the first turn is already priced.
+  if (prices) void prices.load();
 
   try {
     switch (command) {
@@ -331,6 +352,9 @@ async function main(): Promise<void> {
           signer: resolved.signer,
           pubkey: resolved.pubkey,
           inboxRelays: config.relays.dm,
+          // Live progress needs somewhere both sides can reach: a DM inbox relay
+          // may refuse kind 21059, and the head says where it went instead.
+          relayHints: config.relays.dm,
           readRelays: config.relays.read,
           allow: dm.allow.map((allowed) => allowed.pubkey),
           since: Math.floor(Date.now() / 1000),
@@ -413,6 +437,9 @@ async function main(): Promise<void> {
             signer: resolved.signer,
             pubkey: resolved.pubkey,
             inboxRelays: config.relays.dm,
+          // Live progress needs somewhere both sides can reach: a DM inbox relay
+          // may refuse kind 21059, and the head says where it went instead.
+          relayHints: config.relays.dm,
             readRelays: config.relays.read,
             allow: dm.allow.map((peer) => peer.pubkey),
             since: Math.floor(Date.now() / 1000),
@@ -429,6 +456,8 @@ async function main(): Promise<void> {
             store,
             sink,
             deltas: transcriptConfig.deltas,
+            deltaRelays: config.relays.dm,
+            prices,
             log: (line) => console.log(line),
           },
           sessionId,
@@ -537,6 +566,9 @@ async function main(): Promise<void> {
           signer: resolved.signer,
           pubkey: resolved.pubkey,
           inboxRelays: config.relays.dm,
+          // Live progress needs somewhere both sides can reach: a DM inbox relay
+          // may refuse kind 21059, and the head says where it went instead.
+          relayHints: config.relays.dm,
           readRelays: config.relays.read,
           allow: dm.allow.map((peer) => peer.pubkey),
           since: startedAt,
@@ -596,6 +628,8 @@ async function main(): Promise<void> {
             store,
             sink: transport,
             deltas: transcriptConfig.deltas,
+            deltaRelays: config.relays.dm,
+            prices,
             log: (line) => console.log(line),
           },
         });

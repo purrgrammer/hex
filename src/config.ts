@@ -93,6 +93,13 @@ export interface EveConfig {
    * rather than written here, like every other secret in this config.
    */
   bridge?: { port: number; tokenEnv: string };
+  /**
+   * An OpenAI-shaped `/models` endpoint, for costing a provider that reports none.
+   *
+   * No default URL: a guessed price list is a made-up number with a currency on
+   * it. What it produces is published marked `estimated`.
+   */
+  pricing?: { url: string; tokenEnv?: string };
 }
 
 export type TransportConfig =
@@ -345,7 +352,29 @@ function parseEve(value: unknown): EveConfig | undefined {
   } catch {
     throw new ConfigError(`eve.host must be a URL, not "${host}"`);
   }
-  return { host, bridge: parseBridge(record.bridge) };
+  return {
+    host,
+    bridge: parseBridge(record.bridge),
+    pricing: parsePricing(record.pricing),
+  };
+}
+
+function parsePricing(value: unknown): EveConfig["pricing"] {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, "eve.pricing");
+  const url = requireString(record.url, "eve.pricing.url");
+  try {
+    new URL(url);
+  } catch {
+    throw new ConfigError(`eve.pricing.url must be a URL, not "${url}"`);
+  }
+  return {
+    url,
+    tokenEnv:
+      record.tokenEnv === undefined
+        ? undefined
+        : requireString(record.tokenEnv, "eve.pricing.tokenEnv"),
+  };
 }
 
 function parseBridge(value: unknown): EveConfig["bridge"] {

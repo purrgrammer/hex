@@ -38,6 +38,7 @@ import type {
   Usage,
 } from "../nostr/types.js";
 import { isKnownPart } from "../nostr/types.js";
+import type { Prices } from "./pricing.js";
 import type { HexStore, StoredTranscript } from "../store.js";
 import {
   outputText,
@@ -69,6 +70,20 @@ export interface EveTranscriptOptions {
   sink: RumorSink;
   /** Off means nothing streams; the turns still arrive when they close. */
   deltas?: boolean;
+  /**
+   * A price list, for a provider that reports no cost.
+   *
+   * Optional, and its absence is the old behaviour: usage published with a blank
+   * where the money goes. What it produces is marked `estimated` on the wire.
+   */
+  prices?: Prices;
+  /**
+   * Where deltas land besides the reader's own inbox, named on the head.
+   *
+   * A reader cannot guess this and must not have to: kind 21059 is exactly what
+   * a DM inbox relay is entitled to refuse, and the ones in a real 10050 do.
+   */
+  deltaRelays?: string[];
   /** Overrides what the stream says. For a runtime that does not name one. */
   model?: { id: string; provider?: string };
   log?: (line: string) => void;
@@ -453,10 +468,23 @@ export class EveTranscript {
 
       case "step.completed": {
         const usage = usageFor(data.usage);
-        const cost =
+        const reported =
           data.usage && typeof data.usage === "object"
             ? (data.usage as { costUsd?: number }).costUsd
             : undefined;
+        /**
+         * A billed figure when there is one, arithmetic when there is not.
+         *
+         * PPQ and plenty of others report token counts and no cost at all, which
+         * left every transcript published through them carrying usage and a blank
+         * where the money goes — the one number a reader auditing spend actually
+         * wants. The estimate is marked as one on the wire.
+         */
+        const estimate =
+          reported === undefined && usage
+            ? this.options.prices?.estimate(this.model?.id, usage)
+            : undefined;
+        const cost = reported;
         /**
          * A step's cost goes on the step, and the session's is the SUM.
          *
@@ -469,18 +497,24 @@ export class EveTranscript {
          * parsing it back to add is exact at six decimal places for any bill a
          * session can run up.
          */
-        if (cost !== undefined) {
-          this.record.cost = (Number(this.record.cost ?? "0") + cost).toFixed(
+        const spent = cost ?? (estimate ? Number(estimate.amount) : undefined);
+        if (spent !== undefined) {
+          this.record.cost = (Number(this.record.cost ?? "0") + spent).toFixed(
             6,
           );
+          // Once any step was estimated the total is, and the head must not
+          // present a mixed sum as a bill.
+          if (cost === undefined) this.record.costEstimated = true;
         }
         await this.flush("assistant", {
           stop: stopFor(stringField(data, "finishReason")),
           usage,
           cost:
-            cost === undefined
-              ? undefined
-              : { amount: cost.toFixed(6), currency: "USD" },
+            cost !== undefined
+              ? { amount: cost.toFixed(6), currency: "USD" }
+              : estimate
+                ? { ...estimate, estimated: true }
+                : undefined,
         });
         break;
       }
@@ -755,8 +789,14 @@ export class EveTranscript {
         model: this.model,
         usage,
         cost: this.record.cost
-          ? { amount: this.record.cost, currency: "USD" }
+          ? {
+              amount: this.record.cost,
+              currency: "USD",
+              estimated: this.record.costEstimated || undefined,
+            }
           : undefined,
+        deltaRelays:
+          this.options.deltas === false ? undefined : this.options.deltaRelays,
         definition: `31779:${this.options.agentPubkey}:${this.options.slug}`,
         alt: `Agent session: ${title ?? this.sessionId} (${this.record.status}, ${this.record.seq} turns)`,
       },

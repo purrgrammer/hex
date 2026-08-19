@@ -149,6 +149,16 @@ export interface Usage {
 export interface Cost {
   amount: string;
   currency: string;
+  /**
+   * Worked out from token counts and a price list, not billed by the provider.
+   *
+   * Plenty of providers report no cost at all, and a transcript with usage and a
+   * blank where the money goes is no use to anyone auditing spend. So it is
+   * computed — and marked, because a figure presented as a bill when it is
+   * arithmetic is worse than no figure. It cannot see cache discounts,
+   * surcharges or promotions.
+   */
+  estimated?: boolean;
 }
 
 // ── Session addressing ───────────────────────────────────────────────────────
@@ -231,6 +241,15 @@ export interface SessionHeadInput {
   model?: { id: string; provider?: string };
   usage?: Usage;
   cost?: Cost;
+  /**
+   * Relays this session's ephemeral deltas are published to.
+   *
+   * A reader cannot guess them. Deltas ride kind 21059, which a DM inbox relay
+   * is perfectly entitled to refuse — and the ones in a real 10050 do — so live
+   * progress goes somewhere both sides can reach, and the head is where that
+   * somewhere is written down.
+   */
+  deltaRelays?: string[];
   /** `31779:<agent>:<slug>` — what this agent is, as opposed to what it is doing. */
   definition?: string;
   alt?: string;

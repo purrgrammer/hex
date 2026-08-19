@@ -55,6 +55,14 @@ export interface StoredTranscript {
   cacheRead: number;
   cacheWrite: number;
   cost?: string;
+  /**
+   * The running total includes a figure nobody billed.
+   *
+   * Not persisted: a restart resumes a session whose earlier steps it did not
+   * price, and the honest reading of a mixed total is that it is an estimate —
+   * which is what the next step will mark it as anyway.
+   */
+  costEstimated?: boolean;
 }
 
 export interface AgentHome {

@@ -88,7 +88,11 @@ function usageTag(usage: Usage): string[] {
 }
 
 function costTag(cost: Cost): string[] {
-  return ["cost", cost.amount, cost.currency];
+  // A fourth element, so a reader that only looks at [1] and [2] is unaffected
+  // and one that cares can tell a bill from arithmetic.
+  return cost.estimated
+    ? ["cost", cost.amount, cost.currency, "estimated"]
+    : ["cost", cost.amount, cost.currency];
 }
 
 function sessionTag(session: SessionRef): string[] {
@@ -228,6 +232,7 @@ export function buildSessionHead(
     ]);
   if (input.usage) tags.push(usageTag(input.usage));
   if (input.cost) tags.push(costTag(input.cost));
+  for (const url of input.deltaRelays ?? []) tags.push(["delta-relay", url]);
   if (input.definition) tags.push(["agent", input.definition]);
   if (input.alt) tags.push(["alt", input.alt]);
 

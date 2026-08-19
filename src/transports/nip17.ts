@@ -70,6 +70,14 @@ export interface Nip17TransportOptions {
   pubkey: string;
   /** Hex's own inbox — the same relays its kind 10050 announces. */
   inboxRelays: string[];
+  /**
+   * Where an ephemeral wrap goes besides the recipient's own inbox.
+   *
+   * The agent's own DM relays: somewhere both sides can be expected to reach,
+   * for traffic no inbox relay is obliged to accept. Advertised on the session
+   * head, so a reader knows to listen there.
+   */
+  relayHints?: string[];
   /** Where to look up a peer's kind 10050. */
   readRelays: string[];
   /**
@@ -609,7 +617,22 @@ export class Nip17Transport implements Transport {
         continue;
       }
       const wrap = await this.wrapFor(recipient, rumor, ephemeral);
-      if (await this.publishUnattributed(wrap, inbox))
+      /**
+       * An ephemeral wrap goes wider than the recipient's inbox.
+       *
+       * A DM inbox relay very reasonably refuses anything but kind 1059 — two of
+       * three in one real 10050 answered a delta with "only kind 1059 is
+       * accepted" and the third wanted NIP-42 and timed out. So live progress had
+       * nowhere at all to land, and the reader watched a status that never moved
+       * while the run went perfectly.
+       *
+       * Widening costs nothing and leaks nothing: a wrap is signed by a throwaway
+       * key, its payload is worthless within seconds, and everything it carried is
+       * repeated in the turn that closes it. A stored wrap stays where the
+       * recipient asked for it, because that one is their mail.
+       */
+      const where = ephemeral ? union(inbox, this.options.relayHints) : inbox;
+      if (await this.publishUnattributed(wrap, where))
         delivered.push(recipient);
       else undeliverable.push(recipient);
     }
@@ -636,4 +659,17 @@ export class Nip17Transport implements Transport {
     this.subscription?.unsubscribe();
     this.inbox.complete();
   }
+}
+
+/** Both lists, in order, without repeats. */
+function union(first: string[], second: string[] = []): string[] {
+  const seen = new Set<string>();
+  const all: string[] = [];
+  for (const url of [...first, ...second]) {
+    const key = url.replace(/\/$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    all.push(url);
+  }
+  return all;
 }
