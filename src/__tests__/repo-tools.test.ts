@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { getEventListeners } from "node:events";
 import { HexStore } from "../store.js";
-import { WorktreeManager, worktreeName } from "../worktree.js";
+import { WorktreeManager, worktreeName, fetchTarget } from "../worktree.js";
 import { RepoTools, truncateOutput, scrubEnv } from "../tools/repo-tools.js";
 import { EXEC_TOOL, WRITE_TOOL } from "../tools/types.js";
 
@@ -78,6 +78,20 @@ describe("worktree naming", () => {
   it("is stable, so a restart finds the same checkout", () => {
     expect(worktreeName("room-one")).toBe(worktreeName("room-one"));
     expect(worktreeName("room-one")).not.toBe(worktreeName("room-two"));
+  });
+});
+
+describe("which remote gets fetched", () => {
+  it("fetches only the remote baseRef names", () => {
+    // `--all` fails as a whole if any remote fails, and a clone can carry one a
+    // daemon cannot reach — an ssh remote with no agent, or a custom helper.
+    expect(fetchTarget("gh/main")).toEqual(["gh"]);
+    expect(fetchTarget("origin/develop")).toEqual(["origin"]);
+  });
+
+  it("falls back to every remote when there is nothing to go on", () => {
+    expect(fetchTarget(undefined)).toEqual(["--all"]);
+    expect(fetchTarget("HEAD")).toEqual(["--all"]);
   });
 });
 
@@ -343,15 +357,29 @@ describe("output handling", () => {
     expect(truncateOutput("fine")).toBe("fine");
   });
 
-  it("scrubs anything that looks like a secret", () => {
-    const scrubbed = scrubEnv({
-      HEX_NSEC: "x",
-      OPENAI_API_KEY: "x",
-      GITHUB_TOKEN: "x",
-      MY_SECRET: "x",
-      PASSWORD: "x",
-      PATH: "/usr/bin",
+  it("puts the running node on the child's path", async () => {
+    // Under launchd there is no login shell and no version manager: without
+    // this every command died on `npm: command not found`, which made the whole
+    // coding agent unable to build or test anything.
+    const result = await tools("path-1").call(EXEC_TOOL, {
+      command: "command -v node >/dev/null && echo found || echo missing",
     });
+    expect(result.output.trim()).toBe("found");
+  }, 20_000);
+
+  it("scrubs anything that looks like a secret", () => {
+    const scrubbed = scrubEnv(
+      {
+        HEX_NSEC: "x",
+        OPENAI_API_KEY: "x",
+        GITHUB_TOKEN: "x",
+        MY_SECRET: "x",
+        PASSWORD: "x",
+        PATH: "/usr/bin",
+      },
+      "/opt/node/bin",
+    );
     expect(Object.keys(scrubbed)).toEqual(["PATH"]);
+    expect(scrubbed.PATH).toBe("/opt/node/bin:/usr/bin");
   });
 });

@@ -46,6 +46,20 @@ export function worktreeName(workspace: string): string {
     .slice(0, HASH_CHARS);
 }
 
+/**
+ * Which remote to bring up to date before branching.
+ *
+ * `--all` fails as a whole if ANY remote fails, and a clone can easily carry one
+ * that a supervised daemon cannot reach — this repository has both an SSH remote
+ * (no agent under launchd) and a `nostr://` one needing a custom helper. So fetch
+ * only the remote `baseRef` actually names, and let the rest be someone else's
+ * problem.
+ */
+export function fetchTarget(baseRef?: string): string[] {
+  const remote = baseRef?.includes("/") ? baseRef.split("/")[0] : undefined;
+  return remote ? [remote] : ["--all"];
+}
+
 export interface WorktreeOptions {
   store: HexStore;
   /** `<home>/<pubkey>/worktrees`. */
@@ -104,7 +118,7 @@ export class WorktreeManager {
       // reads and edits an old tree while reporting it as current. Best effort:
       // a repo with no remote, or no network, still gets its worktree.
       try {
-        await run("git", ["fetch", "--quiet", "--all"], {
+        await run("git", ["fetch", "--quiet", ...fetchTarget(repo.baseRef)], {
           cwd: repo.path,
           timeout: GIT_TIMEOUT_MS,
         });
