@@ -540,10 +540,20 @@ export class EveServer {
         signal: controller.signal,
         fetchImpl: this.options.fetchImpl,
       })) {
+        /**
+         * The window measures waiting, not working.
+         *
+         * `handle` publishes: seals, wraps, a relay round trip per recipient,
+         * seconds at a time. Re-arming the timer BEFORE that meant a slow
+         * publish ran the window out and aborted its own read — a catch-up
+         * stopped two events into a twenty-eight event tail and left the head
+         * saying `active`, which is the exact lie it was called to fix.
+         */
         clearTimeout(timer);
-        timer = setTimeout(stop, quiet);
         await conversation.transcript.handle(event, index);
         last = index;
+        if (controller.signal.aborted) break;
+        timer = setTimeout(stop, quiet);
         if (event.type === "turn.completed" || event.type === "turn.failed") {
           const turnId = stringField(payload(event), "turnId");
           if (turnId) finished.add(turnId);
