@@ -181,16 +181,16 @@ agent and should share a memory, two agents on one machine must share nothing.
 `state.home` moves the root.
 
 Storage is SQLite — `node:sqlite`, so no dependency and no native build — in WAL
-mode with a busy timeout. A file was not enough: two processes that each hold a
-JSON document read it, mutate it in memory, and write the whole thing back, and
-the last writer erases the other's cursor. Writing atomically makes one write
-survivable and does nothing about two. Two `hex eve` processes following two
-sessions of one agent are now two connections rather than a lost chain.
+mode with a busy timeout. A JSON file cannot do this job: two processes that each
+read the whole document, mutate it in memory and write it back leave the last
+writer erasing the other's cursor, and writing atomically makes one write
+survivable while doing nothing about two. Two `hex eve` processes following two
+sessions of one agent are two connections, not a lost chain.
 
-A home written by an older version also holds `sessions`, `messages`,
-`participants` and `worktrees`, from when this package ran its own agent loop.
-They are left where they are: deleting an operator's conversation history to tidy
-a schema is not a migration this gets to make.
+A home may also hold `sessions`, `messages`, `participants` and `worktrees`.
+Hex does not read or write them, and does not drop them either: deleting an
+operator's conversation history to tidy a schema is not a migration this gets to
+make.
 
 ## When Hex speaks
 
@@ -215,11 +215,11 @@ say.
 
 ## Status
 
-Identity, relays, both transports and the transcript publisher work. The agent
-loop this package used to carry — its own model calls, session tracking, context
-assembly, worktrees and container isolation — was **removed** rather than kept in
-parallel: Eve does all of it, and two implementations of a turn is one that drifts.
-What remains is what Eve has no opinion about, which is Nostr.
+Identity, relays, both transports and the transcript publisher work. Hex runs no
+agent loop of its own — no model calls, no session tracking, no context assembly,
+no container isolation. A runtime does all of that, and two implementations of a
+turn is one that drifts. Hex is what the runtime has no opinion about, which is
+Nostr.
 
 `hex serve` drives Eve from a Nostr message and publishes the run as it happens:
 tools over the loopback bridge, deltas as they stream, per-turn cost, and a
