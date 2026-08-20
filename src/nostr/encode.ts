@@ -222,6 +222,15 @@ export function buildSessionControl(
   if (input.request) tags.push(["request", input.request]);
   if (input.turn) tags.push(["turn", input.turn]);
   if (input.option) tags.push(["option", input.option]);
+  if (input.policy) tags.push(["policy", input.policy]);
+  /**
+   * What a `start` is about, after the address that says which session it IS.
+   *
+   * Same shape as on a head, so a reader that already knows how to render a
+   * run's subjects renders the request for one without learning anything new.
+   */
+  for (const subject of input.subjects ?? [])
+    if (subject[0] && subject[1]) tags.push(subject);
   tags.push(["alt", input.alt ?? `Session control: ${input.command}`]);
 
   return stamp({

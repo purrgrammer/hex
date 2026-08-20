@@ -274,11 +274,13 @@ export interface DeltaInput {
  * than one that does not exist.
  */
 export type SessionCommand =
+  | "start"
   | "respond"
   | "steer"
   | "cancel"
   | "compact"
-  | "clear";
+  | "clear"
+  | "reset";
 
 export interface SessionControlInput {
   command: SessionCommand;
@@ -294,8 +296,26 @@ export interface SessionControlInput {
   turn?: string;
   /** The chosen option's id, for a `respond` to a question with options. */
   option?: string;
-  /** Free text: the answer for `respond`, the message for `steer`. */
+  /** Free text: the answer for `respond`, the message for `steer` or `start`. */
   text?: string;
+  /**
+   * What a `steer` does to the turn already running: wait for it, or replace it.
+   *
+   * Defaults to `queue`, which is the opposite of what a chat message does. A
+   * message typed into a room mid-turn means "not that — this", and the room
+   * path cancels for that reason. An operator steering from a session view is
+   * looking at the work in progress and adding to it; throwing that work away
+   * because they had a second thought is the expensive reading of an ambiguous
+   * act, and the cheap one is to let it finish.
+   */
+  policy?: "queue" | "steer";
+  /**
+   * What a `start` is about: `a` and `e` pointers, copied onto the new head.
+   *
+   * Only `start` carries these. Every other verb names a session that already
+   * has them.
+   */
+  subjects?: string[][];
   alt?: string;
   createdAt?: number;
 }

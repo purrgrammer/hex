@@ -42,14 +42,34 @@ export type RoomToolsTransport = Pick<Transport, "reply"> & {
   history?: Transport["history"];
 };
 
+/**
+ * What a chat tool says when there is no conversation behind it.
+ *
+ * A run started over the control plane has no room, so these tools are not
+ * offered; this is the answer if one is somehow reached anyway.
+ */
+const NO_ROOM =
+  "this session has no room — it was started over the control plane, and its " +
+  "transcript is how it is read. There is nobody to reply to.";
+
 export interface RoomToolsOptions {
   transport: RoomToolsTransport;
-  incoming: Inbound;
+  /**
+   * The message being answered, when one is.
+   *
+   * Absent for a run the control plane started: there is no room, nobody said
+   * anything, and there is nothing to reply to. The tool catalogue is built
+   * from this — with no message, `chat.*` is not offered at all, because a
+   * `chat.respond` with nowhere to go is a tool whose every call fails.
+   */
+  incoming?: Inbound;
   /** Log instead of publishing. */
   dryRun?: boolean;
   log?: (line: string) => void;
   /** Cap on deliveries in one turn, so a confused model cannot flood a room. */
   maxResponses?: number;
+  /** Who the run is for, when no message names them. Control-plane runs only. */
+  requestedBy?: string;
   /**
    * Hex's own pubkey, so history can say which half it wrote.
    *
@@ -139,18 +159,62 @@ export class RoomTools implements ToolHost {
   constructor(private readonly options: RoomToolsOptions) {}
 
   get room() {
-    return this.options.incoming.room;
+    return this.options.incoming?.room;
   }
 
   get requestedBy() {
-    return this.options.incoming.author;
+    return this.options.incoming?.author ?? this.options.requestedBy ?? "";
   }
 
   get delivered() {
     return this.didDeliver;
   }
 
+  /**
+   * The message a chat tool acts on, or the reason there is none.
+   *
+   * Unreachable in practice — `call()` refuses anything `list()` did not offer,
+   * and with no message `list()` offers no `chat.*` at all. It exists so the
+   * absence is handled in one place rather than asserted away at five call
+   * sites, and so a future caller that binds the tools differently gets a
+   * sentence instead of a crash.
+   */
+  private get conversation(): Inbound | undefined {
+    return this.options.incoming;
+  }
+
   list(): ToolSpec[] {
+    /**
+     * The catalogue depends on the channel, not on what this class can do.
+     *
+     * With no message there is no room, no thread and nobody to answer, so
+     * every `chat.*` tool is a call that can only come back "this session has
+     * no room bound to it". Offering it anyway spends a round trip teaching the
+     * model that, and a model that has been handed a speaking tool will use
+     * it — the answer then goes nowhere and the run looks like it said nothing.
+     */
+    const specs: ToolSpec[] = this.options.incoming
+      ? this.chatTools()
+      : [];
+
+    // Whatever else the runtime can do — the same set either way, because
+    // reading relays and publishing do not need a room.
+    const optional: ToolSpec[] = [];
+    if (this.options.knowledge) optional.push(...this.options.knowledge.list());
+    if (this.options.publish) optional.push(...this.options.publish.list());
+    if (this.options.blossom) optional.push(...this.options.blossom.list());
+
+    specs.push(
+      ...(this.options.grants
+        ? filterTools(optional, this.options.grants)
+        : optional),
+    );
+
+    return specs;
+  }
+
+  /** Speaking, reacting, and reading the thread. Only with a room to do it in. */
+  private chatTools(): ToolSpec[] {
     const specs: ToolSpec[] = [
       {
         name: RESPOND_TOOL,
@@ -250,20 +314,21 @@ export class RoomTools implements ToolHost {
           " than to guess.",
       });
 
-    // Whatever else the runtime can do, offered alongside speaking — and only
-    // what this channel was granted. Speaking itself is never filtered.
-    const optional: ToolSpec[] = [];
-    if (this.options.knowledge) optional.push(...this.options.knowledge.list());
-    if (this.options.publish) optional.push(...this.options.publish.list());
-    if (this.options.blossom) optional.push(...this.options.blossom.list());
-
-    specs.push(
-      ...(this.options.grants
-        ? filterTools(optional, this.options.grants)
-        : optional),
-    );
-
-    return specs;
+    /**
+     * Granted or not, but never filtered away entirely.
+     *
+     * Speaking is what a room is FOR: a channel whose grants forgot
+     * `chat.respond` would run turns nobody could hear.
+     */
+    return this.options.grants
+      ? [
+          ...specs.filter((spec) => spec.name === RESPOND_TOOL),
+          ...filterTools(
+            specs.filter((spec) => spec.name !== RESPOND_TOOL),
+            this.options.grants,
+          ),
+        ]
+      : specs;
   }
 
   async call(call: ToolCall): Promise<ToolResult> {
@@ -313,6 +378,8 @@ export class RoomTools implements ToolHost {
   }
 
   private async respond(args: Record<string, unknown>): Promise<ToolResult> {
+    const incoming = this.conversation;
+    if (!incoming) return { ok: false, output: NO_ROOM };
     // Checked before the transport, not after: a reply that lands once the
     // cancel notice has gone out answers a question already withdrawn.
     if (this.options.signal?.aborted)
@@ -356,11 +423,7 @@ export class RoomTools implements ToolHost {
       const tags =
         imeta && imeta[0] === "imeta" && imeta.length > 1 ? [imeta] : [];
 
-      const id = await this.options.transport.reply(
-        this.options.incoming,
-        text,
-        tags,
-      );
+      const id = await this.options.transport.reply(incoming, text, tags);
       this.responses += 1;
       this.didDeliver = true;
       this.deliveredIds.push(id);
@@ -388,6 +451,7 @@ export class RoomTools implements ToolHost {
   private who(): ToolResult {
     const pubkey = this.requestedBy;
     const room = this.room;
+    if (!room) return { ok: false, output: NO_ROOM };
     return {
       ok: true,
       output: JSON.stringify({
@@ -431,7 +495,9 @@ export class RoomTools implements ToolHost {
        * and the first line of it dies reading `this.options`. Every call
        * refused with an error nobody could act on.
        */
-      const messages = await transport.history(this.room, limit, {
+      const room = this.room;
+      if (!room) return { ok: false, output: NO_ROOM };
+      const messages = await transport.history(room, limit, {
         includeOwn: true,
       });
       return {
@@ -466,6 +532,8 @@ export class RoomTools implements ToolHost {
   }
 
   private async react(args: Record<string, unknown>): Promise<ToolResult> {
+    const incoming = this.conversation;
+    if (!incoming) return { ok: false, output: NO_ROOM };
     if (this.options.signal?.aborted)
       return { ok: false, output: "cancelled — nothing was sent" };
 
@@ -480,10 +548,7 @@ export class RoomTools implements ToolHost {
     }
 
     try {
-      const id = await this.options.transport.react(
-        this.options.incoming,
-        emoji,
-      );
+      const id = await this.options.transport.react(incoming, emoji);
       // A reaction is not an answer: it does not count as having spoken, and does
       // not spend the room's reply budget.
       return { ok: true, output: `reacted as ${id}` };

@@ -672,6 +672,7 @@ describe("EveServer", () => {
     await server_.control({ ...base, id: "c3", command: "cancel", turn: "turn_0" });
     await server_.control({ ...base, id: "c4", command: "compact" });
     await server_.control({ ...base, id: "c5", command: "clear" });
+    await server_.control({ ...base, id: "c6", command: "reset", text: "start over" });
 
     const sent = eve.posts.slice(before);
     expect(sent.map((post) => post.path)).toEqual([
@@ -680,6 +681,7 @@ describe("EveServer", () => {
       `/eve/v1/session/${eve.session}/cancel`,
       `/eve/v1/session/${eve.session}/compact`,
       `/eve/v1/session/${eve.session}/clear`,
+      `/eve/v1/session/${eve.session}/reset`,
     ]);
     // A response resolves the request it names and never steers; a message
     // steers and resolves nothing. Sending the wrong one is the whole bug this
@@ -687,8 +689,114 @@ describe("EveServer", () => {
     expect(sent[0]!.body).toEqual({
       inputResponses: [{ requestId: "req_1", optionId: "approve" }],
     });
-    expect(sent[1]!.body).toEqual({ message: "do the other thing" });
+    /**
+     * A steer QUEUES by default.
+     *
+     * Eve's own default is the other one — a message sent into a live turn
+     * cancels it — which is right for a room and wrong for an operator watching
+     * the work and adding to it. A client that means "stop that" says so.
+     */
+    expect(sent[1]!.body).toEqual({
+      message: "do the other thing",
+      turnPolicy: "queue",
+    });
     expect(sent[2]!.body).toEqual({ turnId: "turn_0" });
+    expect(sent[5]!.body).toEqual({ reason: "start over" });
+  });
+
+  it("lets a steer cancel the running turn when the operator asks for it", async () => {
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.handle(inbound("msg-1", "first"));
+    const before = eve.posts.length;
+    const nostrId = store.transcriptFor(eve.session)!.nostrId;
+
+    await server_.control({
+      id: "c1",
+      operator: PEER,
+      agent: AGENT,
+      session: nostrId,
+      command: "steer",
+      text: "no, this instead",
+      policy: "steer",
+    });
+
+    expect(eve.posts.slice(before)[0]!.body).toEqual({
+      message: "no, this instead",
+      turnPolicy: "steer",
+    });
+  });
+
+  it("starts a run nobody said anything to start", async () => {
+    const eve = fakeEve(FIRST_TURN, 8);
+    const bus = transport();
+    const server_ = server(eve, bus, sink().impl);
+
+    // The client picks the published name, so it can subscribe to the address
+    // before the first head exists rather than poll for a run it cannot name.
+    const chosen = "b".repeat(64);
+    await server_.control({
+      id: "start-1",
+      operator: PEER,
+      agent: AGENT,
+      session: chosen,
+      command: "start",
+      text: "audit the repo",
+      subjects: [["a", "30617:" + AGENT + ":grimoire"]],
+    });
+
+    const record = store.transcriptForNostrId(chosen);
+    expect(record?.sessionId).toBe(eve.session);
+    expect(eve.posts[0]!.path).toBe("/eve/v1/session");
+    expect((eve.posts[0]!.body as { message: string }).message).toBe(
+      "audit the repo",
+    );
+    // Nothing was said in any room, because there is no room: the transcript
+    // is the whole of the answer.
+    expect(bus.replies).toEqual([]);
+    expect(bus.reactions).toEqual([]);
+  });
+
+  it("ignores a start for a session it has already published", async () => {
+    const eve = fakeEve(FIRST_TURN, 8);
+    const server_ = server(eve, transport(), sink().impl);
+    const chosen = "c".repeat(64);
+    const start = {
+      operator: PEER,
+      agent: AGENT,
+      session: chosen,
+      command: "start" as const,
+      text: "do it",
+    };
+
+    await server_.control({ ...start, id: "start-1" });
+    const after = eve.posts.length;
+    /**
+     * A DIFFERENT event id, so the dedupe on rumor id cannot be what saves it.
+     *
+     * This is the backlog case: a NIP-17 inbox filter reaches two days back
+     * because a wrap's timestamp is randomised that far, so every restart reads
+     * old wraps — and a start replayed out of that backlog must not open a
+     * second session and spend a second time.
+     */
+    await server_.control({ ...start, id: "start-2" });
+    expect(eve.posts.length).toBe(after);
+  });
+
+  it("refuses a start whose session id is not one", async () => {
+    const eve = fakeEve(FIRST_TURN, 8);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.control({
+      id: "start-1",
+      operator: PEER,
+      agent: AGENT,
+      // A `d` tag the agent would publish under, chosen by somebody else. It
+      // has to look like a session id or it is not one.
+      session: "../../etc/passwd",
+      command: "start",
+      text: "do it",
+    });
+    expect(eve.posts).toEqual([]);
   });
 
   it("refuses an instruction for a session it never published", async () => {

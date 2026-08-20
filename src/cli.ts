@@ -824,15 +824,18 @@ async function main(): Promise<void> {
          * message knows which that is.
          */
         const blossomConfig = config.tools?.blossom;
-        const blossomFor = (inbound: Inbound) =>
+        const blossomFor = (inbound?: Inbound) =>
           bridge && blossomConfig?.enabled
             ? new BlossomTools({
                 servers: blossomConfig.servers,
                 signer: resolved.signer,
                 // A private conversation's file is encrypted; a public group's
                 // is not, because encrypting it hides it from the room.
+                // A private conversation's file is encrypted, and so is one
+                // from a run with no room at all — that run was asked for over
+                // a gift wrap, and its reader is the operator who asked.
                 encryptByDefault:
-                  inbound.room.transport === "nip-17" &&
+                  (inbound?.room.transport ?? "nip-17") === "nip-17" &&
                   blossomConfig.encryptByDefault !== false,
                 perHour: blossomConfig.perHour,
                 log: (line) => console.log(line),
@@ -862,6 +865,15 @@ async function main(): Promise<void> {
               repositories: config.repositories,
             };
           },
+          /**
+           * Who is asking, and what about — resolved once, before the run.
+           *
+           * Uses the same reader the tools use, so what the model is told up
+           * front and what it would learn by looking cannot disagree.
+           */
+          ground: knowledge
+            ? (input) => knowledge.ground(input)
+            : undefined,
           tools:
             bridge && knowledge
               ? {
@@ -870,6 +882,7 @@ async function main(): Promise<void> {
                     new RoomTools({
                       transport,
                       incoming: inbound,
+                      requestedBy: transcriptConfig.to[0],
                       selfPubkey: resolved.pubkey,
                       knowledge,
                       publish: publishing,

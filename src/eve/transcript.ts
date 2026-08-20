@@ -215,13 +215,23 @@ export class EveTranscript {
     private readonly options: EveTranscriptOptions,
     /** Eve's session id. The wire's is derived once and kept. */
     readonly sessionId: string,
+    /**
+     * The wire's id, when somebody else picked it.
+     *
+     * A run started over the control plane is named by the client that asked
+     * for it, so the client can subscribe to the address before the first head
+     * exists — otherwise it has to poll for a session whose name it will only
+     * learn once the work is under way. Ignored for a session already known,
+     * which is what makes a redelivered `start` harmless.
+     */
+    nostrId?: string,
   ) {
     // A configured model is the starting point; the stream overwrites it the
     // moment it names one of its own.
     this.model = options.model;
     this.record = options.store.transcriptFor(sessionId) ?? {
       sessionId,
-      nostrId: randomBytes(32).toString("hex"),
+      nostrId: nostrId ?? randomBytes(32).toString("hex"),
       seq: 0,
       turn: 0,
       status: "active",

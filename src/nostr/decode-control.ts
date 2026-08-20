@@ -23,11 +23,13 @@ import { parseSessionAddress } from "./encode.js";
 import type { Rumor, SessionCommand } from "./types.js";
 
 const COMMANDS: readonly SessionCommand[] = [
+  "start",
   "respond",
   "steer",
   "cancel",
   "compact",
   "clear",
+  "reset",
 ];
 
 export interface SessionControl {
@@ -43,6 +45,15 @@ export interface SessionControl {
   turn?: string;
   option?: string;
   text?: string;
+  /** `steer` only: wait for the running turn, or replace it. Default `queue`. */
+  policy?: "queue" | "steer";
+  /**
+   * `start` only: what the run is about.
+   *
+   * The address that names the session is an `a` tag too, so it is excluded by
+   * kind rather than by position — a client is free to put the subjects first.
+   */
+  subjects?: string[][];
 }
 
 function tag(rumor: Rumor, name: string): string | undefined {
@@ -85,6 +96,8 @@ export function parseSessionControl(
     // exactly as an unknown part type or status is elsewhere in this family.
     return null;
 
+  const policy = tag(rumor, "policy");
+
   return {
     control: {
       id: rumor.id,
@@ -95,6 +108,15 @@ export function parseSessionControl(
       request: tag(rumor, "request"),
       turn: tag(rumor, "turn"),
       option: tag(rumor, "option"),
+      policy: policy === "steer" || policy === "queue" ? policy : undefined,
+      subjects: rumor.tags.filter(
+        (t) =>
+          (t[0] === "a" || t[0] === "e") &&
+          !!t[1] &&
+          // The session's own address is an `a` tag; it is what this command
+          // acts on, not what the run is about.
+          t[1] !== address,
+      ),
       text: rumor.content || undefined,
     },
   };

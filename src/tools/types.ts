@@ -42,8 +42,14 @@ export interface ToolResult {
 }
 
 export interface ToolHost {
-  /** Who asked, and where. An unattributable call is not authorized. */
-  readonly room: Room;
+  /**
+   * Who asked, and where.
+   *
+   * The room is absent for a run started over the control plane, which happens
+   * in no room at all — its transcript IS the channel. A host with no room
+   * offers no `chat.*`, so nothing that needs one can be called.
+   */
+  readonly room?: Room;
   readonly requestedBy: string;
   list(): ToolSpec[];
   call(call: ToolCall): Promise<ToolResult>;

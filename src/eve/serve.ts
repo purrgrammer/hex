@@ -79,8 +79,14 @@ export interface ServeOptions {
    */
   tools?: {
     bridge: ToolBridge;
-    /** A fresh host per turn, bound to the message being answered. */
-    host: (inbound: Inbound) => ToolHost;
+    /**
+     * A fresh host per turn, bound to the message being answered.
+     *
+     * Called with NOTHING for a run started over the control plane, which has
+     * no room: the host it returns must offer the tools that act on the network
+     * and none of the ones that act on a conversation.
+     */
+    host: (inbound?: Inbound) => ToolHost;
   };
   /**
    * What this agent is, for the per-session snapshot.
@@ -98,6 +104,19 @@ export interface ServeOptions {
       }
     | undefined
   >;
+  /**
+   * Who is asking and what about, resolved into context the runtime is given.
+   *
+   * Optional, and a run works without it — worse. Without the operator block a
+   * runtime has no idea whose message it is holding, which is what `chat.who`
+   * existed to answer and what made "my recent posts" a query about strangers;
+   * without the subject blocks a run scoped to a repository is handed a
+   * coordinate it cannot read.
+   */
+  ground?: (input: {
+    operator?: string;
+    subjects?: string[][];
+  }) => Promise<string[]>;
   /** How long the pre-message read waits for silence. Injected in tests. */
   drainQuietMs?: number;
   log?: (line: string) => void;
@@ -290,6 +309,148 @@ export class EveServer {
   }
 
   /**
+   * Who is asking and what about, or nothing at all.
+   *
+   * Never fatal: a relay that will not answer costs the model a fact, and a run
+   * refused because a profile could not be fetched costs it the whole job.
+   */
+  private async grounding(
+    operator: string,
+    subjects: string[][],
+  ): Promise<string[] | undefined> {
+    if (!this.options.ground) return undefined;
+    try {
+      const blocks = await this.options.ground({ operator, subjects });
+      return blocks.length > 0 ? blocks : undefined;
+    } catch (error) {
+      this.log(`[hex] could not ground the session: ${message(error)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Begin a run nobody said anything to start.
+   *
+   * The control plane's reason to exist. Everything else here answers a message
+   * — a DM arrives, a session opens under it, the reply goes back into the
+   * room — and that binds having an agent to having a conversation with it. A
+   * client that renders sessions does not want a chat transcript alongside;
+   * it wants to ask for work and watch it happen.
+   *
+   * The session's PUBLISHED name comes from the client, which is the whole
+   * point: it can subscribe to the address before the first head exists,
+   * instead of polling for a run whose name it learns only once the work is
+   * under way. That makes the id a claim, so it is checked — 32 hex bytes, and
+   * refused if this agent already published a session by that name, which is
+   * also what makes a wrap redelivered by four relays, or replayed out of the
+   * two-day backlog after a restart, harmless.
+   *
+   * No room is bound. A run started this way has nowhere to speak and no
+   * business trying: its transcript IS the channel, and the tool catalogue it
+   * is offered says so by leaving `chat.*` out.
+   */
+  private async start(control: SessionControl): Promise<void> {
+    if (!/^[0-9a-f]{64}$/.test(control.session)) {
+      this.log(`[hex] a start named ${control.session}, which is not a session id`);
+      return;
+    }
+    if (this.options.transcript.store.transcriptForNostrId(control.session)) {
+      this.log(`[hex] a start for a session that already exists — ignored`);
+      return;
+    }
+    if (!control.text) {
+      this.log("[hex] a start with no message would have nothing to do");
+      return;
+    }
+
+    const peer = control.operator;
+    let conversation: Conversation;
+    try {
+      const sessionId = await this.createSession(
+        control.text,
+        await this.grounding(peer, control.subjects ?? []),
+      );
+      const transcript = new EveTranscript(
+        { ...this.options.transcript },
+        sessionId,
+        control.session,
+      );
+      /**
+       * The control event is what started this, so it is the trigger.
+       *
+       * Same relationship a DM has to the run it opened — a reader holding the
+       * request can find the work — and it is what lets a client that sent a
+       * start recognise the head as the answer to it.
+       */
+      transcript.trigger = control.id;
+      /**
+       * Not a room: the wrap itself.
+       *
+       * A run started over the control plane happens nowhere a client could
+       * open. Naming the envelope rather than a chat protocol is the honest
+       * answer, and it is the one a reader needs — `nip-59` says "this was
+       * asked for privately and answered in the transcript", which is exactly
+       * what a client must not go looking for a room for.
+       */
+      transcript.channel = { transport: "nip-59", id: peer };
+      transcript.subjects = control.subjects ?? [];
+      conversation = { sessionId, transcript, finished: new Set() };
+      this.options.transcript.store.rememberConversation(
+        peer,
+        sessionId,
+        Math.floor(Date.now() / 1000),
+      );
+      this.log(
+        `[hex] ${short(peer)} → eve session ${sessionId} (started over the control plane)`,
+      );
+      void this.describe(transcript);
+      /**
+       * Tools, but no room.
+       *
+       * The bridge still has to be bound or the runtime has no `nostr.*` at
+       * all; what it gets is a host with nothing to speak into, which drops
+       * `chat.*` from the catalogue rather than offering calls that can only
+       * fail.
+       */
+      if (this.options.tools)
+        this.options.tools.bridge.bind(sessionId, this.options.tools.host());
+    } catch (error) {
+      this.log(`[hex] could not start a session: ${message(error)}`);
+      return;
+    }
+
+    /**
+     * Followed to the end, and nothing said at the end of it.
+     *
+     * There is no room to answer in, so the transcript is the answer: the last
+     * turn carries what the run concluded, exactly as it does when `--no-reply`
+     * is set. A question the run stops on is published on the head as a pending
+     * request, which the client that started it is already watching for.
+     */
+    const asked: Asked[] = [];
+    await this.follow(conversation, peer, { last: -1, finished: new Set() }, asked);
+    this.log(
+      `[hex] ${short(peer)} ← ${sessionAddress(
+        this.options.transcript.agentPubkey,
+        conversation.transcript.nostrId,
+      )}`,
+    );
+  }
+
+  /** Close a head the runtime will never speak for again. */
+  private async retire(sessionId: string): Promise<void> {
+    const conversation = [...this.conversations.values()].find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    const transcript =
+      conversation?.transcript ??
+      new EveTranscript({ ...this.options.transcript }, sessionId);
+    // `aborted`, not `done`: a session retired by its operator did not finish
+    // what it was doing, and a reader deserves the difference.
+    await transcript.close("aborted");
+  }
+
+  /**
    * Carry out an instruction from the operator.
    *
    * Every verb is a route Eve already exposes; nothing here invents a capability.
@@ -306,6 +467,9 @@ export class EveServer {
    */
   async control(control: SessionControl): Promise<void> {
     if (!this.obeyed.admit(control.id)) return;
+
+    // The one verb with no session behind it yet — it is how one begins.
+    if (control.command === "start") return await this.start(control);
 
     /**
      * The address names the session on the WIRE; the runtime knows its own id.
@@ -372,8 +536,27 @@ export class EveServer {
             this.log("[hex] a steer with no message would say nothing");
             return;
           }
-          await this.post(path, { message: control.text });
-          say("steered the run");
+          /**
+           * Queue behind the running turn unless told otherwise.
+           *
+           * Eve's default is the other one: a message sent into an active turn
+           * cancels it and starts again. That is right for a room, where a
+           * message mid-turn means "not that — this", and it is wrong here. An
+           * operator steering from a session view is watching the work happen
+           * and adding to it; throwing away a turn that is minutes into a build
+           * because they had a second thought is the expensive reading of an
+           * ambiguous act. A client that means "stop and do this instead" says
+           * so with `policy=steer`, or cancels first.
+           */
+          await this.post(path, {
+            message: control.text,
+            turnPolicy: control.policy ?? "queue",
+          });
+          say(
+            control.policy === "steer"
+              ? "steered the run, cancelling what it was doing"
+              : "queued a message behind the running turn",
+          );
           break;
         }
 
@@ -393,6 +576,23 @@ export class EveServer {
         case "clear":
           await this.post(`${path}/clear`, {});
           say("cleared the context");
+          break;
+
+        /**
+         * Retire the session for good.
+         *
+         * Terminal in the runtime's own terms — the id never becomes a session
+         * again — and it emits NOTHING on the stream, so unlike every other
+         * verb the head has to be closed here. A reader watching the address
+         * would otherwise see a run that simply stopped mid-sentence.
+         */
+        case "reset":
+          await this.post(
+            `${path}/reset`,
+            control.text ? { reason: control.text } : {},
+          );
+          await this.retire(record.sessionId);
+          say("retired the session");
           break;
       }
     } catch (error) {
@@ -514,7 +714,10 @@ export class EveServer {
 
     let boundary: Boundary;
     if (!conversation) {
-      const sessionId = await this.createSession(inbound.text);
+      const sessionId = await this.createSession(
+        inbound.text,
+        await this.grounding(peer, subjectsOf(inbound)),
+      );
       const transcript = new EveTranscript(
         { ...this.options.transcript },
         sessionId,
@@ -587,7 +790,7 @@ export class EveServer {
     }
 
     const asked: Asked[] = [];
-    const answer = await this.follow(conversation, inbound, boundary, asked);
+    const answer = await this.follow(conversation, peer, boundary, asked);
     this.log(
       `[hex] ${short(peer)} ← ${sessionAddress(
         this.options.transcript.agentPubkey,
@@ -745,7 +948,12 @@ export class EveServer {
 
     if (!conversation || !boundary) return;
     const asked: Asked[] = [];
-    const answer = await this.follow(conversation, inbound, boundary, asked);
+    const answer = await this.follow(
+      conversation,
+      inbound.author,
+      boundary,
+      asked,
+    );
     if (asked.length > 0) {
       await this.ask(conversation, inbound, asked);
       return;
@@ -822,7 +1030,8 @@ export class EveServer {
 
   private async follow(
     conversation: Conversation,
-    inbound: Inbound,
+    /** Whose run this is, for the log. Nothing else is read off the message. */
+    who: string,
     /** Where the pre-message read got to, and which turns had already ended. */
     boundary: Boundary,
     /** Filled with anything the run stopped to ask, in the order it asked. */
@@ -922,7 +1131,7 @@ export class EveServer {
       // cannot report on one — so it is said out loud and the answer, if any
       // arrived before the drop, is still sent.
       this.log(
-        `[hex] the stream for ${short(inbound.author)} ended early: ${message(error)}`,
+        `[hex] the stream for ${short(who)} ended early: ${message(error)}`,
       );
     }
 
@@ -957,8 +1166,25 @@ export class EveServer {
     return conversation;
   }
 
-  private async createSession(text: string): Promise<string> {
-    const response = await this.post("/eve/v1/session", { message: text });
+  /**
+   * Open a session, with whatever the runtime should know before it reads the
+   * message.
+   *
+   * `clientContext` is Eve's own door for this: entries arrive as context
+   * messages ahead of the user's, which is where "who is talking to you" and
+   * "here is the thing they pointed at" belong. Not the system prompt — that
+   * lives on the Eve side and is not hex's to write — and deliberately not
+   * prepended to the message itself, which titled every run after the
+   * boilerplate and put words in the operator's mouth.
+   */
+  private async createSession(
+    text: string,
+    clientContext?: string[],
+  ): Promise<string> {
+    const response = await this.post("/eve/v1/session", {
+      message: text,
+      ...(clientContext?.length ? { clientContext } : {}),
+    });
     const id =
       typeof response.sessionId === "string" ? response.sessionId : undefined;
     if (!id) throw new Error("eve accepted the message but named no session");

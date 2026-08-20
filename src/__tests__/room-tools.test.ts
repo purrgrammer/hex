@@ -81,6 +81,34 @@ describe("RoomTools.list", () => {
     ]);
   });
 
+  it("offers no chat tools at all when there is no room", async () => {
+    /**
+     * A run started over the control plane happens in no room.
+     *
+     * Offering it `chat.respond` anyway would hand a speaking tool to a model
+     * that has nobody to speak to: the call comes back "no room bound", the
+     * answer goes nowhere, and the run reads as one that had nothing to say.
+     * The catalogue depends on the channel, so with no channel there is no
+     * `chat.*` — and everything that acts on the network is unaffected, because
+     * reading relays never needed a room.
+     */
+    const roomless = new RoomTools({
+      transport: transport(),
+      requestedBy: AUTHOR,
+    });
+    expect(roomless.list()).toEqual([]);
+    expect(roomless.room).toBeUndefined();
+    expect(roomless.requestedBy).toBe(AUTHOR);
+
+    // And a call for one is refused with a sentence rather than a crash.
+    const refused = await roomless.call({
+      name: RESPOND_TOOL,
+      arguments: { text: "hello?" },
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.output).toContain("no tool called");
+  });
+
   it("reads the thread with both halves in it", async () => {
     /**
      * A runtime is handed one message, so anything that refers to earlier is

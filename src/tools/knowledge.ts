@@ -482,6 +482,115 @@ export class KnowledgeTools {
 
   // ---- nostr.resolve -------------------------------------------------------
 
+  /**
+   * Who started a run, and what it is about — resolved before it begins.
+   *
+   * Two problems, one answer. A runtime handed a bare message has no idea whose
+   * it is, so "check my recent posts" sent it hunting kind 1 across the whole
+   * network and summarising strangers; and a run scoped to a repository was
+   * given the coordinate as a pointer it could not read, so the alternative was
+   * writing "work on X" into the operator's own words and titling every session
+   * after the boilerplate.
+   *
+   * Both are context, not a tool call and not a preamble. This resolves them
+   * once, at the start, and hands back blocks the caller passes to the runtime
+   * as context — so the model knows who it is talking to and what it is looking
+   * at without spending a turn asking.
+   *
+   * Never throws: a relay that will not answer costs the model a fact, and a
+   * run refused because a profile could not be fetched costs it everything.
+   */
+  async ground(input: {
+    operator?: string;
+    subjects?: string[][];
+  }): Promise<string[]> {
+    const blocks: string[] = [];
+
+    if (input.operator) {
+      const person = await this.person(input.operator).catch(() => undefined);
+      blocks.push(
+        `<operator>\n${JSON.stringify(
+          person ?? {
+            pubkey: input.operator,
+            npub: nip19.npubEncode(input.operator),
+          },
+        )}\n</operator>`,
+      );
+    }
+
+    for (const tag of input.subjects ?? []) {
+      const resolved = await this.subject(tag).catch(() => undefined);
+      if (resolved)
+        blocks.push(`<subject>\n${JSON.stringify(resolved)}\n</subject>`);
+    }
+
+    return blocks;
+  }
+
+  /** A pubkey with whatever kind 0 says about it. */
+  private async person(pubkey: string) {
+    const events = await requestEvents(
+      this.options.relays,
+      this.options.readRelays,
+      [{ kinds: [0], authors: [pubkey], limit: 1 }],
+      { timeoutMs: this.options.requestTimeoutMs },
+    );
+    const profile = events.sort((a, b) => b.created_at - a.created_at)[0];
+    return {
+      pubkey,
+      npub: nip19.npubEncode(pubkey),
+      nprofile: nip19.nprofileEncode({ pubkey }),
+      metadata: profile ? safeJson(profile.content) : null,
+    };
+  }
+
+  /** What an `a` or `e` tag names, fetched. The tag rides along either way. */
+  private async subject(tag: string[]) {
+    const [kind, value, hint] = tag;
+    const relays = [
+      ...new Set([...this.options.readRelays, ...(hint ? [hint] : [])]),
+    ];
+
+    if (kind === "e" && value && HEX64.test(value)) {
+      const events = await requestEvents(
+        this.options.relays,
+        relays,
+        [{ ids: [value] }],
+        { timeoutMs: this.options.requestTimeoutMs },
+      );
+      const event = events.find((candidate) => candidate.id === value);
+      return { tag, event: event ? describeEvent(event) : null };
+    }
+
+    if (kind === "a" && value) {
+      const parts = value.split(":");
+      const addressKind = Number(parts[0]);
+      const [, pubkey, identifier = ""] = parts;
+      if (!Number.isInteger(addressKind) || !pubkey) return { tag };
+      const events = await requestEvents(
+        this.options.relays,
+        relays,
+        [
+          {
+            kinds: [addressKind],
+            authors: [pubkey],
+            "#d": [identifier],
+            limit: 1,
+          },
+        ],
+        { timeoutMs: this.options.requestTimeoutMs },
+      );
+      const event = events.sort((a, b) => b.created_at - a.created_at)[0];
+      return {
+        tag,
+        address: value,
+        event: event ? describeEvent(event) : null,
+      };
+    }
+
+    return undefined;
+  }
+
   private async resolve(args: Record<string, unknown>): Promise<ToolResult> {
     const entity =
       typeof args.entity === "string"
