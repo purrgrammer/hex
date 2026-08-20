@@ -145,6 +145,13 @@ function fakeEve(
   sessionId?: string,
   /** Appended when a message is sent, the way a real host answers one. */
   later: typeof TURN = [],
+  /**
+   * Append on a `cancel` too, which a real host does — `turn.cancelled` and the
+   * `session.waiting` after it are the whole result of a stop. Off by default
+   * because most tests hand `later` a whole extra TURN, and a stop does not
+   * produce one of those.
+   */
+  cancelAppends = false,
 ) {
   const posts: { path: string; body: unknown }[] = [];
   const encoder = new TextEncoder();
@@ -165,7 +172,10 @@ function fakeEve(
       posts.push({ path, body: JSON.parse(String(init.body)) });
       // Only a CONTINUE appends. Creating a session with the first message is
       // what produced the events already stored, and a cancel produces none.
-      if (path.startsWith("/eve/v1/session/") && !path.endsWith("/cancel"))
+      if (
+        path.startsWith("/eve/v1/session/") &&
+        (cancelAppends || !path.endsWith("/cancel"))
+      )
         stored.push(...later);
       const isCreate = path === "/eve/v1/session";
       if (isCreate) created.push(session);
@@ -275,9 +285,16 @@ describe("EveServer", () => {
       runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: bus,
       reply,
-      // The fake replays instantly; a real host would too. Kept short so the
-      // suite does not sit through the production quiet window.
-      drainQuietMs: 40,
+      /**
+       * Short of the production window, long enough to survive a busy machine.
+       *
+       * At 40ms this was flaky: the drain ends on SILENCE, and when two dozen
+       * test files run at once the event loop can starve the fake's replay for
+       * longer than the window, so the read gives up before the first event and
+       * the verb under test never posts. A flaky suite is worse than a slow one
+       * — it is the thing that decides whether a proposal gets merged.
+       */
+      drainQuietMs: 250,
       transcript: {
         agentPubkey: AGENT,
         slug: "hex",
@@ -349,7 +366,7 @@ describe("EveServer", () => {
     const hex = new EveServer({
       runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: bus,
-      drainQuietMs: 40,
+      drainQuietMs: 250,
       tools: {
         bridge: {
           bind: (sessionId: string) => bound.push(sessionId),
@@ -518,6 +535,84 @@ describe("EveServer", () => {
     const after = store.transcriptFor(eve.session)!;
     expect(after.pending).toBeUndefined();
     expect(after.status).not.toBe("awaiting-input");
+  });
+
+  it("closes the questions a stop leaves behind", async () => {
+    /**
+     * A stopped run is not a waiting one. The turn that would read the answer
+     * is gone, so the question it asked can never be resolved — and left open
+     * the head goes on saying `awaiting-input` forever, offering buttons that
+     * do nothing to whoever opens the session next.
+     */
+    const eve = fakeEve(ASKING_TURN, 0, undefined, SECOND_TURN);
+    const out = sink();
+    const hex = server(eve, transport(), out.impl);
+
+    await hex.handle(inbound("m1", "publish my note"));
+    const parked = store.transcriptFor(eve.session)!;
+    expect(parked.pending).toEqual(["req_1"]);
+
+    await hex.control({
+      id: "c1",
+      operator: PEER,
+      agent: AGENT,
+      session: parked.nostrId,
+      command: "cancel",
+    });
+
+    // Recorded rather than dropped, and with an outcome that says the question
+    // was stopped rather than answered.
+    const resolved = out.sent.filter(
+      (rumor) =>
+        rumor.kind === 1777 && rumor.content.includes('"input_resolved"'),
+    );
+    expect(resolved).toHaveLength(1);
+    expect(JSON.parse(resolved.at(-1)!.content)).toContainEqual(
+      expect.objectContaining({
+        type: "input_resolved",
+        requestId: "req_1",
+        outcome: "cancelled",
+      }),
+    );
+
+    const after = store.transcriptFor(eve.session)!;
+    expect(after.pending).toBeUndefined();
+    expect(after.status).not.toBe("awaiting-input");
+  });
+
+  it("does not publish one session's turns twice when two commands arrive", async () => {
+    /**
+     * A control event builds a reader over the session it names. Two arriving
+     * together each built their own, from the same stored cursor, and each
+     * published everything between it and the tail: the session got those turns
+     * twice, under the same `seq`, from two writers that could not see each
+     * other. One reader per session, one command at a time.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const out = sink();
+    const hex = server(eve, transport(), out.impl);
+
+    await hex.handle(inbound("m1", "first"));
+    const record = store.transcriptFor(eve.session)!;
+    const before = out.sent.length;
+
+    const base = {
+      operator: PEER,
+      agent: AGENT,
+      session: record.nostrId,
+      command: "steer" as const,
+    };
+    // Fired together, the way a relay hands two instructions over at once.
+    await Promise.all([
+      hex.control({ ...base, id: "c1", text: "do this" }),
+      hex.control({ ...base, id: "c2", text: "and this" }),
+    ]);
+
+    const turns = out.sent
+      .slice(before)
+      .filter((rumor) => rumor.kind === 1777)
+      .map((rumor) => tag(rumor, "seq")?.[1]);
+    expect(turns).toEqual([...new Set(turns)]);
   });
 
   it("names the message that started the session on the head", async () => {
@@ -883,7 +978,7 @@ describe("EveServer", () => {
     const options = () => ({
       runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: transport(),
-      drainQuietMs: 40,
+      drainQuietMs: 250,
       tools,
       transcript: {
         agentPubkey: AGENT,
@@ -934,7 +1029,7 @@ describe("EveServer", () => {
     const server_ = new EveServer({
       runtime: new EveRuntime({ host: HOST, fetchImpl: dm.impl }),
       transport: transport(),
-      drainQuietMs: 40,
+      drainQuietMs: 250,
       transcript: {
         agentPubkey: AGENT,
         slug: "hex",
@@ -985,7 +1080,7 @@ describe("EveServer", () => {
       new EveServer({
         runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
         transport: bus,
-        drainQuietMs: 40,
+        drainQuietMs: 250,
         transcript: {
           agentPubkey: AGENT,
           slug: "hex",
@@ -1009,7 +1104,7 @@ describe("EveServer", () => {
     await new EveServer({
       runtime: new EveRuntime({ host: HOST, fetchImpl: grouped.impl }),
       transport: bus,
-      drainQuietMs: 40,
+      drainQuietMs: 250,
       transcript: {
         agentPubkey: AGENT,
         slug: "hex",
@@ -1035,7 +1130,11 @@ describe("EveServer", () => {
   });
 
   it("carries each control verb to the route that serves it", async () => {
-    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    // The run has to actually be waiting on the request being answered — an
+    // answer to a question nobody asked is refused, which is the whole point of
+    // the scope rule. So it is asked the way a real one is: on the stream, read
+    // by the follower that holds the open set.
+    const eve = fakeEve(ASKING_TURN, 0, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
     await server_.handle(inbound("msg-1", "first"));
     const before = eve.posts.length;
@@ -1044,10 +1143,6 @@ describe("EveServer", () => {
     // runtime's. Using the runtime's here would test a path no reader can take.
     const record = store.transcriptFor(eve.session)!;
     const nostrId = record.nostrId;
-    // The run has to actually be waiting on the request being answered — an
-    // answer to a question nobody asked is refused, which is the whole point of
-    // the scope rule.
-    store.saveTranscript({ ...record, pending: ["req_1"] });
     const base = { id: "", operator: PEER, agent: AGENT, session: nostrId };
     await server_.control({
       ...base,
@@ -1115,10 +1210,16 @@ describe("EveServer", () => {
      * presses stop and watches the status not change has been told the button
      * did not work.
      */
-    const eve = fakeEve(FIRST_TURN, 8, undefined, [
-      { type: "turn.cancelled", data: { turnId: "turn_0" } },
-      { type: "session.waiting", data: { wait: "next-user-message" } },
-    ] as never);
+    const eve = fakeEve(
+      FIRST_TURN,
+      8,
+      undefined,
+      [
+        { type: "turn.cancelled", data: { turnId: "turn_0" } },
+        { type: "session.waiting", data: { wait: "next-user-message" } },
+      ] as never,
+      true,
+    );
     const out = sink();
     const server_ = server(eve, transport(), out.impl);
     await server_.handle(inbound("msg-1", "do something long"));
@@ -1340,7 +1441,7 @@ describe("EveServer", () => {
       runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: transport(),
       reply: true,
-      drainQuietMs: 40,
+      drainQuietMs: 250,
       describe: async () => ({
         name: "Hex",
         instructions: "You are Hex.",

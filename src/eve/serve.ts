@@ -40,6 +40,7 @@ import {
   type ToolServer,
 } from "../tools/types.js";
 import type { SessionControl } from "../nostr/decode-control.js";
+import type { HexStore, StoredTranscript } from "../store.js";
 import { roomKey } from "../transports/types.js";
 import type { Inbound, Room } from "../transports/types.js";
 
@@ -352,6 +353,16 @@ export class EveServer {
    * which is the case a queue exists for.
    */
   private readonly queues = new Map<string, Promise<void>>();
+
+  /**
+   * The instruction in flight per SESSION.
+   *
+   * Keyed differently from `queues` on purpose: a message belongs to a room and
+   * a control event belongs to a session, and the operator sending one is not
+   * in the room. What they share is the stream — two readers of one session
+   * publish one session's turns twice — so controls queue among themselves.
+   */
+  private readonly instructions = new Map<string, Promise<void>>();
 
   /**
    * Control events already carried out, bounded and FIFO.
@@ -815,6 +826,32 @@ export class EveServer {
       return;
     }
 
+    /**
+     * One instruction at a time per SESSION, for the same reason a room's
+     * messages queue.
+     *
+     * Every verb here reads the stream before it acts and publishes what it
+     * read. Two arriving together — a `cancel` and the `respond` an operator
+     * pressed a second later — each built their own reader from the same stored
+     * cursor and each published the turns between it and the tail. The session
+     * got every one of those turns twice, under the same `seq`, from two
+     * writers that could not see each other.
+     */
+    const previous = this.instructions.get(record.sessionId);
+    const run = (async () => {
+      await previous?.catch(() => {});
+      await this.obey(control, record, store);
+    })();
+    this.instructions.set(record.sessionId, run);
+    return run;
+  }
+
+  /** One control event, with its session's turn to act. */
+  private async obey(
+    control: SessionControl,
+    record: StoredTranscript,
+    store: HexStore,
+  ): Promise<void> {
     const say = (what: string) =>
       this.log(`[hex] ${short(control.operator)} → ${what}`);
 
@@ -875,7 +912,19 @@ export class EveServer {
      * instruction started and then follow a stream with nothing left in it.
      */
     const runs = control.command === "respond" || control.command === "steer";
-    let conversation: Conversation | undefined = {
+    /**
+     * The follower this session already has, if it has one.
+     *
+     * A transcript is a WRITER — it holds the `seq` chain, the last head and the
+     * open questions — and a second one built over the same session writes the
+     * same chain from a copy of it. The correspondent's own conversation is
+     * already that writer whenever this process has been carrying their
+     * messages; a control event arriving mid-conversation must use it rather
+     * than fork one.
+     */
+    let conversation: Conversation | undefined = this.following(
+      record.sessionId,
+    ) ?? {
       sessionId: record.sessionId,
       transcript: new EveTranscript(
         { ...this.options.transcript },
@@ -919,7 +968,20 @@ export class EveServer {
            */
           const open =
             store.transcriptForNostrId(control.session)?.pending ?? [];
-          if (!open.includes(control.request)) {
+          /**
+           * Either witness will do, because they answer different halves.
+           *
+           * The stored list is what the last published head said; a follower
+           * that has read past it holds the newer truth and has not published
+           * yet. A request open in one and not the other is a request opened or
+           * closed in that gap, and refusing an answer because the slower of
+           * the two has not caught up is the failure this whole path exists to
+           * prevent.
+           */
+          const waiting =
+            open.includes(control.request) ||
+            conversation?.transcript.waitingOn(control.request) === true;
+          if (!waiting) {
             this.log(
               `[hex] ${control.request} is not a question ${record.sessionId} is waiting on — ignored`,
             );
@@ -1060,6 +1122,24 @@ export class EveServer {
         this.log(
           `[hex] ${control.command} landed but its result went unread: ${message(error)}`,
         );
+      }
+      /**
+       * A question nobody can answer any more is not still open.
+       *
+       * `cancel` stops the turn that asked, `clear` and `reset` throw away the
+       * conversation it belongs to. The runtime does not always say so — the
+       * request it never parked is a request it has nothing to resolve — and an
+       * open question survives a stop it did not hear about: the head keeps
+       * saying `awaiting-input`, a client keeps offering the buttons, and the
+       * one thing that would clear it is answering a run that no longer exists.
+       * So the stop closes them, which is what the operator asked for.
+       */
+      if (control.command !== "compact") {
+        const closed = await conversation.transcript.abandon();
+        if (closed > 0)
+          say(
+            `${control.command} closed ${closed} question(s) nobody can answer now`,
+          );
       }
       return;
     }
@@ -1747,6 +1827,13 @@ export class EveServer {
    * it left off rather than forking, and the trigger it already published stays
    * the message that opened the run.
    */
+  /** The conversation already following this session, if one is. */
+  private following(sessionId: string): Conversation | undefined {
+    for (const conversation of this.conversations.values())
+      if (conversation.sessionId === sessionId) return conversation;
+    return undefined;
+  }
+
   private resume(key: string): Conversation | undefined {
     const [author = key, room = ""] = key.split(KEY_SEPARATOR);
     const sessionId = this.options.transcript.store.conversationFor(

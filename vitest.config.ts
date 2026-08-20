@@ -12,6 +12,12 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    exclude: ["**/node_modules/**", "**/dist/**"],
+    /**
+     * `.claude/worktrees` holds git worktrees of this repository — full source
+     * copies, tests included. Without this the suite runs twice: once here and
+     * once against a checkout of some other branch, whose failures belong to
+     * that branch and are reported as if they were this one's.
+     */
+    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**"],
   },
 });

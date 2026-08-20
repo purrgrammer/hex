@@ -1338,6 +1338,54 @@ export class EveTranscript {
   }
 
   /**
+   * Whether this run is still waiting on that question.
+   *
+   * The open set is held here, by the writer that maintains it, and the stored
+   * copy is a mirror written on the last head. A caller with a live transcript
+   * should ask it rather than the mirror, which lags by exactly one publish.
+   */
+  waitingOn(requestId: string): boolean {
+    return this.openRequests.has(requestId);
+  }
+
+  /**
+   * Close every question a stopped run will never come back to.
+   *
+   * A `cancel`, `clear` or `reset` ends the thing that was waiting. The
+   * questions it had open end with it: nobody can answer them, because the turn
+   * that would read the answer is gone. Recorded rather than dropped, and with
+   * an outcome that says what became of them, so a transcript read afterwards
+   * shows a question that was stopped rather than a question that was answered.
+   *
+   * Returns how many were closed, so a caller can say so.
+   */
+  async abandon(outcome = "cancelled"): Promise<number> {
+    const open = [...this.openRequests];
+    if (open.length === 0) return 0;
+    this.openRequests.clear();
+    await this.append(
+      "user",
+      open.map((requestId) => ({
+        type: "input_resolved" as const,
+        requestId,
+        outcome,
+      })),
+      {
+        alt:
+          open.length === 1
+            ? "The question was stopped before it was answered."
+            : `${open.length} questions were stopped before they were answered.`,
+      },
+    );
+    await this.status(
+      this.record.status === "awaiting-input"
+        ? "idle"
+        : (this.record.status as SessionStatus),
+    );
+    return open.length;
+  }
+
+  /**
    * Stop following.
    *
    * With no status the head keeps whatever Eve last reported, which is what a
