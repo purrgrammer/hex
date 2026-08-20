@@ -194,6 +194,14 @@ export class EveTranscript {
    */
   channel?: { transport: string; id?: string };
 
+  /**
+   * What this run is about, from the message that opened it.
+   *
+   * Set once by whoever started the run; the head repeats it on every publish
+   * so a reader can find every session about a thing without reading titles.
+   */
+  subjects?: string[][];
+
   /** How full the window was when compaction was asked for, until it completes. */
   private compactingAt?: number;
 
@@ -1247,6 +1255,7 @@ export class EveTranscript {
         deltaRelays:
           this.options.deltas === false ? undefined : this.options.deltaRelays,
         channel: this.channel,
+        subjects: this.subjects,
         /**
          * Whichever definition describes this run.
          *

@@ -335,6 +335,14 @@ export interface SessionHeadInput {
   deltaRelays?: string[];
   /** The protocol and room this run is happening in. */
   channel?: { transport: string; id?: string };
+  /**
+   * What this run is ABOUT, as the pointers its opening message carried.
+   *
+   * `["a", "30617:…"]` for a repository, `["e", "<id>"]` for an event. Carried
+   * onto the head so every run about a thing is findable by asking for the
+   * pointer rather than by matching titles and hoping.
+   */
+  subjects?: string[][];
   /** `31779:<agent>:<slug>` — what this agent is, as opposed to what it is doing. */
   definition?: string;
   alt?: string;

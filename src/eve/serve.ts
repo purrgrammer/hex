@@ -124,6 +124,20 @@ interface Boundary {
 }
 
 /**
+ * The pointers a message carried, minus the ones that mean something else.
+ *
+ * A `p` names a recipient and an `e` with a `trigger` marker names the message
+ * itself; neither is a subject. What is left is what the sender said this is
+ * about.
+ */
+function subjectsOf(inbound: Inbound): string[][] {
+  const tags = (inbound.event as { tags?: string[][] } | undefined)?.tags ?? [];
+  return tags.filter(
+    (tag) => (tag[0] === "a" || tag[0] === "e") && !!tag[1] && !tag[3],
+  );
+}
+
+/**
  * The room a message arrived in, written the way its protocol writes rooms.
  *
  * Two `nostr:` conversations with the same person are one channel; two groups
@@ -326,7 +340,7 @@ export class EveServer {
      * `id` is the message that opened the run, so a reply threads onto the
      * conversation rather than onto nothing.
      */
-    this.bindRoomFor(record.sessionId, record.trigger);
+    this.bindRoomFor(record.sessionId, control.operator, record.trigger);
 
     try {
       switch (control.command) {
@@ -520,6 +534,16 @@ export class EveServer {
        * A NIP-17 conversation is named by the person on the other end.
        */
       transcript.channel = channelOf(inbound);
+      /**
+       * What the run is about, lifted off the message that started it.
+       *
+       * A client scoping a run to a repository sends an `a`; an event gets an
+       * `e`. Both are copied onto the head, and both are what the runtime is
+       * grounded in below — the alternative was the client writing "work on X"
+       * into the operator's own words, which titled every run after the
+       * boilerplate and attributed the instruction to them.
+       */
+      transcript.subjects = subjectsOf(inbound);
       conversation = { sessionId, transcript, finished: new Set() };
       this.conversations.set(peer, conversation);
       this.options.transcript.store.rememberConversation(
@@ -630,17 +654,32 @@ export class EveServer {
    * onto. The text is empty because nothing was said — this is a turn the
    * operator started, not a message anybody sent.
    */
-  private bindRoomFor(sessionId: string, trigger?: string): void {
+  private bindRoomFor(
+    sessionId: string,
+    operator: string,
+    trigger?: string,
+  ): void {
     const tools = this.options.tools;
-    if (!tools) return;
-    const peer = this.options.transcript.store.peerForSession(sessionId);
-    if (!peer) {
-      this.log(
-        `[hex] no conversation is on record for ${sessionId}, so a turn started here cannot speak`,
-      );
+    if (!tools) {
+      this.log("[hex] no tool bridge, so a turn started here cannot speak");
       return;
     }
+    /**
+     * The operator, with the conversation table as a hint only.
+     *
+     * `conversations` holds ONE row per correspondent — their CURRENT session —
+     * so a lookup by session fails for every run that is not the latest, which
+     * is most of them. The turn then bound no room and the agent went mute,
+     * which is exactly what happened the first time this was fixed.
+     *
+     * Whoever sent the control is who to answer, and a control is obeyed only
+     * from the pubkey the head names as operator, so the two agree by
+     * construction.
+     */
+    const peer =
+      this.options.transcript.store.peerForSession(sessionId) ?? operator;
 
+    this.log(`[hex] bound a room on ${sessionId} for ${short(peer)}`);
     tools.bridge.bind(
       sessionId,
       tools.host({

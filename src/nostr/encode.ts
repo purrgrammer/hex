@@ -288,6 +288,14 @@ export function buildSessionHead(
     tags.push(["transport", input.channel.transport]);
     if (input.channel.id) tags.push(["channel", input.channel.id]);
   }
+  /**
+   * What the run is about, copied from the message that started it.
+   *
+   * The pointer, not a paraphrase: a reader asking "which runs touched this
+   * repository" wants an `a` to match on, and a title is not one.
+   */
+  for (const subject of input.subjects ?? [])
+    if (subject[0] && subject[1]) tags.push([subject[0], subject[1]]);
   if (input.usage) tags.push(usageTag(input.usage));
   if (input.cost) tags.push(costTag(input.cost));
   // What the run is blocked on. Indexable would leak to a relay that a session
