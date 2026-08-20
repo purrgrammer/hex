@@ -88,8 +88,24 @@ export function authenticateOwn(options: OwnRelayAuthOptions): {
     const signIn = (what: string) => (required: boolean) => {
       if (!required || armed.authenticated || inFlight.has(url)) return;
       inFlight.add(url);
-      void armed
-        .authenticate(signer)
+      /**
+       * `authenticate` can throw SYNCHRONOUSLY, and that killed the daemon.
+       *
+       * It reports "Have not received authentication challenge" by throwing
+       * rather than by rejecting, so the `.catch` below never saw it: the throw
+       * escaped into the rxjs subscriber that called this, was reported as an
+       * unhandled error, and rethrown. `hex serve` exited mid-session, having
+       * done nothing wrong except ask a relay that had gone quiet.
+       *
+       * It happens when a relay says auth is required and then never sends the
+       * challenge — which one of these relays does, under load, reliably enough
+       * to have taken the process down while thirty heads were being published.
+       *
+       * `Promise.resolve().then(...)` turns a synchronous throw into a
+       * rejection, so one code path handles both.
+       */
+      void Promise.resolve()
+        .then(() => armed.authenticate(signer))
         .then((response) => {
           if (response.ok)
             log(`[hex] ${url} wanted NIP-42 to ${what}; signed in`);
