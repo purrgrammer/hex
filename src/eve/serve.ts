@@ -40,6 +40,7 @@ import {
   type ToolServer,
 } from "../tools/types.js";
 import type { SessionControl } from "../nostr/decode-control.js";
+import { roomKey } from "../transports/types.js";
 import type { Inbound, Room } from "../transports/types.js";
 
 /** What this needs of a transport: answer a message, and acknowledge one. */
@@ -283,6 +284,26 @@ function roomOf(channel?: {
   };
 }
 
+/**
+ * Separates the two halves of a conversation key. Neither half can contain it.
+ *
+ * A NUL rather than a colon: a NIP-29 room is written `<relay-host>'<group-id>`
+ * and a relay URL is full of punctuation, so any printable separator is one an
+ * id could contain.
+ */
+const KEY_SEPARATOR = "\u0000";
+
+/**
+ * Who is talking, and where — the identity of a conversation.
+ *
+ * NOT the author alone. The same person in a group and in a direct message is
+ * two conversations with two sessions, and conflating them makes a group
+ * question wait for an unrelated DM run and then be answered as a DM.
+ */
+function conversationKey(inbound: Inbound): string {
+  return `${inbound.author}${KEY_SEPARATOR}${roomKey(inbound.room)}`;
+}
+
 function channelOf(inbound: Inbound): { transport: string; id?: string } {
   const room = inbound.room;
   if (room.transport === "nip-29" && room.relay) {
@@ -343,12 +364,18 @@ export class EveServer {
   /**
    * Take one inbound message: run it, publish it, answer it.
    *
-   * Serialised per correspondent. Two questions arriving together are two turns
-   * of one session, not two sessions — and Eve would reject the second while the
-   * first is still running anyway.
+   * Serialised per correspondent PER ROOM. Two questions arriving together are
+   * two turns of one session, not two sessions — and the runtime would reject
+   * the second while the first is still running anyway.
+   *
+   * Per room, not per person, because the same human in a group and in a direct
+   * message is two conversations. Keyed on the person alone, a group question
+   * queued behind an unrelated DM run and waited for it — watched happen, for
+   * ten minutes — and would then have continued the DM's session and answered
+   * in the wrong place.
    */
   async handle(inbound: Inbound): Promise<void> {
-    const peer = inbound.author;
+    const peer = conversationKey(inbound);
     const previous = this.queues.get(peer);
     const run = (async () => {
       // Wait for this person's previous turn, and do not let its failure stop
@@ -668,6 +695,8 @@ export class EveServer {
       conversation = { sessionId, transcript, finished: new Set() };
       this.options.transcript.store.rememberConversation(
         peer,
+        // A control-plane run happens in no room; the empty key is that room.
+        "",
         sessionId,
         Math.floor(Date.now() / 1000),
       );
@@ -1044,7 +1073,7 @@ export class EveServer {
    * rather than lost.
    */
   async interrupt(inbound: Inbound): Promise<void> {
-    const conversation = this.conversations.get(inbound.author);
+    const conversation = this.conversations.get(conversationKey(inbound));
     if (conversation)
       await this.options.runtime.cancel(conversation.sessionId).then(
         () =>
@@ -1059,6 +1088,8 @@ export class EveServer {
 
   private async turn(inbound: Inbound): Promise<void> {
     const peer = inbound.author;
+    /** Who, and where. See `conversationKey`: a person is not a conversation. */
+    const key = conversationKey(inbound);
 
     /**
      * A reply to a question Hex asked is an ANSWER, not a new instruction.
@@ -1093,7 +1124,7 @@ export class EveServer {
      * no thread is a new subject. Hex does not have to guess, and does not get to.
      */
     let conversation = inbound.replyToId
-      ? (this.conversations.get(peer) ?? this.resume(peer))
+      ? (this.conversations.get(key) ?? this.resume(key))
       : undefined;
     if (!conversation && inbound.replyToId)
       this.log(
@@ -1197,9 +1228,10 @@ export class EveServer {
        */
       transcript.subjects = subjectsOf(inbound, addressed);
       conversation = { sessionId, transcript, finished: new Set() };
-      this.conversations.set(peer, conversation);
+      this.conversations.set(key, conversation);
       this.options.transcript.store.rememberConversation(
         peer,
+        roomKey(inbound.room),
         sessionId,
         Math.floor(Date.now() / 1000),
       );
@@ -1393,7 +1425,8 @@ export class EveServer {
      * every turn the answer unblocked published by nobody.
      */
     const conversation =
-      this.conversations.get(inbound.author) ?? this.resume(inbound.author);
+      this.conversations.get(conversationKey(inbound)) ??
+      this.resume(conversationKey(inbound));
     const boundary = conversation ? await this.drain(conversation) : undefined;
 
     try {
@@ -1651,8 +1684,12 @@ export class EveServer {
    * it left off rather than forking, and the trigger it already published stays
    * the message that opened the run.
    */
-  private resume(peer: string): Conversation | undefined {
-    const sessionId = this.options.transcript.store.conversationFor(peer);
+  private resume(key: string): Conversation | undefined {
+    const [author = key, room = ""] = key.split(KEY_SEPARATOR);
+    const sessionId = this.options.transcript.store.conversationFor(
+      author,
+      room,
+    );
     if (!sessionId) return undefined;
     const conversation: Conversation = {
       sessionId,
@@ -1666,8 +1703,8 @@ export class EveServer {
        */
       finished: new Set(),
     };
-    this.conversations.set(peer, conversation);
-    this.log(`[hex] ${short(peer)} → resumed eve session ${sessionId}`);
+    this.conversations.set(key, conversation);
+    this.log(`[hex] ${short(author)} → resumed eve session ${sessionId}`);
     return conversation;
   }
 

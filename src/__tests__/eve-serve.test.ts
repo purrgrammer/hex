@@ -867,6 +867,57 @@ describe("EveServer", () => {
     });
   });
 
+  it("gives one person two conversations when they are in two rooms", async () => {
+    /**
+     * Watched happen. A long DM run was going; the same person asked something
+     * in a NIP-29 group eight minutes later; the group message was accepted and
+     * then nothing. It had queued behind the DM — the queue and the session map
+     * were both keyed on the AUTHOR — and would have continued the DM's session
+     * and answered in the wrong place once it got there.
+     *
+     * A person is not a conversation. A person in a room is.
+     */
+    const dm = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = new EveServer({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: dm.impl }),
+      transport: transport(),
+      drainQuietMs: 40,
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: sink().impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+
+    await server_.handle(inbound("msg-dm", "in a direct message"));
+    await server_.handle({
+      ...inbound("msg-group", "in a group"),
+      room: {
+        transport: "nip-29",
+        id: "GROUPID",
+        relay: "wss://groups.example",
+      },
+    });
+
+    // Two sessions, not one continued: the fake mints a new id per create, so
+    // a second `POST /eve/v1/session` is the observable difference.
+    const created = dm.posts.filter((p) => p.path === "/eve/v1/session");
+    expect(created).toHaveLength(2);
+
+    // And each is remembered against its own room.
+    expect(store.conversationFor(PEER, "nip-17|" + PEER)).toBeTruthy();
+    expect(
+      store.conversationFor(PEER, "nip-29|wss://groups.example|GROUPID"),
+    ).toBeTruthy();
+    expect(store.conversationFor(PEER, "nip-17|" + PEER)).not.toBe(
+      store.conversationFor(PEER, "nip-29|wss://groups.example|GROUPID"),
+    );
+  });
+
   it("files a run in its group, and leaves every other run wrapped", async () => {
     /**
      * The room decides, and the GROUP RELAY decides who may read it. That is

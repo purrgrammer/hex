@@ -207,10 +207,21 @@ CREATE TABLE IF NOT EXISTS transcripts (
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
 
+/*
+ * Which session a correspondent is currently in — per ROOM, not per person.
+ *
+ * Keyed on the person alone, one human talking to Hex in a group and in a
+ * direct message shared a single conversation: the group question continued the
+ * DM's session and would have been answered in the wrong place. Watched happen —
+ * a group message sat behind a long DM run for ten minutes and never started a
+ * session of its own.
+ */
 CREATE TABLE IF NOT EXISTS conversations (
-  peer       TEXT PRIMARY KEY,
+  peer       TEXT NOT NULL,
+  room       TEXT NOT NULL DEFAULT '',
   session_id TEXT NOT NULL,
-  last_at    INTEGER NOT NULL
+  last_at    INTEGER NOT NULL,
+  PRIMARY KEY (peer, room)
 );
 
 /*
@@ -306,6 +317,28 @@ export class HexStore {
     if (!columns.includes("grp_relay"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN grp_relay TEXT`);
 
+    /**
+     * An older `conversations` had `peer` as its whole primary key.
+     *
+     * Rebuilt rather than altered, because SQLite cannot change a primary key
+     * in place — and this table is a cache of "which session is this person
+     * currently in", so the rows are cheap to keep and cheaper to lose. The
+     * existing ones are carried over into the empty room, which is what a
+     * direct message used before rooms were part of the key.
+     */
+    const conversationKey = (
+      db.prepare(`PRAGMA table_info(conversations)`).all() as { name: string }[]
+    ).map((column) => column.name);
+    if (!conversationKey.includes("room")) {
+      db.exec(`ALTER TABLE conversations RENAME TO conversations_by_peer`);
+      db.exec(SCHEMA);
+      db.exec(
+        `INSERT OR IGNORE INTO conversations (peer, room, session_id, last_at)
+           SELECT peer, '', session_id, last_at FROM conversations_by_peer`,
+      );
+      db.exec(`DROP TABLE conversations_by_peer`);
+    }
+
     db.prepare(`DELETE FROM obeyed WHERE at < ?`).run(
       Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
     );
@@ -349,10 +382,12 @@ export class HexStore {
    * forever with nobody to close it, and the reader shown two unrelated runs for
    * one conversation.
    */
-  conversationFor(peer: string): string | undefined {
+  conversationFor(peer: string, room: string): string | undefined {
     const row = this.db
-      .prepare("SELECT session_id FROM conversations WHERE peer = ?")
-      .get(peer) as { session_id?: string } | undefined;
+      .prepare(
+        "SELECT session_id FROM conversations WHERE peer = ? AND room = ?",
+      )
+      .get(peer, room) as { session_id?: string } | undefined;
     return row?.session_id;
   }
 
@@ -370,14 +405,20 @@ export class HexStore {
   }
 
   /** Remember it, or move this correspondent to a different session. */
-  rememberConversation(peer: string, sessionId: string, at: number): void {
+  rememberConversation(
+    peer: string,
+    room: string,
+    sessionId: string,
+    at: number,
+  ): void {
     this.db
       .prepare(
-        `INSERT INTO conversations (peer, session_id, last_at) VALUES (?, ?, ?)
-         ON CONFLICT(peer) DO UPDATE SET
+        `INSERT INTO conversations (peer, room, session_id, last_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(peer, room) DO UPDATE SET
            session_id = excluded.session_id, last_at = excluded.last_at`,
       )
-      .run(peer, sessionId, at);
+      .run(peer, room, sessionId, at);
   }
 
   /**
