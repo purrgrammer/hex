@@ -412,8 +412,8 @@ export class RoomTools implements ToolHost {
    * dropping the recent end to fit an old essay is the opposite of useful.
    */
   private async history(args: Record<string, unknown>): Promise<ToolResult> {
-    const read = this.options.transport.history;
-    if (!read)
+    const transport = this.options.transport;
+    if (!transport.history)
       return { ok: false, output: "this room cannot be read back" };
 
     const asked =
@@ -423,7 +423,17 @@ export class RoomTools implements ToolHost {
     const limit = Math.min(asked, MAX_HISTORY);
 
     try {
-      const messages = await read(this.room, limit, { includeOwn: true });
+      /**
+       * Called ON the transport, not lifted off it.
+       *
+       * `const read = transport.history` then `read(…)` detaches the method
+       * from its object, so `this` inside `Nip17Transport.history` is undefined
+       * and the first line of it dies reading `this.options`. Every call
+       * refused with an error nobody could act on.
+       */
+      const messages = await transport.history(this.room, limit, {
+        includeOwn: true,
+      });
       return {
         ok: true,
         output: JSON.stringify({

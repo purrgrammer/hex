@@ -112,6 +112,48 @@ describe("RoomTools.list", () => {
     expect(read.messages[0]!.text).toBe("what is kind 30023");
   });
 
+  it("reads history off a transport that uses `this`", async () => {
+    /**
+     * The bug this exists for shipped and refused every single call.
+     *
+     * `const read = transport.history` then `read(…)` detaches the method from
+     * its object, so `this` inside a real transport is undefined and its first
+     * line dies on `this.options`. Every other test here passes an object
+     * literal of ARROW functions, which close over nothing and never notice —
+     * which is exactly why this one is a class.
+     */
+    class Recording {
+      readonly name = "nip-29" as const;
+      private readonly stored: Inbound[];
+      constructor(stored: Inbound[]) {
+        this.stored = stored;
+      }
+      start() {
+        throw new Error("not used");
+      }
+      async history(): Promise<Inbound[]> {
+        // The line that broke: reaching for instance state.
+        return this.stored;
+      }
+      async reply() {
+        return "reply-id";
+      }
+      stop() {}
+    }
+
+    const tools = new RoomTools({
+      transport: new Recording([
+        { ...INBOUND, id: "m1", text: "earlier" },
+      ]) as unknown as Transport,
+      incoming: INBOUND,
+    });
+
+    const result = await tools.call({ name: "chat_history", arguments: {} });
+    expect(result.ok).toBe(true);
+    const read = JSON.parse(result.output) as { count: number };
+    expect(read.count).toBe(1);
+  });
+
   it("does not offer history a transport cannot provide", () => {
     // An empty list would read as "nothing was said", which is a different and
     // much worse answer than "this room cannot be read back".
