@@ -278,6 +278,9 @@ export class EveServer {
   private async describe(transcript: EveTranscript): Promise<void> {
     const describe = this.options.describe;
     if (!describe) return;
+    // Said before the first head goes out, so it points at the snapshot this is
+    // about to publish rather than at a standing definition nobody wrote.
+    transcript.expectSnapshot();
     try {
       const info = await describe();
       if (info) await transcript.snapshot(info);

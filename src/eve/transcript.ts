@@ -354,6 +354,25 @@ export class EveTranscript {
 
   private snapshotted = false;
 
+  /**
+   * A snapshot is coming, so point at it now.
+   *
+   * `describe()` is deliberately fire-and-forget — a run must not refuse to
+   * start because it could not describe itself — which means the FIRST head
+   * goes out before the snapshot exists. With the address chosen from
+   * `snapshotted` alone, that head pointed at the agent's standing definition
+   * instead, an event this agent has never published: readers followed it,
+   * found nothing, and showed no prompt and no tools for the session.
+   *
+   * A pointer at the snapshot that is a second early is a pointer that resolves
+   * a second later. A pointer at something that will never exist never does.
+   */
+  expectSnapshot(): void {
+    this.snapshotting = true;
+  }
+
+  private snapshotting = false;
+
   /** Publish the agent's definition. Once per agent, not per session. */
   async announce(definition: {
     name: string;
@@ -1265,7 +1284,9 @@ export class EveTranscript {
          */
         definition: definitionAddress(
           this.options.agentPubkey,
-          this.snapshotted ? this.record.nostrId : this.options.slug,
+          this.snapshotted || this.snapshotting
+            ? this.record.nostrId
+            : this.options.slug,
         ),
         alt: `Agent session: ${title ?? this.sessionId} (${this.record.status}, ${this.record.seq} turns)`,
       },
