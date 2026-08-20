@@ -101,6 +101,7 @@ export interface ServeOptions {
         picture?: string;
         instructions?: string;
         tools?: { name: string; description?: string; parameters?: unknown }[];
+        model?: { id: string; contextWindow?: number };
       }
     | undefined
   >;
@@ -303,27 +304,33 @@ export class EveServer {
         ),
         finished: new Set(),
       };
+      /**
+       * A session that never managed to say what it was set up with says it
+       * now, and says so BEFORE the catch-up publishes anything.
+       *
+       * The snapshot is fire-and-forget by design — a run must not refuse to
+       * start because it could not describe itself — which means a relay that
+       * was down, or a runtime that was not answering, leaves a session whose
+       * prompt and tool list nobody can see. Retrying makes that a delay rather
+       * than a hole.
+       *
+       * Before the drain rather than after, because the drain republishes the
+       * head: run afterwards, the head that had already gone out pointed at no
+       * definition and the reader saw nothing until the next one.
+       */
+      const describing = conversation.transcript.described
+        ? undefined
+        : this.describe(
+            conversation.transcript,
+            record.channel?.transport === "nip-59",
+          );
+
       try {
+        await describing;
         const boundary = await this.drain(conversation);
         this.log(
           `[hex] ${record.sessionId} caught up to ${boundary.last} (${conversation.transcript.headStatus})`,
         );
-        /**
-         * A session that never managed to say what it was set up with says it
-         * now.
-         *
-         * The snapshot is fire-and-forget by design — a run must not refuse to
-         * start because it could not describe itself — which means a relay that
-         * was down, or a runtime that was not answering, leaves a session whose
-         * prompt and tool list nobody can see, permanently. Retrying it here
-         * makes that a delay rather than a hole, and it is the reason the
-         * publish is remembered on the record instead of assumed.
-         */
-        if (!conversation.transcript.described)
-          await this.describe(
-            conversation.transcript,
-            record.channel?.transport === "nip-59",
-          );
       } catch (error) {
         // One unreachable session must not stop the others, or a single dead
         // stream keeps every stale head stale.

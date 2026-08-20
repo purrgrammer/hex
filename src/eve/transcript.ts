@@ -360,6 +360,7 @@ export class EveTranscript {
     picture?: string;
     instructions?: string;
     tools?: AgentToolSpec[];
+    model?: { id: string; contextWindow?: number };
     repositories?: RepositorySpec[];
   }): Promise<void> {
     if (this.record.described) return;
@@ -1315,18 +1316,24 @@ export class EveTranscript {
         channel: this.record.channel,
         subjects: this.subjects,
         /**
-         * Whichever definition describes this run.
+         * THIS run's snapshot, or nothing at all.
          *
-         * The per-session snapshot when one was published, the standing
-         * definition otherwise — a reader follows one pointer either way, and
-         * the address itself says which it got.
+         * It used to fall back to the agent's standing definition, on the
+         * reasoning that a reader following one pointer is better off than a
+         * reader following none. That was wrong, and wrong in the worst way: a
+         * standing definition lists every tool the agent can ever offer, so a
+         * session with no room was shown as having chat tools it was never
+         * given, and a prompt that was not the one in force. A reader cannot
+         * tell a snapshot from a stand-in by looking, so it believed it.
+         *
+         * No pointer means the viewer shows no setup, which is the truth. The
+         * agent's own definition is still discoverable from its pubkey by
+         * anyone who wants the general answer.
          */
-        definition: definitionAddress(
-          this.options.agentPubkey,
+        definition:
           this.record.described || this.snapshotting
-            ? this.record.nostrId
-            : this.options.slug,
-        ),
+            ? definitionAddress(this.options.agentPubkey, this.record.nostrId)
+            : undefined,
         alt: `Agent session: ${title ?? this.sessionId} (${this.record.status}, ${this.record.seq} turns)`,
       },
     );

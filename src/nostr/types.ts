@@ -390,6 +390,17 @@ export interface AgentDefinitionInput {
   /** The system prompt, verbatim — it becomes the event's `content`. */
   instructions?: string;
   tools?: AgentToolSpec[];
+  /**
+   * The model this ran on, and how much context it holds.
+   *
+   * On the definition rather than the head because it describes the SETUP, and
+   * because the head is republished dozens of times a session while this is
+   * written once. The window is the half a reader cannot derive: a session's
+   * token count means one thing against 200k and something else entirely
+   * against a million, and "how close is this to compacting" is the question a
+   * long run is read for.
+   */
+  model?: { id: string; contextWindow?: number };
   /** Starter prompts a client offers before the first message. */
   suggestions?: string[];
   /** Checkouts this agent can read, and where they sit inside its sandbox. */

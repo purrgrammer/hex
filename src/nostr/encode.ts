@@ -359,6 +359,14 @@ export function buildAgentDefinition(
       repo.path ?? "",
       repo.description ?? "",
     ]);
+  if (input.model)
+    tags.push([
+      "model",
+      input.model.id,
+      // Positional, with an empty string rather than a gap, so a reader
+      // indexing by position cannot mistake a missing window for one.
+      input.model.contextWindow ? String(input.model.contextWindow) : "",
+    ]);
   for (const recipient of input.recipients ?? []) tags.push(["p", recipient]);
   if (input.alt) tags.push(["alt", input.alt]);
 

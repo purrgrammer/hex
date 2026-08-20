@@ -17,6 +17,15 @@
 export interface AgentInfo {
   /** The system prompt, every static source concatenated in order. */
   instructions?: string;
+  /**
+   * The model in force, and how much it can hold.
+   *
+   * The window is worth publishing because a reader cannot derive it: a
+   * session's token counts mean one thing against 200k and something else
+   * entirely against a million, and "how close is this to compacting" is the
+   * question a long run is actually read for.
+   */
+  model?: { id: string; contextWindow?: number };
   tools: {
     name: string;
     description?: string;
@@ -54,6 +63,9 @@ export async function readAgentInfo(
     );
     if (!response.ok) return undefined;
     const body = (await response.json()) as {
+      agent?: {
+        model?: { id?: unknown; contextWindowTokens?: unknown };
+      };
       instructions?: { static?: { content?: unknown }[] };
       tools?: { available?: Record<string, unknown>[] };
     };
@@ -71,7 +83,23 @@ export async function readAgentInfo(
       }))
       .filter((tool) => tool.name);
 
-    return { instructions: instructions || undefined, tools };
+    const id = str(body.agent?.model?.id);
+    const window = body.agent?.model?.contextWindowTokens;
+
+    return {
+      instructions: instructions || undefined,
+      tools,
+      ...(id
+        ? {
+            model: {
+              id,
+              ...(typeof window === "number" && window > 0
+                ? { contextWindow: window }
+                : {}),
+            },
+          }
+        : {}),
+    };
   } catch {
     return undefined;
   }

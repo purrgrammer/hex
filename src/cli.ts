@@ -914,6 +914,7 @@ async function main(): Promise<void> {
               picture: config.profile.picture,
               instructions: info.instructions,
               tools: info.tools,
+              model: info.model,
               repositories: config.repositories,
             };
           },

@@ -753,6 +753,23 @@ describe("EveServer", () => {
     expect(tag(heads[heads.length - 1]!, "status")?.[1]).toBe("error");
   });
 
+  it("points a head at no definition rather than at the wrong one", async () => {
+    /**
+     * It used to fall back to the agent's STANDING definition when a session
+     * had no snapshot of its own, on the reasoning that one pointer beats none.
+     * That listed every tool the agent can ever offer, so a run with no room
+     * was shown as having chat tools it was never given — and a reader cannot
+     * tell a snapshot from a stand-in by looking, so it believed it.
+     */
+    const eve = fakeEve(FIRST_TURN, 8);
+    const out = sink();
+    const server_ = server(eve, transport(), out.impl);
+    await server_.handle(inbound("msg-1", "hello"));
+
+    const head = out.sent.filter((rumor) => rumor.kind === 31777)[0]!;
+    expect(tag(head, "agent")).toBeUndefined();
+  });
+
   it("starts a run nobody said anything to start", async () => {
     const eve = fakeEve(FIRST_TURN, 8);
     const bus = transport();
