@@ -24,19 +24,14 @@ import type { Inbound } from "./transports/types.js";
 import { KIND_FILE_MESSAGE, Nip17Transport } from "./transports/nip17.js";
 import { Nip29Transport } from "./transports/nip29.js";
 import { TransportRouter } from "./transports/router.js";
-import {
-  fileMessageTags,
-  imetaTag,
-  upload,
-  type Uploaded,
-} from "./blossom.js";
+import { fileMessageTags, imetaTag, upload, type Uploaded } from "./blossom.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
 import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 import { EveServer } from "./eve/serve.js";
 import { ToolBridge } from "./eve/bridge.js";
 import { parseSessionControl } from "./nostr/decode-control.js";
-import { readAgentInfo } from "./eve/info.js";
+import { EveRuntime } from "./runtime/eve.js";
 import { Prices } from "./eve/pricing.js";
 import { KnowledgeTools } from "./tools/knowledge.js";
 import { RoomTools } from "./tools/room-tools.js";
@@ -442,7 +437,8 @@ async function main(): Promise<void> {
             !group.groups.some(
               (configured) =>
                 configured.id === groupId &&
-                configured.relay.replace(/\/$/, "") === relay.replace(/\/$/, ""),
+                configured.relay.replace(/\/$/, "") ===
+                  relay.replace(/\/$/, ""),
             )
           )
             fail(
@@ -610,9 +606,9 @@ async function main(): Promise<void> {
             signer: resolved.signer,
             pubkey: resolved.pubkey,
             inboxRelays: config.relays.dm,
-          // Live progress needs somewhere both sides can reach: a DM inbox relay
-          // may refuse kind 21059, and the head says where it went instead.
-          relayHints: config.relays.dm,
+            // Live progress needs somewhere both sides can reach: a DM inbox relay
+            // may refuse kind 21059, and the head says where it went instead.
+            relayHints: config.relays.dm,
             readRelays: config.relays.read,
             allow: dm.allow.map((peer) => peer.pubkey),
             since: Math.floor(Date.now() / 1000),
@@ -780,7 +776,9 @@ async function main(): Promise<void> {
          * working one.
          */
         const groups = config.transports.find(
-          (candidate): candidate is Extract<TransportConfig, { type: "nip-29" }> =>
+          (
+            candidate,
+          ): candidate is Extract<TransportConfig, { type: "nip-29" }> =>
             candidate.type === "nip-29",
         );
         const rooms = groups?.groups.length
@@ -802,9 +800,7 @@ async function main(): Promise<void> {
          * that started it was private or in a group, because a transcript is
          * for the person who owns the agent and not for the room.
          */
-        const transport = rooms
-          ? new TransportRouter([dms, rooms])
-          : dms;
+        const transport = rooms ? new TransportRouter([dms, rooms]) : dms;
 
         /**
          * Hex's own tools, if the config opened a bridge for them.
@@ -816,7 +812,6 @@ async function main(): Promise<void> {
          * to run turns, not to decide what an agent may do.
          */
         const bridgeConfig = config.eve?.bridge;
-
 
         /**
          * The write tools, only if the config asked for them.
@@ -933,8 +928,16 @@ async function main(): Promise<void> {
           await bridge.start();
         }
 
+        /**
+         * One driver for the backend, built once and handed to the server.
+         *
+         * Every `/eve/v1/…` route lives inside it, so this is the line that
+         * would change to run hex against something else.
+         */
+        const runtime = new EveRuntime({ host });
+
         const server = new EveServer({
-          host,
+          runtime,
           transport,
           reply: !values["no-reply"],
           /**
@@ -945,7 +948,7 @@ async function main(): Promise<void> {
            * would describe an agent nobody ran.
            */
           describe: async () => {
-            const info = await readAgentInfo({ host });
+            const info = await runtime.describe();
             if (!info) return undefined;
             return {
               name: config.profile.name ?? transcriptConfig.slug,
@@ -963,9 +966,7 @@ async function main(): Promise<void> {
            * Uses the same reader the tools use, so what the model is told up
            * front and what it would learn by looking cannot disagree.
            */
-          ground: knowledge
-            ? (input) => knowledge.ground(input)
-            : undefined,
+          ground: knowledge ? (input) => knowledge.ground(input) : undefined,
           tools:
             bridge && knowledge
               ? {
@@ -1135,7 +1136,6 @@ async function main(): Promise<void> {
          * reader can detect, and it never expires on its own.
          */
         await server.catchUp();
-
 
         await new Promise<void>((resolveRun) => {
           const shutdown = (signal: string) => {

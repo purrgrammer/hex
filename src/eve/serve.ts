@@ -28,12 +28,16 @@
  * its job — it writes down what happened.
  */
 
-import { streamSession } from "./stream.js";
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
 import { asRecord, payload, stringField } from "./types.js";
 import { sessionAddress } from "../nostr/encode.js";
-import type { ToolBridge } from "./bridge.js";
-import { KNOWN_TOOLS, wireName, type ToolHost } from "../tools/types.js";
+import type { Runtime } from "../runtime/types.js";
+import {
+  KNOWN_TOOLS,
+  wireName,
+  type ToolHost,
+  type ToolServer,
+} from "../tools/types.js";
 import type { SessionControl } from "../nostr/decode-control.js";
 import type { Inbound } from "../transports/types.js";
 
@@ -47,7 +51,9 @@ export interface ServeTransport {
    * that group's own relay, and a Concord channel's are inside an encrypted
    * list no relay will hand over. Optional — its absence costs a fact.
    */
-  describeRoom?(room: Inbound["room"]): Promise<Record<string, unknown> | undefined>;
+  describeRoom?(
+    room: Inbound["room"],
+  ): Promise<Record<string, unknown> | undefined>;
   /**
    * Optional, because not every protocol has a reaction.
    *
@@ -58,8 +64,14 @@ export interface ServeTransport {
 }
 
 export interface ServeOptions {
-  /** e.g. `http://127.0.0.1:2000`. */
-  host: string;
+  /**
+   * The thing that runs the model, behind its port.
+   *
+   * Was a `host` string and a `fetchImpl`, which made this file the second
+   * place that knew Eve's HTTP API. Every route now lives in one driver, and
+   * swapping backends is supplying a different one.
+   */
+  runtime: Runtime;
   transport: ServeTransport;
   /**
    * Also send the answer as an ordinary message. On unless told otherwise.
@@ -78,7 +90,7 @@ export interface ServeOptions {
     sink: EveTranscriptOptions["sink"];
   };
   /**
-   * Hex's own tools, offered to the runtime through the loopback bridge.
+   * Hex's own tools, and the way this runtime is given them.
    *
    * Optional: without it the agent has only whatever tools its runtime ships
    * with, and the answer is scraped from the last message of the turn. With it,
@@ -86,7 +98,7 @@ export interface ServeOptions {
    * carry a room, a reply target and a transport the runtime has never heard of.
    */
   tools?: {
-    bridge: ToolBridge;
+    bridge: ToolServer;
     /**
      * A fresh host per turn, bound to the message being answered.
      *
@@ -136,7 +148,6 @@ export interface ServeOptions {
   /** How long the pre-message read waits for silence. Injected in tests. */
   drainQuietMs?: number;
   log?: (line: string) => void;
-  fetchImpl?: typeof fetch;
   signal?: AbortSignal;
 }
 
@@ -171,7 +182,15 @@ const PLACEHOLDER_INBOUND = {
   createdAt: 0,
   room: { transport: "nip-17", id: "" },
   addressesSelf: true,
-  event: { id: "", pubkey: "", created_at: 0, kind: 14, tags: [], content: "", sig: "" },
+  event: {
+    id: "",
+    pubkey: "",
+    created_at: 0,
+    kind: 14,
+    tags: [],
+    content: "",
+    sig: "",
+  },
 } as unknown as Inbound;
 
 /**
@@ -505,7 +524,9 @@ export class EveServer {
    */
   private async start(control: SessionControl): Promise<void> {
     if (!/^[0-9a-f]{64}$/.test(control.session)) {
-      this.log(`[hex] a start named ${control.session}, which is not a session id`);
+      this.log(
+        `[hex] a start named ${control.session}, which is not a session id`,
+      );
       return;
     }
     if (this.options.transcript.store.transcriptForNostrId(control.session)) {
@@ -585,7 +606,12 @@ export class EveServer {
      * request, which the client that started it is already watching for.
      */
     const asked: Asked[] = [];
-    await this.follow(conversation, peer, { last: -1, finished: new Set() }, asked);
+    await this.follow(
+      conversation,
+      peer,
+      { last: -1, finished: new Set() },
+      asked,
+    );
     this.log(
       `[hex] ${short(peer)} ← ${sessionAddress(
         this.options.transcript.agentPubkey,
@@ -647,7 +673,6 @@ export class EveServer {
       return;
     }
 
-    const path = `/eve/v1/session/${encodeURIComponent(record.sessionId)}`;
     const say = (what: string) =>
       this.log(`[hex] ${short(control.operator)} → ${what}`);
 
@@ -715,15 +740,13 @@ export class EveServer {
             );
             return;
           }
-          await this.post(path, {
-            inputResponses: [
-              {
-                requestId: control.request,
-                ...(control.option ? { optionId: control.option } : {}),
-                ...(control.text ? { text: control.text } : {}),
-              },
-            ],
-          });
+          await this.options.runtime.respond(record.sessionId, [
+            {
+              requestId: control.request,
+              ...(control.option ? { optionId: control.option } : {}),
+              ...(control.text ? { text: control.text } : {}),
+            },
+          ]);
           say(`answered ${control.request}`);
           break;
         }
@@ -745,9 +768,8 @@ export class EveServer {
            * ambiguous act. A client that means "stop and do this instead" says
            * so with `policy=steer`, or cancels first.
            */
-          await this.post(path, {
-            message: control.text,
-            turnPolicy: control.policy ?? "queue",
+          await this.options.runtime.send(record.sessionId, control.text, {
+            policy: control.policy ?? "queue",
           });
           say(
             control.policy === "steer"
@@ -758,20 +780,32 @@ export class EveServer {
         }
 
         case "cancel":
-          await this.post(
-            `${path}/cancel`,
-            control.turn ? { turnId: control.turn } : {},
-          );
+          await this.options.runtime.cancel(record.sessionId, control.turn);
           say("stopped the run");
           break;
 
+        /**
+         * The three a runtime is allowed not to have.
+         *
+         * Said out loud rather than swallowed: an operator who presses compact
+         * on a backend that cannot compact has been told the button worked, and
+         * a status that never changes is the only clue otherwise.
+         */
         case "compact":
-          await this.post(`${path}/compact`, {});
+          if (!this.options.runtime.compact)
+            return this.log(
+              `[hex] ${this.options.runtime.name} cannot compact a context`,
+            );
+          await this.options.runtime.compact(record.sessionId);
           say("compacted the context");
           break;
 
         case "clear":
-          await this.post(`${path}/clear`, {});
+          if (!this.options.runtime.clear)
+            return this.log(
+              `[hex] ${this.options.runtime.name} cannot clear a context`,
+            );
+          await this.options.runtime.clear(record.sessionId);
           say("cleared the context");
           break;
 
@@ -784,10 +818,11 @@ export class EveServer {
          * would otherwise see a run that simply stopped mid-sentence.
          */
         case "reset":
-          await this.post(
-            `${path}/reset`,
-            control.text ? { reason: control.text } : {},
-          );
+          if (!this.options.runtime.reset)
+            return this.log(
+              `[hex] ${this.options.runtime.name} cannot retire a session`,
+            );
+          await this.options.runtime.reset(record.sessionId, control.text);
           await this.retire(record.sessionId);
           say("retired the session");
           break;
@@ -858,10 +893,7 @@ export class EveServer {
   async interrupt(inbound: Inbound): Promise<void> {
     const conversation = this.conversations.get(inbound.author);
     if (conversation)
-      await this.post(
-        `/eve/v1/session/${encodeURIComponent(conversation.sessionId)}/cancel`,
-        {},
-      ).then(
+      await this.options.runtime.cancel(conversation.sessionId).then(
         () =>
           this.log(`[hex] ${short(inbound.author)} interrupted their own turn`),
         (error: unknown) =>
@@ -1178,8 +1210,6 @@ export class EveServer {
     inbound: Inbound,
     answering: { sessionId: string; requestId: string },
   ): Promise<void> {
-    const path = `/eve/v1/session/${encodeURIComponent(answering.sessionId)}`;
-
     /**
      * Read the stream to its current lull BEFORE the answer goes in, exactly as
      * a continuing message does. Draining afterwards would wait out the very
@@ -1191,11 +1221,9 @@ export class EveServer {
     const boundary = conversation ? await this.drain(conversation) : undefined;
 
     try {
-      await this.post(path, {
-        inputResponses: [
-          { requestId: answering.requestId, text: inbound.text.trim() },
-        ],
-      });
+      await this.options.runtime.respond(answering.sessionId, [
+        { requestId: answering.requestId, text: inbound.text.trim() },
+      ]);
       this.log(
         `[hex] ${short(inbound.author)} answered ${answering.requestId} in the room`,
       );
@@ -1323,13 +1351,10 @@ export class EveServer {
       : verdict.signal;
 
     try {
-      for await (const { index, event } of streamSession({
-        host: this.options.host,
-        sessionId: conversation.sessionId,
-        startIndex: conversation.transcript.streamIndex,
-        signal,
-        fetchImpl: this.options.fetchImpl,
-      })) {
+      for await (const { index, event } of this.options.runtime.follow(
+        conversation.sessionId,
+        { startIndex: conversation.transcript.streamIndex, signal },
+      )) {
         await conversation.transcript.handle(event, index);
 
         if (index <= boundary.last) continue;
@@ -1424,7 +1449,6 @@ export class EveServer {
           if (ours) break;
           continue;
         }
-
       }
     } catch (error) {
       // A dropped stream is not a failed turn, but it does mean this process
@@ -1486,20 +1510,14 @@ export class EveServer {
     text: string,
     clientContext?: string[],
   ): Promise<string> {
-    const response = await this.post("/eve/v1/session", {
+    return await this.options.runtime.open({
       message: text,
-      ...(clientContext?.length ? { clientContext } : {}),
+      context: clientContext,
     });
-    const id =
-      typeof response.sessionId === "string" ? response.sessionId : undefined;
-    if (!id) throw new Error("eve accepted the message but named no session");
-    return id;
   }
 
   private async sendMessage(sessionId: string, text: string): Promise<void> {
-    await this.post(`/eve/v1/session/${encodeURIComponent(sessionId)}`, {
-      message: text,
-    });
+    await this.options.runtime.send(sessionId, text);
   }
 
   /**
@@ -1541,13 +1559,10 @@ export class EveServer {
     let last = conversation.transcript.streamIndex;
     const finished = new Set(conversation.finished);
     try {
-      for await (const { index, event } of streamSession({
-        host: this.options.host,
-        sessionId: conversation.sessionId,
-        startIndex: last,
-        signal: controller.signal,
-        fetchImpl: this.options.fetchImpl,
-      })) {
+      for await (const { index, event } of this.options.runtime.follow(
+        conversation.sessionId,
+        { startIndex: last, signal: controller.signal },
+      )) {
         /**
          * The window measures waiting, not working.
          *
@@ -1577,25 +1592,6 @@ export class EveServer {
     }
     conversation.finished = finished;
     return { last, finished };
-  }
-
-  private async post(
-    path: string,
-    body: unknown,
-  ): Promise<Record<string, unknown>> {
-    const doFetch = this.options.fetchImpl ?? fetch;
-    const response = await doFetch(
-      new URL(path, this.options.host).toString(),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: this.options.signal,
-      },
-    );
-    if (!response.ok)
-      throw new Error(`eve ${path}: ${response.status} ${response.statusText}`);
-    return (await response.json()) as Record<string, unknown>;
   }
 
   /** Close every session this server was following. */

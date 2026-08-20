@@ -32,7 +32,12 @@
 
 import { createServer, type IncomingMessage, type Server } from "node:http";
 
-import type { ToolHost, ToolResult, ToolSpec } from "../tools/types.js";
+import type {
+  ToolHost,
+  ToolResult,
+  ToolSpec,
+  ToolServer,
+} from "../tools/types.js";
 
 export interface ToolBridgeOptions {
   /** Loopback port. 0 asks the OS for one, which `port` reports back. */
@@ -60,7 +65,10 @@ export interface ToolBridgeOptions {
 /** How many completed calls are remembered for replay. */
 const MAX_REMEMBERED = 200;
 
-export class ToolBridge {
+export class ToolBridge implements ToolServer {
+  /** Loopback HTTP with a bearer token — what Eve's tools know how to call. */
+  readonly name = "loopback";
+
   private server?: Server;
   private readonly hosts = new Map<string, ToolHost>();
   /** `callId` → what it returned, so an interrupted step replays rather than repeats. */
@@ -204,7 +212,9 @@ export class ToolBridge {
   }
 }
 
-async function json(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function json(
+  request: IncomingMessage,
+): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request) {

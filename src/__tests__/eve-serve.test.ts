@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { EveServer } from "../eve/serve.js";
+import { EveRuntime } from "../runtime/eve.js";
 import type { RumorSink } from "../eve/transcript.js";
 import type { Rumor } from "../nostr/types.js";
 import type { Inbound } from "../transports/types.js";
@@ -170,7 +171,8 @@ function fakeEve(
           ok: true,
           // The first create is the session everything else refers to; a second
           // one is a second session, and it must not be mistaken for the first.
-          sessionId: created.length > 1 ? `${session}_${created.length}` : session,
+          sessionId:
+            created.length > 1 ? `${session}_${created.length}` : session,
         }),
       };
     }
@@ -257,10 +259,9 @@ describe("EveServer", () => {
     reply = true,
   ) {
     return new EveServer({
-      host: HOST,
+      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: bus,
       reply,
-      fetchImpl: eve.impl,
       // The fake replays instantly; a real host would too. Kept short so the
       // suite does not sit through the production quiet window.
       drainQuietMs: 40,
@@ -289,7 +290,11 @@ describe("EveServer", () => {
      * or steered session is titled by the same event either way.
      */
     const eve = fakeEve(FIRST_TURN, 8, undefined, [
-      { type: "turn.started", data: { turnId: "turn_1" }, meta: { id: "evt_9" } },
+      {
+        type: "turn.started",
+        data: { turnId: "turn_1" },
+        meta: { id: "evt_9" },
+      },
       {
         type: "message.received",
         data: { message: "now delete it", turnId: "turn_1" },
@@ -329,9 +334,8 @@ describe("EveServer", () => {
     const bound: string[] = [];
 
     const hex = new EveServer({
-      host: HOST,
+      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: bus,
-      fetchImpl: eve.impl,
       drainQuietMs: 40,
       tools: {
         bridge: {
@@ -601,7 +605,9 @@ describe("EveServer", () => {
     const server_ = server(eve, bus, sink().impl);
 
     await server_.handle(inbound("msg-1", "first"));
-    await server_.interrupt(inbound("msg-2", "never mind — this instead", "msg-1"));
+    await server_.interrupt(
+      inbound("msg-2", "never mind — this instead", "msg-1"),
+    );
 
     expect(eve.posts.map((post) => post.path)).toEqual([
       "/eve/v1/session",
@@ -667,12 +673,33 @@ describe("EveServer", () => {
     // runtime's. Using the runtime's here would test a path no reader can take.
     const nostrId = store.transcriptFor(eve.session)!.nostrId;
     const base = { id: "", operator: PEER, agent: AGENT, session: nostrId };
-    await server_.control({ ...base, id: "c1", command: "respond", request: "req_1", option: "approve" });
-    await server_.control({ ...base, id: "c2", command: "steer", text: "do the other thing" });
-    await server_.control({ ...base, id: "c3", command: "cancel", turn: "turn_0" });
+    await server_.control({
+      ...base,
+      id: "c1",
+      command: "respond",
+      request: "req_1",
+      option: "approve",
+    });
+    await server_.control({
+      ...base,
+      id: "c2",
+      command: "steer",
+      text: "do the other thing",
+    });
+    await server_.control({
+      ...base,
+      id: "c3",
+      command: "cancel",
+      turn: "turn_0",
+    });
     await server_.control({ ...base, id: "c4", command: "compact" });
     await server_.control({ ...base, id: "c5", command: "clear" });
-    await server_.control({ ...base, id: "c6", command: "reset", text: "start over" });
+    await server_.control({
+      ...base,
+      id: "c6",
+      command: "reset",
+      text: "start over",
+    });
 
     const sent = eve.posts.slice(before);
     expect(sent.map((post) => post.path)).toEqual([
@@ -770,8 +797,14 @@ describe("EveServer", () => {
       [
         { type: "session.started", data: {} },
         { type: "turn.started", data: { turnId: "turn_0" } },
-        { type: "step.failed", data: { turnId: "turn_0", message: "no funds" } },
-        { type: "turn.failed", data: { turnId: "turn_0", message: "no funds" } },
+        {
+          type: "step.failed",
+          data: { turnId: "turn_0", message: "no funds" },
+        },
+        {
+          type: "turn.failed",
+          data: { turnId: "turn_0", message: "no funds" },
+        },
         { type: "session.failed", data: { message: "no funds" } },
       ] as never,
       8,
@@ -928,10 +961,9 @@ describe("EveServer", () => {
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const out = sink();
     const server_ = new EveServer({
-      host: HOST,
+      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: transport(),
       reply: true,
-      fetchImpl: eve.impl,
       drainQuietMs: 40,
       describe: async () => ({
         name: "Hex",

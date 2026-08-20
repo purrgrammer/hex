@@ -57,6 +57,28 @@ export interface ToolHost {
   readonly delivered: boolean;
 }
 
+/**
+ * How a runtime is handed the tools for one session.
+ *
+ * The tools themselves are already portable — `ToolHost` is a list and a call,
+ * and knows nothing about any runtime. What is NOT portable is the delivery: Eve
+ * reaches them over a loopback HTTP bridge with a shared token, an ACP harness
+ * would reach the same host over MCP, and an in-process runtime would just call
+ * it. That difference is this interface and nothing else.
+ *
+ * `bind` is per turn, not per session, and deliberately: the per-turn caps in
+ * `RoomTools` — one answer, and no answer at all once the turn is cancelled —
+ * live on the host, so rebinding is what resets them.
+ */
+export interface ToolServer {
+  /** Which delivery this is, for the startup line and for error messages. */
+  readonly name: string;
+  bind(session: string, host: ToolHost): void;
+  unbind?(session: string): void;
+  /** Whatever is currently bound, for a caller asking what actually landed. */
+  hostFor?(session: string): ToolHost | undefined;
+}
+
 /** The tool every transport provides, because a turn that says nothing is moot. */
 export const RESPOND_TOOL = "chat.respond";
 /** Optional: a transport with no reactions simply does not offer it. */
