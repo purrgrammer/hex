@@ -92,6 +92,17 @@ export interface StoredTranscript {
    */
   channel?: { transport: string; id?: string };
   /**
+   * Whether this session's OWN definition snapshot was published.
+   *
+   * On the record rather than in a field, because the head points at a
+   * different address depending on it. Held in memory it reset on every
+   * restart, so a resumed session republished its head pointing at the agent's
+   * standing definition — an event nobody publishes — and the prompt and tool
+   * list a reader had been shown vanished. That is the "sometimes it is there
+   * and sometimes it is not".
+   */
+  described?: boolean;
+  /**
    * The running total includes a figure nobody billed.
    *
    * Not persisted: a restart resumes a session whose earlier steps it did not
@@ -161,7 +172,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
   pending     TEXT,
   said_turn   TEXT,
   title       TEXT,
-  channel     TEXT
+  channel     TEXT,
+  described   INTEGER
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
@@ -225,6 +237,8 @@ export class HexStore {
       db.exec(`ALTER TABLE transcripts ADD COLUMN title TEXT`);
     if (!columns.includes("channel"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN channel TEXT`);
+    if (!columns.includes("described"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN described INTEGER`);
 
     return new HexStore(db);
   }
@@ -342,6 +356,7 @@ export class HexStore {
       saidTurn: row.said_turn == null ? undefined : String(row.said_turn),
       title: row.title == null ? undefined : String(row.title),
       channel: parseChannel(row.channel),
+      described: row.described === 1,
     };
   }
 
@@ -384,8 +399,8 @@ export class HexStore {
         `INSERT INTO transcripts (
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
-           cost, pending, said_turn, title, channel
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           cost, pending, said_turn, title, channel, described
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
            status = excluded.status, trigger = excluded.trigger,
@@ -394,7 +409,7 @@ export class HexStore {
            cache_read = excluded.cache_read, cache_write = excluded.cache_write,
            cost = excluded.cost, pending = excluded.pending,
            said_turn = excluded.said_turn, title = excluded.title,
-           channel = excluded.channel`,
+           channel = excluded.channel, described = excluded.described`,
       )
       .run(
         transcript.sessionId,
@@ -416,6 +431,7 @@ export class HexStore {
         transcript.saidTurn ?? null,
         transcript.title ?? null,
         transcript.channel ? JSON.stringify(transcript.channel) : null,
+        transcript.described ? 1 : null,
       );
   }
 }

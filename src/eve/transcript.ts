@@ -362,9 +362,15 @@ export class EveTranscript {
     tools?: AgentToolSpec[];
     repositories?: RepositorySpec[];
   }): Promise<void> {
-    if (this.snapshotted) return;
-    this.snapshotted = true;
-    await this.send(
+    if (this.record.described) return;
+    /**
+     * Recorded only once it is DELIVERED.
+     *
+     * Marking it published and then failing to publish leaves the head pointing
+     * for good at an address nobody wrote — and self-healing on the next start
+     * is the whole reason this is remembered rather than assumed.
+     */
+    const sent = await this.send(
       buildAgentDefinition(this.options.agentPubkey, {
         slug: this.record.nostrId,
         ...info,
@@ -376,9 +382,11 @@ export class EveTranscript {
       }),
       "session definition",
     );
+    if (!sent) return;
+    this.record.described = true;
+    this.options.store.saveTranscript(this.record);
   }
 
-  private snapshotted = false;
 
   /**
    * A snapshot is coming, so point at it now.
@@ -398,6 +406,11 @@ export class EveTranscript {
   }
 
   private snapshotting = false;
+
+  /** Whether this session has published a definition of its own, ever. */
+  get described(): boolean {
+    return this.record.described === true;
+  }
 
   /** Publish the agent's definition. Once per agent, not per session. */
   async announce(definition: {
@@ -1310,7 +1323,7 @@ export class EveTranscript {
          */
         definition: definitionAddress(
           this.options.agentPubkey,
-          this.snapshotted || this.snapshotting
+          this.record.described || this.snapshotting
             ? this.record.nostrId
             : this.options.slug,
         ),

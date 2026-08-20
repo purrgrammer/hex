@@ -18,7 +18,7 @@
 
 import type { Room } from "../transports/types.js";
 
-export type ToolNamespace = "chat" | "grimoire" | "nostr";
+export type ToolNamespace = "chat" | "git" | "grimoire" | "nostr";
 
 export interface ToolSpec {
   /** Canonical id, `<namespace>.<action>`. */
@@ -78,8 +78,18 @@ export const WHO_TOOL = "chat.who";
  * or invents what it was told.
  */
 export const HISTORY_TOOL = "chat.history";
-/** NIPs, kinds — grimoire's own documentation, fetched rather than recalled. */
-export const HELP_TOOL = "grimoire.help";
+/**
+ * NIPs and kinds, read rather than recalled.
+ *
+ * Named `nostr.help` because that is what it is: the protocol's own documents,
+ * useful to any agent working on Nostr and not a feature of one client. It was
+ * `grimoire.help` when this package was one application's assistant, and that
+ * id still resolves so an existing grant and an already-published definition
+ * keep meaning what they meant.
+ */
+export const HELP_TOOL = "nostr.help";
+/** What `nostr.help` used to be called. Accepted, never offered. */
+export const HELP_TOOL_LEGACY = "grimoire.help";
 /** A REQ against relays. Read-only. */
 export const REQ_TOOL = "nostr.req";
 /** A bech32 entity turned into the person or event it names. */
@@ -89,6 +99,18 @@ export const PUBLISH_TOOL = "nostr.publish";
 export const SIGN_TOOL = "nostr.sign";
 /** Putting a file somewhere a reader can fetch it. Off unless configured. */
 export const UPLOAD_TOOL = "blossom.upload";
+/**
+ * A NIP-34 repository, as work rather than as events.
+ *
+ * Separate from `nostr.req` because three things have to be right at once and
+ * none is guessable from a filter: which relays a repository's work is on, that
+ * an issue's state is a SEPARATE event pointing back at it, and that only
+ * maintainers and authors may set that state.
+ */
+export const GIT_ISSUES_TOOL = "git.issues";
+export const GIT_PATCHES_TOOL = "git.patches";
+/** Opening or closing one. A public, permanent, signed event. */
+export const GIT_STATE_TOOL = "git.state";
 /**
  * Every tool id that exists, so config can refuse one that does not.
  *
@@ -107,6 +129,10 @@ export const KNOWN_TOOLS: readonly string[] = [
   PUBLISH_TOOL,
   SIGN_TOOL,
   UPLOAD_TOOL,
+  HELP_TOOL_LEGACY,
+  GIT_ISSUES_TOOL,
+  GIT_PATCHES_TOOL,
+  GIT_STATE_TOOL,
 ];
 
 /**

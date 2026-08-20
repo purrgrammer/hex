@@ -129,6 +129,18 @@ export interface ToolsConfig {
      */
     encryptByDefault?: boolean;
   };
+  /**
+   * A NIP-34 repository's issues and patches.
+   *
+   * Reading is on by default once the section exists; WRITING — opening and
+   * closing things as this agent — is not. A status event is public, permanent
+   * and signed, so turning it on is a decision someone makes in a file.
+   */
+  git?: {
+    enabled: boolean;
+    /** Let the agent open and close issues. Off unless true. */
+    write?: boolean;
+  };
 }
 
 export interface RepositoryConfig {
@@ -416,9 +428,11 @@ function parseTranscript(value: unknown): TranscriptConfig | undefined {
 function parseTools(value: unknown): ToolsConfig | undefined {
   if (value === undefined) return undefined;
   const record = requireRecord(value, "tools");
-  rejectUnknown(record, ["publish", "blossom"], "tools");
+  rejectUnknown(record, ["publish", "blossom", "git"], "tools");
   const blossom = parseBlossomTools(record.blossom);
-  if (record.publish === undefined) return blossom ? { blossom } : {};
+  const git = parseGitTools(record.git);
+  if (record.publish === undefined)
+    return { ...(blossom ? { blossom } : {}), ...(git ? { git } : {}) };
   const publish = requireRecord(record.publish, "tools.publish");
 
   const kinds = publish.kinds;
@@ -442,7 +456,17 @@ function parseTools(value: unknown): ToolsConfig | undefined {
       dryRun: publish.dryRun === true,
     },
     blossom,
+    git,
   };
+}
+
+function parseGitTools(
+  value: unknown,
+): NonNullable<ToolsConfig["git"]> | undefined {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, "tools.git");
+  rejectUnknown(record, ["enabled", "write"], "tools.git");
+  return { enabled: record.enabled === true, write: record.write === true };
 }
 
 function parseBlossomTools(

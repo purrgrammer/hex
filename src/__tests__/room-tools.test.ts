@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { NostrEvent } from "nostr-tools";
 import { RoomTools } from "../tools/room-tools.js";
-import { nip19 } from "nostr-tools";
 
 import {
   HISTORY_TOOL,
@@ -65,7 +64,6 @@ describe("RoomTools.list", () => {
     expect(withReact.list().map((spec) => spec.name)).toEqual([
       RESPOND_TOOL,
       REACT_TOOL,
-      WHO_TOOL,
       HISTORY_TOOL,
     ]);
 
@@ -76,7 +74,6 @@ describe("RoomTools.list", () => {
     });
     expect(withoutReact.list().map((spec) => spec.name)).toEqual([
       RESPOND_TOOL,
-      WHO_TOOL,
       HISTORY_TOOL,
     ]);
   });
@@ -192,25 +189,22 @@ describe("RoomTools.list", () => {
     expect(tools.list().map((spec) => spec.name)).not.toContain(HISTORY_TOOL);
   });
 
-  it("names the correspondent from the message, not from the model", async () => {
+  it("no longer offers chat.who, because the answer is in the prompt", async () => {
     /**
-     * The runtime is told nothing about whose message it is, so "check my recent
-     * posts" became a query for kind 1 across the whole network, answered from
-     * strangers. `requestedBy` comes from the transport that delivered the
-     * message: an identity the model could assert is one it could get wrong, or
-     * be talked into.
+     * A runtime handed a bare message has no idea whose it is, and a tool was
+     * the wrong shape of fix: it cost a round trip, the model had to know to
+     * reach for it, and it did not. Who is asking is true before the first
+     * token, so it is context now.
      */
     const tools = new RoomTools({ transport: transport(), incoming: INBOUND });
+    expect(tools.list().map((spec) => spec.name)).not.toContain(WHO_TOOL);
+
+    // Offered and callable are the same set, so it is refused rather than
+    // quietly answered by a code path nothing lists.
     const result = await tools.call({ name: "chat_who", arguments: {} });
-    const who = JSON.parse(result.output) as { pubkey: string; npub: string };
-
-    expect(result.ok).toBe(true);
-    expect(who.pubkey).toBe(INBOUND.author);
-    expect(who.npub).toBe(nip19.npubEncode(INBOUND.author));
+    expect(result.ok).toBe(false);
   });
-});
 
-describe("RoomTools.call", () => {
   it("delivers through the transport and reports the id back", async () => {
     const sent: string[] = [];
     const tools = new RoomTools({

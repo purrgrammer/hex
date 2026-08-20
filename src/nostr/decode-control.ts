@@ -22,6 +22,16 @@ import { KIND_SESSION_CONTROL } from "./kinds.js";
 import { parseSessionAddress } from "./encode.js";
 import type { Rumor, SessionCommand } from "./types.js";
 
+/**
+ * What a run can be ABOUT, in NIP-22's own scope vocabulary.
+ *
+ * An event (`e`), an addressable one (`a`), a person (`p`), a page (`r`), or
+ * something outside Nostr entirely (`i`, NIP-73) — a GitHub issue, a package, a
+ * paper. Reusing the set a comment already uses means a client that can say
+ * "about this" has nothing new to learn.
+ */
+const SUBJECT_TAGS = new Set(["a", "e", "p", "r", "i"]);
+
 const COMMANDS: readonly SessionCommand[] = [
   "start",
   "respond",
@@ -111,11 +121,14 @@ export function parseSessionControl(
       policy: policy === "steer" || policy === "queue" ? policy : undefined,
       subjects: rumor.tags.filter(
         (t) =>
-          (t[0] === "a" || t[0] === "e") &&
+          SUBJECT_TAGS.has(t[0] ?? "") &&
           !!t[1] &&
           // The session's own address is an `a` tag; it is what this command
           // acts on, not what the run is about.
-          t[1] !== address,
+          t[1] !== address &&
+          // And its `p` names the agent that must act, not somebody to go and
+          // read about.
+          !(t[0] === "p" && t[1] === expected.agent),
       ),
       text: rumor.content || undefined,
     },

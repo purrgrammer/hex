@@ -175,11 +175,23 @@ describe("the command catalogue", () => {
     expect(missing.output).toContain("req");
   });
 
-  it("enumerates the command names in the tool schema", () => {
-    // A provider that enforces enums will not let the model guess.
+  it("enumerates the command names in the tool schema, when it has any", () => {
     relays = createRelays();
-    const tools = new KnowledgeTools({ relays, readRelays: [] });
-    const help = tools.list().find((spec) => spec.name === HELP_TOOL);
+    /**
+     * Off by default now. This tool is the PROTOCOL's documentation, useful to
+     * any agent working on Nostr; a command palette belongs to one client, and
+     * offering it to every agent spent context on an application most of them
+     * cannot reach.
+     */
+    const generic = new KnowledgeTools({ relays, readRelays: [] });
+    const bare = generic.list().find((spec) => spec.name === HELP_TOOL);
+    expect((bare!.parameters as { properties: object }).properties).not.toHaveProperty(
+      "command",
+    );
+
+    // A provider that enforces enums will not let the model guess.
+    const app = new KnowledgeTools({ relays, readRelays: [], commands: true });
+    const help = app.list().find((spec) => spec.name === HELP_TOOL);
     const parameters = help!.parameters as {
       properties: { command: { enum: string[] } };
     };

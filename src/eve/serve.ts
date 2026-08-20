@@ -114,6 +114,8 @@ export interface ServeOptions {
    * coordinate it cannot read.
    */
   ground?: (input: {
+    target?: string;
+    channel?: { transport: string; id?: string };
     operator?: string;
     subjects?: string[][];
   }) => Promise<string[]>;
@@ -154,16 +156,35 @@ interface Boundary {
 }
 
 /**
+ * Everything a thing can BE, in the tag vocabulary that already names them.
+ *
+ * Not just events. A run can be about a person (`p`), a page on the web (`r`),
+ * or something that lives outside Nostr entirely — a GitHub issue, a package, a
+ * paper — which NIP-73 spells as an `i`. NIP-22 uses this same set to say what
+ * a comment is scoped to, so a client that already knows how to say "about
+ * this" has nothing new to learn.
+ */
+const SUBJECT_TAGS = new Set(["a", "e", "p", "r", "i"]);
+
+/**
  * The pointers a message carried, minus the ones that mean something else.
  *
- * A `p` names a recipient and an `e` with a `trigger` marker names the message
- * itself; neither is a subject. What is left is what the sender said this is
- * about.
+ * Addressing is the exception that has to be carved out: a `p` on a private
+ * message names who it is FOR, and one on a control event names the agent that
+ * must act — neither is a subject, and a run "about" its own recipient would
+ * send the agent to read the operator's notes. An `e` with a marker in the
+ * fourth position is a thread pointer, which is a different relationship again.
+ * What is left is what the sender said this is about.
  */
-function subjectsOf(inbound: Inbound): string[][] {
+function subjectsOf(inbound: Inbound, addressed: string[] = []): string[][] {
   const tags = (inbound.event as { tags?: string[][] } | undefined)?.tags ?? [];
+  const exclude = new Set(addressed);
   return tags.filter(
-    (tag) => (tag[0] === "a" || tag[0] === "e") && !!tag[1] && !tag[3],
+    (tag) =>
+      SUBJECT_TAGS.has(tag[0] ?? "") &&
+      !!tag[1] &&
+      !tag[3] &&
+      !(tag[0] === "p" && exclude.has(tag[1]!)),
   );
 }
 
@@ -287,6 +308,22 @@ export class EveServer {
         this.log(
           `[hex] ${record.sessionId} caught up to ${boundary.last} (${conversation.transcript.headStatus})`,
         );
+        /**
+         * A session that never managed to say what it was set up with says it
+         * now.
+         *
+         * The snapshot is fire-and-forget by design — a run must not refuse to
+         * start because it could not describe itself — which means a relay that
+         * was down, or a runtime that was not answering, leaves a session whose
+         * prompt and tool list nobody can see, permanently. Retrying it here
+         * makes that a delay rather than a hole, and it is the reason the
+         * publish is remembered on the record instead of assumed.
+         */
+        if (!conversation.transcript.described)
+          await this.describe(
+            conversation.transcript,
+            record.channel?.transport === "nip-59",
+          );
       } catch (error) {
         // One unreachable session must not stop the others, or a single dead
         // stream keeps every stale head stale.
@@ -349,10 +386,18 @@ export class EveServer {
   private async grounding(
     operator: string,
     subjects: string[][],
+    channel?: { transport: string; id?: string },
   ): Promise<string[] | undefined> {
     if (!this.options.ground) return undefined;
     try {
-      const blocks = await this.options.ground({ operator, subjects });
+      const blocks = await this.options.ground({
+        // Least variable first: this ordering is what lets a provider reuse the
+        // cached prefix across every run this agent will ever do.
+        target: this.options.transcript.agentPubkey,
+        channel,
+        operator,
+        subjects,
+      });
       return blocks.length > 0 ? blocks : undefined;
     } catch (error) {
       this.log(`[hex] could not ground the session: ${message(error)}`);
@@ -400,7 +445,10 @@ export class EveServer {
     try {
       const sessionId = await this.createSession(
         control.text,
-        await this.grounding(peer, control.subjects ?? []),
+        await this.grounding(peer, control.subjects ?? [], {
+          transport: "nip-59",
+          id: peer,
+        }),
       );
       const transcript = new EveTranscript(
         { ...this.options.transcript },
@@ -798,11 +846,23 @@ export class EveServer {
      */
     const host = this.options.tools?.host(inbound);
 
+    /**
+     * Who this message is FOR, so a recipient is never read as a subject.
+     *
+     * The agent is one of them by definition, and so is the sender — a run
+     * about "you" and a run addressed to you are different claims.
+     */
+    const addressed = [this.options.transcript.agentPubkey, peer];
+
     let boundary: Boundary;
     if (!conversation) {
       const sessionId = await this.createSession(
         inbound.text,
-        await this.grounding(peer, subjectsOf(inbound)),
+        await this.grounding(
+          peer,
+          subjectsOf(inbound, addressed),
+          channelOf(inbound),
+        ),
       );
       const transcript = new EveTranscript(
         { ...this.options.transcript },
@@ -835,7 +895,7 @@ export class EveServer {
        * into the operator's own words, which titled every run after the
        * boilerplate and attributed the instruction to them.
        */
-      transcript.subjects = subjectsOf(inbound);
+      transcript.subjects = subjectsOf(inbound, addressed);
       conversation = { sessionId, transcript, finished: new Set() };
       this.conversations.set(peer, conversation);
       this.options.transcript.store.rememberConversation(

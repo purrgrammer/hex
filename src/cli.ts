@@ -41,6 +41,7 @@ import { KnowledgeTools } from "./tools/knowledge.js";
 import { RoomTools } from "./tools/room-tools.js";
 import { PublishTools } from "./tools/publish.js";
 import { BlossomTools } from "./tools/blossom-tools.js";
+import { GitTools } from "./tools/git-tools.js";
 import { ReplyGate } from "./policy.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
@@ -837,6 +838,27 @@ async function main(): Promise<void> {
           ? new KnowledgeTools({ relays, readRelays: config.relays.read })
           : undefined;
 
+        /**
+         * A repository's issues and patches, when the operator asked for them.
+         *
+         * Shared rather than per-message: what it reads is public, and which
+         * room asked has no bearing on the answer. The signer is handed over
+         * only when `write` is on — without it the tool that opens and closes
+         * things is not offered at all.
+         */
+        const gitConfig = config.tools?.git;
+        const git =
+          bridgeConfig && gitConfig?.enabled
+            ? new GitTools({
+                relays,
+                readRelays: config.relays.read,
+                publishRelays: config.relays.publish,
+                signer: gitConfig.write ? resolved.signer : undefined,
+                pubkey: gitConfig.write ? resolved.pubkey : undefined,
+                log: (line) => console.log(line),
+              })
+            : undefined;
+
         let bridge: ToolBridge | undefined;
         if (bridgeConfig) {
           const token = process.env[bridgeConfig.tokenEnv];
@@ -864,6 +886,7 @@ async function main(): Promise<void> {
                 knowledge,
                 publish: publishing,
                 blossom: blossomFor(),
+                git,
                 log: (line) => console.log(line),
               }),
             log: (line) => console.log(line),
@@ -916,6 +939,7 @@ async function main(): Promise<void> {
                       knowledge,
                       publish: publishing,
                       blossom: blossomFor(inbound),
+                      git,
                       log: (line) => console.log(line),
                     }),
                 }
@@ -1043,7 +1067,7 @@ async function main(): Promise<void> {
 
         if (bridge)
           console.log(
-            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.who, chat.history, grimoire.help, nostr.req, nostr.resolve${publishing ? ` + nostr.publish, nostr.sign${publishConfig?.dryRun ? " (dry run)" : ""}` : ""}`,
+            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.history, nostr.help, nostr.req, nostr.resolve${publishing ? ` + nostr.publish, nostr.sign${publishConfig?.dryRun ? " (dry run)" : ""}` : ""}`,
           );
         /**
          * Settle anything the last run left mid-flight before taking new work.

@@ -14,6 +14,7 @@ import type { Inbound, Transport } from "../transports/types.js";
 import type { KnowledgeTools } from "./knowledge.js";
 import type { PublishTools } from "./publish.js";
 import type { BlossomTools } from "./blossom-tools.js";
+import type { GitTools } from "./git-tools.js";
 import { nip19 } from "nostr-tools";
 
 import {
@@ -101,6 +102,13 @@ export interface RoomToolsOptions {
    * it hides the picture from everyone it was posted for.
    */
   blossom?: BlossomTools;
+  /**
+   * A NIP-34 repository's issues and patches. Off unless configured.
+   *
+   * Shared rather than per-message: what it reads is a public repository, and
+   * which room asked has no bearing on the answer.
+   */
+  git?: GitTools;
   /**
    * Which tools this channel gets, as ids or `namespace.*`.
    *
@@ -203,6 +211,7 @@ export class RoomTools implements ToolHost {
     if (this.options.knowledge) optional.push(...this.options.knowledge.list());
     if (this.options.publish) optional.push(...this.options.publish.list());
     if (this.options.blossom) optional.push(...this.options.blossom.list());
+    if (this.options.git) optional.push(...this.options.git.list());
 
     specs.push(
       ...(this.options.grants
@@ -273,19 +282,17 @@ export class RoomTools implements ToolHost {
           " not an answer.",
       });
 
-    specs.push({
-      name: WHO_TOOL,
-      description:
-        "Who you are talking to and where. Returns their npub, which " +
-        "`nostr.resolve` turns into their profile and `nostr.req` takes as an " +
-        "author. Call it before answering anything about \"me\", \"my\" or " +
-        "\"mine\" — you are not told who they are otherwise.",
-      parameters: { type: "object", properties: {}, additionalProperties: false },
-      prompt:
-        "`chat.who` names the person you are speaking with. Anything about" +
-        " their notes, their zaps or their profile starts there — never guess" +
-        " a pubkey, and never answer about \"my posts\" from an unfiltered query.",
-    });
+    /**
+     * `chat.who` is gone, and the answer is in the prompt instead.
+     *
+     * A runtime handed a bare message has no idea whose it is, which sent it
+     * hunting kind 1 across the whole network for "my recent posts". A tool was
+     * the wrong shape of fix: it cost a round trip, the model had to know to
+     * reach for it, and it did not reach for it. Who is asking is CONTEXT — it
+     * is true before the first token — so it is a block in the prompt now,
+     * alongside the agent's own identity and what the run is about. The id
+     * stays in `KNOWN_TOOLS` so a config that still grants it parses.
+     */
 
     // Only when the transport can actually read back. A protocol with no
     // history simply does not offer one, rather than offering an empty list a
@@ -356,6 +363,8 @@ export class RoomTools implements ToolHost {
       return this.options.publish.call(name, call.arguments);
     if (this.options.blossom?.handles(name))
       return this.options.blossom.call({ name, arguments: call.arguments });
+    if (this.options.git?.handles(name))
+      return this.options.git.call(name, call.arguments);
 
     switch (name) {
       case RESPOND_TOOL:

@@ -17,11 +17,17 @@ import { requestEvents, type HexRelays } from "../relays.js";
 import catalogue from "../data/commands.json" with { type: "json" };
 import {
   HELP_TOOL,
+  HELP_TOOL_LEGACY,
   REQ_TOOL,
   RESOLVE_TOOL,
   type ToolResult,
   type ToolSpec,
 } from "./types.js";
+
+/** One labelled block of context, as the runtime will read it. */
+function block(name: string, value: unknown): string {
+  return `<${name}>\n${JSON.stringify(value)}\n</${name}>`;
+}
 
 /** Upstream NIPs, the same documents the app's nip window reads. */
 const NIPS_BASE =
@@ -43,6 +49,14 @@ export interface KnowledgeOptions {
   relays: HexRelays;
   /** Where a REQ goes when the model names no relay. The `read` role. */
   readRelays: string[];
+  /**
+   * Offer grimoire's command catalogue alongside the protocol's docs.
+   *
+   * Off by default. An agent serving one application wants it; an agent
+   * working on Nostr generally does not, and telling it about a command
+   * palette it cannot reach is context spent on nothing.
+   */
+  commands?: boolean;
   /** Injected in tests. */
   fetchImpl?: typeof fetch;
   requestTimeoutMs?: number;
@@ -94,29 +108,45 @@ export class KnowledgeTools {
       {
         name: HELP_TOOL,
         description:
-          "Look up a NIP's text, an event kind's definition, or a grimoire " +
-          "command's manual page. Use this instead of recalling spec details or " +
-          "guessing at a command's flags.",
+          "Look up a NIP's text or an event kind's definition, from the spec " +
+          "rather than from memory." +
+          (this.options.commands
+            ? " Also reads a grimoire command's manual page."
+            : ""),
         parameters: {
           type: "object",
           properties: {
             nip: { type: "string", description: 'NIP id, e.g. "01" or "29".' },
             kind: { type: "number", description: "Event kind number." },
-            command: {
-              type: "string",
-              // Enumerated: the whole set is two dozen names, and a model that
-              // guesses spends a round finding out it guessed wrong.
-              enum: COMMANDS.map((command) => command.name),
-              description:
-                'A grimoire command name, e.g. "req" — returns its synopsis, ' +
-                "flags and description.",
-            },
+            /**
+             * One client's commands, offered only to an agent that has one.
+             *
+             * This tool is the protocol's documentation and belongs to any
+             * agent working on Nostr; a command palette belongs to grimoire.
+             * Bolting the second onto the first told every agent about an
+             * application most of them have nothing to do with.
+             */
+            ...(this.options.commands
+              ? {
+                  command: {
+                    type: "string",
+                    // Enumerated: the whole set is two dozen names, and a model
+                    // that guesses spends a round finding out it guessed wrong.
+                    enum: COMMANDS.map((command) => command.name),
+                    description:
+                      'A grimoire command name, e.g. "req" — returns its ' +
+                      "synopsis, flags and description.",
+                  },
+                }
+              : {}),
           },
         },
         prompt:
-          "`grimoire.help` returns a NIP's text, a kind's definition, or a" +
-          " grimoire command's manual page with its flags — read it rather than" +
-          " recalling what a kind number means or what a command takes.",
+          "`nostr.help` returns a NIP's text or a kind's definition — read it" +
+          " rather than recalling what a kind number means." +
+          (this.options.commands
+            ? " It also has grimoire's command manual pages."
+            : ""),
       },
       {
         name: REQ_TOOL,
@@ -233,6 +263,7 @@ export class KnowledgeTools {
 
   async call(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     switch (name) {
+      case HELP_TOOL_LEGACY:
       case HELP_TOOL:
         return this.help(args);
       case REQ_TOOL:
@@ -246,10 +277,13 @@ export class KnowledgeTools {
 
   /** Whether this host serves `name`. */
   handles(name: string): boolean {
+    // The legacy id too: an already-published definition names `grimoire.help`,
+    // and a model reading one should not be refused for using what it was told.
+    if (name === HELP_TOOL_LEGACY) return true;
     return this.list().some((spec) => spec.name === name);
   }
 
-  // ---- grimoire.help -------------------------------------------------------
+  // ---- nostr.help ----------------------------------------------------------
 
   private async help(args: Record<string, unknown>): Promise<ToolResult> {
     const result: Record<string, unknown> = {};
@@ -483,45 +517,83 @@ export class KnowledgeTools {
   // ---- nostr.resolve -------------------------------------------------------
 
   /**
-   * Who started a run, and what it is about — resolved before it begins.
+   * What the runtime should know before it reads its first message.
    *
-   * Two problems, one answer. A runtime handed a bare message has no idea whose
-   * it is, so "check my recent posts" sent it hunting kind 1 across the whole
-   * network and summarising strangers; and a run scoped to a repository was
-   * given the coordinate as a pointer it could not read, so the alternative was
-   * writing "work on X" into the operator's own words and titling every session
-   * after the boilerplate.
+   * Four questions, and a runtime handed a bare message can answer none of
+   * them. Who is this from — "check my recent posts" sent it hunting kind 1
+   * across the whole network and summarising strangers. Where did it come from
+   * — an answer for a public group is not an answer for a private message. What
+   * is it about — a run scoped to a repository was handed a coordinate it could
+   * not read. And who am I — an agent that does not know its own pubkey cannot
+   * tell its own notes from anyone else's.
    *
-   * Both are context, not a tool call and not a preamble. This resolves them
-   * once, at the start, and hands back blocks the caller passes to the runtime
-   * as context — so the model knows who it is talking to and what it is looking
-   * at without spending a turn asking.
+   * Ordered from the LEAST to the most variable, which is the whole trick.
+   * These become the prefix of every request, and a provider reuses a cached
+   * prefix only up to the first byte that differs: the agent's own identity is
+   * the same on every run it will ever do, a channel takes a handful of values,
+   * an operator recurs across their own sessions, and the subject is different
+   * every time. Put the subject first and nothing after it is ever cached.
+   *
+   * Nothing here is unique to the session — no session id, no timestamp, no
+   * turn counter. A run's identity belongs on the wire, where a reader needs
+   * it; in the prompt it is a byte that differs on every run and therefore a
+   * cache that never hits.
    *
    * Never throws: a relay that will not answer costs the model a fact, and a
-   * run refused because a profile could not be fetched costs it everything.
+   * run refused because a profile could not be fetched costs it the whole job.
    */
   async ground(input: {
+    /** The agent itself. */
+    target?: string;
+    /** The transport the request arrived over, e.g. `nip-17`, `nip-59`. */
+    channel?: { transport: string; id?: string };
+    /** Who is asking. */
     operator?: string;
     subjects?: string[][];
   }): Promise<string[]> {
     const blocks: string[] = [];
 
+    if (input.target) {
+      const self = await this.person(input.target).catch(() => undefined);
+      blocks.push(
+        block("target", {
+          ...(self ?? {
+            pubkey: input.target,
+            npub: nip19.npubEncode(input.target),
+          }),
+          note: "This is you. Your own notes, your own profile, your own key.",
+        }),
+      );
+    }
+
+    if (input.channel)
+      blocks.push(
+        block("channel", {
+          transport: input.channel.transport,
+          ...(input.channel.id ? { id: input.channel.id } : {}),
+          note:
+            input.channel.transport === "nip-59"
+              ? "Asked for privately over a gift wrap. There is no room: your transcript is how this is read, and there is nobody to send a chat message to."
+              : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking.",
+        }),
+      );
+
     if (input.operator) {
       const person = await this.person(input.operator).catch(() => undefined);
       blocks.push(
-        `<operator>\n${JSON.stringify(
+        block(
+          "author",
           person ?? {
             pubkey: input.operator,
             npub: nip19.npubEncode(input.operator),
           },
-        )}\n</operator>`,
+        ),
       );
     }
 
     for (const tag of input.subjects ?? []) {
       const resolved = await this.subject(tag).catch(() => undefined);
-      if (resolved)
-        blocks.push(`<subject>\n${JSON.stringify(resolved)}\n</subject>`);
+      if (resolved) blocks.push(block("project", resolved));
     }
 
     return blocks;
@@ -544,7 +616,16 @@ export class KnowledgeTools {
     };
   }
 
-  /** What an `a` or `e` tag names, fetched. The tag rides along either way. */
+  /**
+   * What a subject tag names, fetched where fetching is possible.
+   *
+   * Five kinds of thing, and only two of them are events. A `p` is a person and
+   * resolves to their profile; an `r` is a URL and resolves to nothing — the
+   * address IS the answer, and guessing that the agent should go and fetch it
+   * would be this file deciding to browse the web. An `i` is NIP-73: an
+   * identifier for something that does not live on Nostr at all, which is
+   * handed over as written along with whatever URL the tag carried for it.
+   */
   private async subject(tag: string[]) {
     const [kind, value, hint] = tag;
     const relays = [
@@ -587,6 +668,24 @@ export class KnowledgeTools {
         event: event ? describeEvent(event) : null,
       };
     }
+
+    if (kind === "p" && value && HEX64.test(value))
+      return { tag, ...(await this.person(value)) };
+
+    // Not fetched: a URL is a thing the runtime may decide to read with a tool
+    // of its own, and this resolving it would be a relay reader browsing the
+    // web on the strength of a tag.
+    if (kind === "r" && value) return { tag, url: value };
+
+    /**
+     * NIP-73: something with an identity outside Nostr.
+     *
+     * `["i", "<id>", "<url>"]` — a GitHub issue, an ISBN, a podcast episode.
+     * There is nothing to fetch and nothing to decode; what makes it useful is
+     * that the runtime is told the thing exists and how it is named.
+     */
+    if (kind === "i" && value)
+      return { tag, external: value, ...(hint ? { url: hint } : {}) };
 
     return undefined;
   }
