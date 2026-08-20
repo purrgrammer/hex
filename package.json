@@ -1,11 +1,17 @@
 {
   "name": "nostr-hex",
   "version": "0.1.0",
-  "description": "Hex — a transport-agnostic agent for Nostr groups. NIP-29 today, NIP-17 and Concord next.",
+  "description": "Hex \u2014 a transport-agnostic agent for Nostr groups. NIP-29 today, NIP-17 and Concord next.",
   "type": "module",
   "license": "MIT",
-  "author": "Alejandro Gómez",
-  "keywords": ["nostr", "agent", "bot", "nip-29", "nip-17"],
+  "author": "Alejandro G\u00f3mez",
+  "keywords": [
+    "nostr",
+    "agent",
+    "bot",
+    "nip-29",
+    "nip-17"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
@@ -30,7 +36,9 @@
   "scripts": {
     "build": "tsc --project tsconfig.build.json",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run clean && npm run build"
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "applesauce-common": "^6.2.0",
@@ -44,6 +52,15 @@
     "@types/node": "^26.1.2",
     "@types/ws": "^8.18.1",
     "typescript": "~6.0.3",
+    "vitest": "^4.1.10",
     "ws": "^8.18.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/purrgrammer/hex.git"
+  },
+  "homepage": "https://github.com/purrgrammer/hex",
+  "bugs": {
+    "url": "https://github.com/purrgrammer/hex/issues"
   }
 }

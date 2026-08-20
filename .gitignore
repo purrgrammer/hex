@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+
+# An agent's own state: its SQLite store, its keys, its env. A stray copy of
+# this was committed once, by a path bug that wrote `~/.hex` literally instead
+# of expanding it — so the pattern matches the mistake as well as the real path.
+.hex/
+~/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
