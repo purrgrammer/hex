@@ -321,6 +321,13 @@ interface Asked {
   allowFreeform: boolean;
 }
 
+/** An answer that went to the runtime, kept so it can be closed locally. */
+interface Answered {
+  requestId: string;
+  optionId?: string;
+  text?: string;
+}
+
 interface Conversation {
   /** Eve's session id for this correspondent. */
   sessionId: string;
@@ -888,6 +895,9 @@ export class EveServer {
       }
     }
 
+    /** The answer this control carried, if it carried one. See `reconcile`. */
+    let answered: Answered | undefined;
+
     try {
       switch (control.command) {
         case "respond": {
@@ -922,6 +932,15 @@ export class EveServer {
               ...(control.text ? { text: control.text } : {}),
             },
           ]);
+          /**
+           * Held so the request can be closed here if the runtime never closes
+           * it. See the reconciliation after the follow below.
+           */
+          answered = {
+            requestId: control.request,
+            optionId: control.option,
+            text: control.text,
+          };
           say(`answered ${control.request}`);
           break;
         }
@@ -1056,6 +1075,7 @@ export class EveServer {
      */
     const asked: Asked[] = [];
     await this.follow(conversation, control.operator, boundary, asked);
+    await this.reconcile(conversation, answered);
   }
 
   /**
@@ -1457,6 +1477,10 @@ export class EveServer {
       boundary,
       asked,
     );
+    await this.reconcile(conversation, {
+      requestId: answering.requestId,
+      text: inbound.text.trim(),
+    });
     if (asked.length > 0) {
       await this.ask(conversation, inbound, asked);
       return;
@@ -1528,6 +1552,45 @@ export class EveServer {
           `[hex] could not put ${question.requestId} to ${short(inbound.author)}: ${message(error)}`,
         );
       }
+    }
+  }
+
+  /**
+   * Close a question that was answered and never resolved.
+   *
+   * Eve is meant to answer an `inputResponses` post with `input.resolved`, and
+   * there are runs where it does not: a request raised after its turn had
+   * already been finalised is never parked, so the answer arrives against no
+   * pending batch, is folded into the conversation as ordinary text, and the
+   * request stays open forever. The model reads the answer and carries on — the
+   * only thing left broken is the bookkeeping, and the bookkeeping is what a
+   * client renders. Left alone the head says `awaiting-input` for a question
+   * settled minutes ago, and every viewer shows a live prompt nobody can
+   * usefully press.
+   *
+   * Run only after the turn the answer started has ended, so a resolution still
+   * on its way wins on its own; the transcript's open-request gate makes the
+   * two orders equivalent.
+   */
+  private async reconcile(
+    conversation: Conversation,
+    answered: Answered | undefined,
+  ): Promise<void> {
+    if (!answered) return;
+    try {
+      const settled = await conversation.transcript.settle(answered.requestId, {
+        optionId: answered.optionId,
+        text: answered.text,
+      });
+      if (settled)
+        this.log(
+          `[hex] ${answered.requestId} was answered but the runtime never resolved it — closed here`,
+        );
+    } catch (error) {
+      // The answer landed; only the closing note did not. Said, not thrown.
+      this.log(
+        `[hex] could not close ${answered.requestId}: ${message(error)}`,
+      );
     }
   }
 

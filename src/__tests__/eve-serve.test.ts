@@ -467,6 +467,59 @@ describe("EveServer", () => {
     ).toBe(false);
   });
 
+  it("closes a question the runtime took an answer for and never resolved", async () => {
+    /**
+     * Eve is supposed to answer an `inputResponses` post with `input.resolved`.
+     * A request raised after its turn was already finalised is never parked, so
+     * the answer arrives against no pending batch: the model reads it as
+     * ordinary text and carries on, and nothing ever closes the request. The
+     * head then says `awaiting-input` for a question settled minutes ago, and
+     * every client renders a live prompt over a decision already made.
+     *
+     * `SECOND_TURN` is exactly that stream — a turn that runs and completes
+     * with no resolution in it.
+     */
+    const eve = fakeEve(ASKING_TURN, 0, undefined, SECOND_TURN);
+    const out = sink();
+    const hex = server(eve, transport(), out.impl);
+
+    await hex.handle(inbound("m1", "publish my note"));
+
+    const parked = store.transcriptFor(eve.session)!;
+    expect(parked.pending).toEqual(["req_1"]);
+    expect(parked.status).toBe("awaiting-input");
+
+    await hex.control({
+      id: "c1",
+      operator: PEER,
+      agent: AGENT,
+      session: parked.nostrId,
+      command: "respond",
+      request: "req_1",
+      option: "opt_a",
+    });
+
+    // Said in the transcript, with what was actually answered — a reader coming
+    // back to this later sees the decision, not a prompt.
+    const resolved = out.sent.filter(
+      (rumor) =>
+        rumor.kind === 1777 && rumor.content.includes('"input_resolved"'),
+    );
+    expect(resolved).toHaveLength(1);
+    expect(JSON.parse(resolved[0]!.content)).toContainEqual(
+      expect.objectContaining({
+        type: "input_resolved",
+        requestId: "req_1",
+        response: { optionId: "opt_a" },
+      }),
+    );
+
+    // And the head stops waiting on somebody who already answered.
+    const after = store.transcriptFor(eve.session)!;
+    expect(after.pending).toBeUndefined();
+    expect(after.status).not.toBe("awaiting-input");
+  });
+
   it("names the message that started the session on the head", async () => {
     // This is the link the whole design rests on: the SESSION points at the
     // message, so a client holding a conversation can ask what a message set

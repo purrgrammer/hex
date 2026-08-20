@@ -13,7 +13,6 @@ import {
   parseKindTable,
 } from "../tools/knowledge.js";
 import { HELP_TOOL, REQ_TOOL, RESOLVE_TOOL } from "../tools/types.js";
-import { COMMANDS, commandCatalogue } from "../tools/knowledge.js";
 import { startMockRelay, type MockRelay } from "./mock-relay.js";
 
 const authorKey = generateSecretKey();
@@ -143,59 +142,6 @@ describe("grimoire.help", () => {
     const tools = new KnowledgeTools({ relays, readRelays: [] });
     const result = await tools.call(HELP_TOOL, {});
     expect(result.ok).toBe(false);
-  });
-});
-
-describe("the command catalogue", () => {
-  it("carries grimoire's commands, generated from the app's own registry", () => {
-    // A snapshot: `scripts/sync-commands.mjs` regenerates it, and `--check`
-    // fails when it is stale.
-    expect(COMMANDS.length).toBeGreaterThan(15);
-    const req = COMMANDS.find((command) => command.name === "req");
-    expect(req?.synopsis).toContain("req");
-    expect(req?.flags?.length).toBeGreaterThan(0);
-  });
-
-  it("renders as a menu, one command per entry with its flags", () => {
-    const menu = commandCatalogue();
-    expect(menu).toContain("req");
-    expect(menu).toContain("flags:");
-  });
-
-  it("answers a command by name, and names the set when asked for one that is not there", async () => {
-    relays = createRelays();
-    const tools = new KnowledgeTools({ relays, readRelays: [] });
-
-    const found = await tools.call(HELP_TOOL, { command: "chat" });
-    expect(found.ok).toBe(true);
-    expect(found.output).toContain("synopsis");
-
-    const missing = await tools.call(HELP_TOOL, { command: "sendMessage" });
-    expect(missing.output).toContain("No such command");
-    expect(missing.output).toContain("req");
-  });
-
-  it("enumerates the command names in the tool schema, when it has any", () => {
-    relays = createRelays();
-    /**
-     * Off by default now. This tool is the PROTOCOL's documentation, useful to
-     * any agent working on Nostr; a command palette belongs to one client, and
-     * offering it to every agent spent context on an application most of them
-     * cannot reach.
-     */
-    const generic = new KnowledgeTools({ relays, readRelays: [] });
-    const bare = generic.list().find((spec) => spec.name === HELP_TOOL);
-    expect((bare!.parameters as { properties: object }).properties).not.toHaveProperty(
-      "command",
-    );
-
-    // A provider that enforces enums will not let the model guess.
-    const app = new KnowledgeTools({ relays, readRelays: [], commands: true });
-    const help = app.list().find((spec) => spec.name === HELP_TOOL);
-    const parameters = help!.parameters as {
-      properties: { command: { enum: string[] } };
-    };
-    expect(parameters.properties.command.enum).toContain("req");
   });
 });
 
@@ -515,4 +461,3 @@ describe("nostr.req takes a tag the way the schema asks for it", () => {
     expect(viaMap.filter["#t"]).toEqual(["nostr"]);
   });
 });
-

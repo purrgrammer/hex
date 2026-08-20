@@ -45,10 +45,6 @@ import { BlossomTools } from "./tools/blossom-tools.js";
 import { GitTools } from "./tools/git-tools.js";
 import { NgitTools } from "./tools/ngit-tools.js";
 import { ReplyGate } from "./policy.js";
-import { LiveBus } from "./ui/bus.js";
-import { recording } from "./ui/record.js";
-import { UiServer } from "./ui/server.js";
-import { webRoot } from "./ui/where.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -65,12 +61,8 @@ Usage:
                                    the same thing, fixed to nip-17
   hex eve      [config] <session-id> [--host <url>] [--dry-run]
                                    follow an Eve session, publish it as events
-  hex serve    [config] [--host <url>] [--no-reply] [--ui] [--ui-port <n>]
-                                   answer DMs by running them through Eve.
-                                   --ui opens the control plane on loopback
-  hex ui       [config] [--ui-port <n>]
-                                   read this agent's home in a browser. No
-                                   daemon, so nothing can be steered from it
+  hex serve    [config] [--host <url>] [--no-reply]
+                                   answer DMs by running them through Eve
 
 Config defaults to ./hex.config.json.
 
@@ -123,15 +115,6 @@ function describeDisconnect(error: unknown): string {
   );
 }
 
-/**
- * Where the control plane listens unless told otherwise.
- *
- * Next door to the kind family this agent publishes (1777 / 31777 / 31779), for
- * no better reason than that a port an operator can guess is one they do not
- * have to look up.
- */
-const DEFAULT_UI_PORT = 1778;
-
 function fail(message: string): never {
   console.error(`hex: ${message}`);
   process.exit(1);
@@ -165,8 +148,6 @@ async function main(): Promise<void> {
       transport: { type: "string" },
       "as-file": { type: "boolean", default: false },
       "no-encrypt": { type: "boolean", default: false },
-      ui: { type: "boolean", default: false },
-      "ui-port": { type: "string" },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -754,33 +735,6 @@ async function main(): Promise<void> {
         );
         const store = HexStore.open(home.db);
 
-        /**
-         * What the machine itself remembers of what it said.
-         *
-         * Always on, and not a UI feature: the transcript leaves as gift wraps
-         * addressed to the operator, so without this the host holding the key
-         * has no copy of its own agent's work and an operator standing at the
-         * machine has to log in as a reader to see it. The page is optional;
-         * the record is not.
-         */
-        const bus = new LiveBus();
-        if (values.ui) {
-          /**
-           * Every line the daemon prints, also on the stream.
-           *
-           * Patched once here rather than threaded through the twenty `log:`
-           * callbacks below, because those are not the only writer — a relay
-           * error and a transport's own reporting go straight to the console —
-           * and a log panel missing exactly the lines that explain a failure is
-           * worse than no log panel.
-           */
-          const printed = console.log.bind(console);
-          console.log = (...parts: unknown[]) => {
-            printed(...parts);
-            bus.log(parts.map((part) => String(part)).join(" "));
-          };
-        }
-
         const startedAt = Math.floor(Date.now() / 1000);
         const dms = new Nip17Transport({
           relays,
@@ -1064,9 +1018,8 @@ async function main(): Promise<void> {
             store,
             // Always the gift-wrap door: the operator's copy exists whatever
             // else happens, because it is the one this agent's own reader
-            // depends on — teed into this home's own record on the way out, so
-            // the machine that published a turn can still show it.
-            sink: recording(dms, store, bus),
+            // depends on.
+            sink: dms,
             /**
              * And, for a run in a group, the same event filed in that group.
              *
@@ -1235,42 +1188,6 @@ async function main(): Promise<void> {
          */
         await server.catchUp();
 
-        /**
-         * The control plane, if this run was asked for one.
-         *
-         * Given the SAME `server.control` a wrapped kind 1779 arrives at, so a
-         * button on this page and an operator on a phone take one path into the
-         * daemon. It is started last: a page that can be opened before the
-         * catch-up has settled shows runs mid-correction as though they were
-         * live.
-         */
-        let ui: UiServer | undefined;
-        if (values.ui) {
-          ui = new UiServer({
-            port: values["ui-port"]
-              ? Number(values["ui-port"])
-              : DEFAULT_UI_PORT,
-            store,
-            bus,
-            pubkey: resolved.pubkey,
-            config,
-            webRoot: webRoot(),
-            control: (control) => server.control(control),
-            checkRelays: () =>
-              checkRelays(relays, [
-                ...config.relays.read,
-                ...config.relays.publish,
-                ...config.relays.dm,
-                ...groupTransports(config.transports).flatMap((transport) =>
-                  transport.groups.map((group) => group.relay),
-                ),
-              ]),
-            log: (line) => console.log(line),
-          });
-          await ui.start();
-          console.log(`ui      http://127.0.0.1:${ui.port}`);
-        }
-
         await new Promise<void>((resolveRun) => {
           const shutdown = (signal: string) => {
             console.log(`\n${signal} — stopping`);
@@ -1281,65 +1198,11 @@ async function main(): Promise<void> {
         });
 
         subscription.unsubscribe();
-        ui?.stop();
         // Every followed session keeps whatever status Eve last reported: the
         // follower is leaving, the sessions are not over.
         await server.close();
         bridge?.stop();
         transport.stop();
-        store.close();
-        await resolved.close();
-        return;
-      }
-
-      case "ui": {
-        /**
-         * The same page, with nothing behind it to steer.
-         *
-         * A home is readable without a daemon — it is a SQLite file and the
-         * events are already in it — and being able to look at what an agent
-         * did last week without starting it is the point. What is missing is
-         * authority: no process is holding the key or watching a stream, so the
-         * server is built with no `control` and the page hides every button
-         * rather than offering one that would fail.
-         */
-        const resolved = await resolveSigner(config.identity.signer, {
-          baseDir: loaded.baseDir,
-          relays,
-        });
-        const home = agentHome(
-          config.state.home
-            ? expandHome(config.state.home, loaded.baseDir)
-            : DEFAULT_HOME,
-          resolved.pubkey,
-        );
-        const store = HexStore.open(home.db);
-        const bus = new LiveBus();
-
-        const ui = new UiServer({
-          port: values["ui-port"] ? Number(values["ui-port"]) : DEFAULT_UI_PORT,
-          store,
-          bus,
-          pubkey: resolved.pubkey,
-          config,
-          webRoot: webRoot(),
-          log: (line) => console.log(line),
-        });
-        await ui.start();
-        console.log(`npub    ${nip19.npubEncode(resolved.pubkey)}`);
-        console.log(`home    ${home.db}`);
-        console.log(`ui      http://127.0.0.1:${ui.port} (reader — no daemon)`);
-
-        await new Promise<void>((resolveRun) => {
-          const shutdown = (signal: string) => {
-            console.log(`\n${signal} — stopping`);
-            resolveRun();
-          };
-          process.once("SIGINT", () => shutdown("SIGINT"));
-          process.once("SIGTERM", () => shutdown("SIGTERM"));
-        });
-
-        ui.stop();
         store.close();
         await resolved.close();
         return;

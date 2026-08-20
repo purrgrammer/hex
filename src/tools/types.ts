@@ -7,8 +7,8 @@
  * the runtime never sees a relay, and the transport never sees a model.
  *
  * Tools are named `<namespace>.<action>`, matching the in-app assistant's
- * registry: `grimoire.*` acts on the application and its docs, `nostr.*` on the
- * network, `chat.*` on the room this turn is in. The ids are a contract — a
+ * `nostr.*` acts on the network, `git.*` on a repository, `chat.*` on the room
+ * this turn is in. The ids are a contract — a
  * published agent definition names tools by them — so renaming one breaks
  * anything that referred to it.
  *
@@ -18,7 +18,7 @@
 
 import type { Room } from "../transports/types.js";
 
-export type ToolNamespace = "chat" | "git" | "grimoire" | "nostr";
+export type ToolNamespace = "chat" | "git" | "nostr";
 
 export interface ToolSpec {
   /** Canonical id, `<namespace>.<action>`. */

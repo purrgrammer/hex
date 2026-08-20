@@ -1288,6 +1288,56 @@ export class EveTranscript {
   }
 
   /**
+   * Close a request the runtime took an answer for and never resolved.
+   *
+   * The answer went in — Eve accepted it, the model read it and carried on —
+   * and no `input.resolved` came back for it, so nothing else in this file ever
+   * clears the request. The head then says `awaiting-input` for a question that
+   * was answered minutes ago, and a client reading it puts a live prompt in
+   * front of somebody who already pressed the button. Two of those and the
+   * session is unusable: every further answer is a new message to a run that is
+   * not, as far as the transcript is concerned, running.
+   *
+   * Called only by whoever sent the answer and only once the turn it started
+   * has ended, because until then the resolution may still be coming. A late
+   * `input.resolved` is harmless: the open-request gate finds nothing to close
+   * and says nothing.
+   */
+  async settle(
+    requestId: string,
+    response?: { optionId?: string; text?: string },
+  ): Promise<boolean> {
+    if (!this.openRequests.has(requestId)) return false;
+    this.openRequests.delete(requestId);
+    await this.append(
+      "user",
+      [
+        {
+          type: "input_resolved",
+          requestId,
+          outcome: "answered",
+          response:
+            response && (response.optionId || response.text)
+              ? { optionId: response.optionId, text: response.text }
+              : undefined,
+        },
+      ],
+      { alt: "Answered." },
+    );
+    /**
+     * The status the run would have had without the question. `awaiting-input`
+     * is the one value that was NOT reported by the runtime — it is computed
+     * from the open set — so handing it back would re-derive itself forever.
+     */
+    await this.status(
+      this.record.status === "awaiting-input"
+        ? "idle"
+        : (this.record.status as SessionStatus),
+    );
+    return true;
+  }
+
+  /**
    * Stop following.
    *
    * With no status the head keeps whatever Eve last reported, which is what a

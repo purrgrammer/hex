@@ -112,7 +112,7 @@ uses, because it is the same Hex:
 | `chat.react`    | One emoji on the message. Offered only if the transport has reactions. |
 | `chat.who`      | Who you are talking to, as an npub.                                    |
 | `chat.history`  | The conversation so far, your own replies included.                    |
-| `grimoire.help` | A NIP's text or a kind's definition, from the NIPs repository.         |
+| `nostr.help` | A NIP's text or a kind's definition, from the NIPs repository.         |
 | `nostr.req`     | A NIP-01 filter against relays. Read-only, capped.                     |
 | `nostr.resolve` | A bech32 entity turned into the person or event it names.              |
 | `nostr.publish` | Sign an event and put it on relays. Off unless configured.             |
@@ -149,7 +149,7 @@ An id a model could name is an answer it could address into someone else's
 conversation. Calls dedupe on the runtime's call id, because a step interrupted
 mid-execution is re-run and a resent message is not idempotent.
 
-`grimoire.help` earns its place: asked from memory, the model called kind 9 an
+`nostr.help` earns its place: asked from memory, the model called kind 9 an
 MLS event. Asked with the tool, it reads the spec and cites the NIP.
 
 ## How a turn is delivered
@@ -191,10 +191,6 @@ A home written by an older version also holds `sessions`, `messages`,
 `participants` and `worktrees`, from when this package ran its own agent loop.
 They are left where they are: deleting an operator's conversation history to tidy
 a schema is not a migration this gets to make.
-
-`packages/hex/deploy/` has a launchd plist for macOS — `KeepAlive` on non-zero
-exit, `RunAtLoad`, and `caffeinate -i -s` wrapping the process so the machine
-stays awake exactly as long as Hex runs.
 
 ## When Hex speaks
 

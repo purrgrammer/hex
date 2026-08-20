@@ -6,20 +6,27 @@
     }
   },
   "instructions": "./instructions.md",
-  "mentions": ["hex", "@hex"],
+  "mentions": [
+    "hex",
+    "@hex"
+  ],
   "relays": {
-    "read": ["wss://relay.example.invalid"],
-    "publish": ["wss://relay.example.invalid"],
-    "dm": ["wss://inbox.example.invalid"]
+    "read": [
+      "wss://relay.example.invalid"
+    ],
+    "publish": [
+      "wss://relay.example.invalid"
+    ],
+    "dm": [
+      "wss://inbox.example.invalid"
+    ]
   },
   "profile": {
     "publish": true,
     "bot": true,
     "name": "Hex",
-    "about": "The grimoire assistant. Ask me about NIPs, kinds, and how relays actually behave.",
-    "picture": "https://i.nostr.build/6BK9LpTI5oFAvlyy.png",
-    "nip05": "hex@grimoire.rocks",
-    "website": "https://grimoire.rocks"
+    "about": "An agent on Nostr. Ask me about NIPs, kinds, and how relays actually behave.",
+    "picture": "https://i.nostr.build/6BK9LpTI5oFAvlyy.png"
   },
   "state": {
     "home": "~/.hex"
@@ -31,7 +38,9 @@
     "host": "http://127.0.0.1:2000"
   },
   "transcript": {
-    "to": ["npub1..."],
+    "to": [
+      "npub1..."
+    ],
     "slug": "hex",
     "deltas": true
   },
