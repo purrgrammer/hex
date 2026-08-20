@@ -952,6 +952,19 @@ export class EveTranscript {
       case "subagent.completed": {
         const callId = stringField(data, "callId");
         const output = stringField(data, "output");
+        /**
+         * The child's NAME arrives here, not on the call.
+         *
+         * `subagent.called` carries the ids and nothing a person can read; the
+         * name comes with the completion, which lands before the result turn
+         * that publishes the pointer. So the pointer is two-thirds written
+         * until this fills in the third — seen live: the first tag ever
+         * published had a call id, a child session, and no name at all.
+         */
+        const named = callId ? stringField(data, "subagentName") : undefined;
+        const known = callId ? this.subagents.get(callId) : undefined;
+        if (callId && named && known && !known.name)
+          this.subagents.set(callId, { ...known, name: named });
         if (callId && output)
           this.pending.push({
             type: "tool_result",

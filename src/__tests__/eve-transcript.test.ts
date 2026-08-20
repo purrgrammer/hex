@@ -1221,11 +1221,20 @@ describe("EveTranscript", () => {
         // `childSessionId` is Eve's own name for it. The test asserted
         // `sessionId` — the same wrong guess the code made — so both were wrong
         // together and the suite was green.
-        data: {
-          callId: "call_sub",
-          childSessionId: "wrun_CHILD",
-          subagentName: "auditor",
-        },
+        // No name here: the runtime does not put one on the call.
+        data: { callId: "call_sub", childSessionId: "wrun_CHILD" },
+      },
+      ++index,
+    );
+    /**
+     * The NAME arrives with the completion, not with the call. The first tag
+     * ever published live had a call id, a child session and no name — because
+     * `subagent.called` carries no readable name at all.
+     */
+    await pub.handle(
+      {
+        type: "subagent.completed",
+        data: { callId: "call_sub", subagentName: "auditor", output: "POTATO" },
       },
       ++index,
     );
