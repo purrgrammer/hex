@@ -28,6 +28,8 @@ import type { TransportConfig } from "./config.js";
 import type { Inbound } from "./transports/types.js";
 import { KIND_FILE_MESSAGE, Nip17Transport } from "./transports/nip17.js";
 import { Nip29Transport } from "./transports/nip29.js";
+import { ConcordTransport } from "./transports/concord.js";
+import { resolveMemberships } from "./concord/join.js";
 import { TransportRouter } from "./transports/router.js";
 import { fileMessageTags, imetaTag, upload, type Uploaded } from "./blossom.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
@@ -799,6 +801,50 @@ async function main(): Promise<void> {
           : undefined;
 
         /**
+         * Concord communities, if the config named any.
+         *
+         * Resolved before the stream opens, because a membership is KEYS: there
+         * is no address to subscribe to until an invite has been read, and an
+         * agent that started listening first would listen to nothing and say so
+         * to nobody.
+         */
+        const concordConfig = config.transports.find(
+          (
+            candidate,
+          ): candidate is Extract<TransportConfig, { type: "concord" }> =>
+            candidate.type === "concord",
+        );
+        let communities: ConcordTransport | undefined;
+        if (concordConfig) {
+          const memberships = await resolveMemberships({
+            relays,
+            signer: resolved.signer,
+            pubkey: resolved.pubkey,
+            config: {
+              communities: concordConfig.communities,
+              acceptInvitesFrom: concordConfig.acceptInvitesFrom,
+            },
+            store,
+            inboxRelays: config.relays.dm,
+            log: (line) => console.log(line),
+          });
+          if (memberships.length === 0)
+            console.log(
+              "[hex] concord: no community keys are held yet — waiting for an invite",
+            );
+          else
+            communities = new ConcordTransport({
+              signer: resolved.signer,
+              pubkey: resolved.pubkey,
+              memberships,
+              mentions: config.mentions,
+              since: startedAt,
+              durability: store,
+              log: (line) => console.log(line),
+            });
+        }
+
+        /**
          * One inbound stream, and a reply that leaves by the door it came in.
          *
          * The transcript sink stays the NIP-17 transport regardless: a session
@@ -806,7 +852,12 @@ async function main(): Promise<void> {
          * that started it was private or in a group, because a transcript is
          * for the person who owns the agent and not for the room.
          */
-        const transport = rooms ? new TransportRouter([dms, rooms]) : dms;
+        const extras = [rooms, communities].filter(
+          (candidate): candidate is Nip29Transport | ConcordTransport =>
+            candidate !== undefined,
+        );
+        const transport =
+          extras.length > 0 ? new TransportRouter([dms, ...extras]) : dms;
 
         /**
          * Hex's own tools, if the config opened a bridge for them.

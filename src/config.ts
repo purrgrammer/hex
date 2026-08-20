@@ -199,7 +199,37 @@ export interface EveConfig {
   };
 }
 
+/** One Concord community Hex is in. */
+export interface ConcordCommunityConfig {
+  /** The community_id, hex. Stated even when an invite is given. */
+  id: string;
+  /** An invite link, if the operator has one to paste. */
+  invite?: string;
+  /**
+   * Public channels to listen in, by id.
+   *
+   * Named rather than discovered because nothing in this package folds
+   * Concord's Control Plane, which is where a community says which channels
+   * exist. A PRIVATE channel needs no entry — its key arrives with the invite
+   * that granted it.
+   */
+  channels?: Array<{ id: string; name?: string }>;
+}
+
 export type TransportConfig =
+  | {
+      type: "concord";
+      communities: ConcordCommunityConfig[];
+      /**
+       * Whose direct invites Hex accepts unprompted, as hex pubkeys.
+       *
+       * Empty by default and never implied by anything else. Joining a
+       * community means holding a standing subscription and answering mentions
+       * in it, so an open door here lets a stranger put Hex in a room of their
+       * choosing and spend the operator's tokens there.
+       */
+      acceptInvitesFrom: string[];
+    }
   | {
       type: "nip-29";
       groups: Nip29GroupConfig[];
@@ -667,9 +697,80 @@ function parseTransports(value: unknown): TransportConfig[] {
       };
     }
 
+    if (type === "concord") {
+      rejectUnknown(transport, ["type", "communities", "acceptInvitesFrom"], path);
+      const communitiesRaw = transport.communities;
+      if (!Array.isArray(communitiesRaw) || communitiesRaw.length === 0)
+        throw new ConfigError(`${path}.communities must be a non-empty array`);
+
+      const communities = communitiesRaw.map((raw, index) => {
+        const where = `${path}.communities[${index}]`;
+        const community = requireRecord(raw, where);
+        rejectUnknown(community, ["id", "invite", "channels"], where);
+        const id = requireString(community.id, `${where}.id`).toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(id))
+          throw new ConfigError(`${where}.id must be a 64-char hex community id`);
+
+        const channelsRaw = community.channels;
+        const channels =
+          channelsRaw === undefined
+            ? []
+            : (() => {
+                if (!Array.isArray(channelsRaw))
+                  throw new ConfigError(`${where}.channels must be an array`);
+                return channelsRaw.map((entry, channelIndex) => {
+                  const channelPath = `${where}.channels[${channelIndex}]`;
+                  const channel =
+                    typeof entry === "string"
+                      ? { id: entry }
+                      : requireRecord(entry, channelPath);
+                  rejectUnknown(channel, ["id", "name"], channelPath);
+                  const channelId = requireString(
+                    channel.id,
+                    `${channelPath}.id`,
+                  ).toLowerCase();
+                  if (!/^[0-9a-f]{64}$/.test(channelId))
+                    throw new ConfigError(
+                      `${channelPath}.id must be a 64-char hex channel id`,
+                    );
+                  return {
+                    id: channelId,
+                    ...(channel.name !== undefined
+                      ? { name: requireString(channel.name, `${channelPath}.name`) }
+                      : {}),
+                  };
+                });
+              })();
+
+        return {
+          id,
+          ...(community.invite !== undefined
+            ? { invite: requireString(community.invite, `${where}.invite`) }
+            : {}),
+          channels,
+        };
+      });
+
+      const acceptRaw = transport.acceptInvitesFrom;
+      const acceptInvitesFrom =
+        acceptRaw === undefined
+          ? []
+          : (() => {
+              if (!Array.isArray(acceptRaw))
+                throw new ConfigError(
+                  `${path}.acceptInvitesFrom must be an array of pubkeys`,
+                );
+              return acceptRaw.map((who, index) =>
+                parsePubkey(who, `${path}.acceptInvitesFrom[${index}]`),
+              );
+            })();
+
+      return { type: "concord" as const, communities, acceptInvitesFrom };
+    }
+
     if (type !== "nip-29")
       throw new ConfigError(
-        `${path}.type must be "nip-29" or "nip-17" (got ${JSON.stringify(type)})`,
+        `${path}.type must be "nip-29", "nip-17" or "concord" (got ${JSON.stringify(type)})`,
       );
     rejectUnknown(transport, ["type", "groups", "autoJoin"], path);
 
