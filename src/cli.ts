@@ -23,6 +23,7 @@ import type { TransportConfig } from "./config.js";
 import type { Inbound } from "./transports/types.js";
 import { KIND_FILE_MESSAGE, Nip17Transport } from "./transports/nip17.js";
 import { Nip29Transport } from "./transports/nip29.js";
+import { TransportRouter } from "./transports/router.js";
 import {
   fileMessageTags,
   imetaTag,
@@ -198,6 +199,7 @@ async function main(): Promise<void> {
         token: pricingConfig.tokenEnv
           ? process.env[pricingConfig.tokenEnv]
           : undefined,
+        models: pricingConfig.models,
         log: (line) => console.log(line),
       })
     : undefined;
@@ -732,7 +734,7 @@ async function main(): Promise<void> {
         const store = HexStore.open(home.db);
 
         const startedAt = Math.floor(Date.now() / 1000);
-        const transport = new Nip17Transport({
+        const dms = new Nip17Transport({
           relays,
           signer: resolved.signer,
           pubkey: resolved.pubkey,
@@ -766,6 +768,43 @@ async function main(): Promise<void> {
           },
           log: (line) => console.log(line),
         });
+
+        /**
+         * Every OTHER transport the config listed.
+         *
+         * `serve` used to build the NIP-17 one and stop there, so an operator
+         * who had configured a NIP-29 group got a daemon that started cleanly,
+         * said nothing about the group, and never answered in it. Nothing was
+         * broken — the code to open it was simply never called, which is the
+         * worst shape a missing feature can take, because it looks like a
+         * working one.
+         */
+        const groups = config.transports.find(
+          (candidate): candidate is Extract<TransportConfig, { type: "nip-29" }> =>
+            candidate.type === "nip-29",
+        );
+        const rooms = groups?.groups.length
+          ? new Nip29Transport({
+              relays,
+              signer: resolved.signer,
+              pubkey: resolved.pubkey,
+              groups: groups.groups,
+              mentions: config.mentions,
+              since: startedAt,
+            })
+          : undefined;
+
+        /**
+         * One inbound stream, and a reply that leaves by the door it came in.
+         *
+         * The transcript sink stays the NIP-17 transport regardless: a session
+         * is published as gift wraps to the operator whether the conversation
+         * that started it was private or in a group, because a transcript is
+         * for the person who owns the agent and not for the room.
+         */
+        const transport = rooms
+          ? new TransportRouter([dms, rooms])
+          : dms;
 
         /**
          * Hex's own tools, if the config opened a bridge for them.
@@ -951,7 +990,9 @@ async function main(): Promise<void> {
             slug: transcriptConfig.slug,
             recipients: transcriptConfig.to,
             store,
-            sink: transport,
+            // Always the gift-wrap door: a transcript goes to the operator,
+            // not to whichever room the question came from.
+            sink: dms,
             deltas: transcriptConfig.deltas,
             deltaRelays: config.relays.dm,
             prices,
@@ -1003,6 +1044,23 @@ async function main(): Promise<void> {
          * which is the failure mode of every bot that has ever gone quiet without
          * saying why.
          */
+        /**
+         * What it is ACTUALLY listening to, said where the listening starts.
+         *
+         * The old line named the DM relays and nothing else, so a group that
+         * was never opened looked exactly like a group that was — and it was
+         * printed after the catch-up, which on a busy home takes minutes, so
+         * the daemon looked deaf for the whole of it while in fact the
+         * subscription below had been live since the first second.
+         */
+        console.log(`listening dms on ${config.relays.dm.join(", ")}`);
+        for (const group of groups?.groups ?? [])
+          console.log(
+            rooms
+              ? `listening group ${group.id} on ${group.relay}`
+              : `NOT listening to group ${group.id} — no transport was built for it`,
+          );
+
         const subscription = transport.start().subscribe({
           next: (inbound) => {
             const verdict = gate.consider(inbound);
@@ -1078,7 +1136,6 @@ async function main(): Promise<void> {
          */
         await server.catchUp();
 
-        console.log(`listening dms on ${config.relays.dm.join(", ")}`);
 
         await new Promise<void>((resolveRun) => {
           const shutdown = (signal: string) => {

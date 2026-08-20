@@ -328,10 +328,23 @@ export interface SessionHeadInput {
   /** The message that started this run, when one did. */
   trigger?: { id: string; relay?: string };
   /**
-   * The highest turn `seq` so far, which is also the turn count. The head
-   * itself takes no sequence number.
+   * The highest `seq` so far. The head itself takes no sequence number.
+   *
+   * This counts EVENTS, not exchanges: one question that makes the agent call a
+   * tool publishes four — the question, the call, the result, the answer. It is
+   * the cursor a reader uses to spot a hole in the chain, and it was being
+   * shown to people as "turns", which is a different and much smaller number.
    */
   lastSeq: number;
+  /**
+   * Exchanges: how many times somebody said something and the agent worked.
+   *
+   * The number a person means by "turns". Separate from `lastSeq` because they
+   * answer different questions — "is anything missing" and "how much
+   * conversation is this" — and conflating them made a two-message session
+   * report four.
+   */
+  turns?: number;
   started: number;
   ended?: number;
   model?: { id: string; provider?: string };

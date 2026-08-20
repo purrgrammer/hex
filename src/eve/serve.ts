@@ -33,13 +33,21 @@ import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
 import { asRecord, payload, stringField } from "./types.js";
 import { sessionAddress } from "../nostr/encode.js";
 import type { ToolBridge } from "./bridge.js";
-import type { ToolHost } from "../tools/types.js";
+import { KNOWN_TOOLS, wireName, type ToolHost } from "../tools/types.js";
 import type { SessionControl } from "../nostr/decode-control.js";
 import type { Inbound } from "../transports/types.js";
 
 /** What this needs of a transport: answer a message, and acknowledge one. */
 export interface ServeTransport {
   reply(to: Inbound, text: string, tags?: string[][]): Promise<string>;
+  /**
+   * What this room IS, for the context the runtime is given.
+   *
+   * Only the transport can answer: a group's name and rules are an event on
+   * that group's own relay, and a Concord channel's are inside an encrypted
+   * list no relay will hand over. Optional — its absence costs a fact.
+   */
+  describeRoom?(room: Inbound["room"]): Promise<Record<string, unknown> | undefined>;
   /**
    * Optional, because not every protocol has a reaction.
    *
@@ -116,7 +124,12 @@ export interface ServeOptions {
    */
   ground?: (input: {
     target?: string;
-    channel?: { transport: string; id?: string };
+    channel?: {
+      transport: string;
+      id?: string;
+      /** What the transport says the room is. */
+      about?: Record<string, unknown>;
+    };
     operator?: string;
     subjects?: string[][];
   }) => Promise<string[]>;
@@ -134,6 +147,32 @@ export interface ServeOptions {
  * per follow-up, on a session that is waiting and therefore silent.
  */
 const DEFAULT_DRAIN_QUIET_MS = 1_500;
+
+/**
+ * Every tool id the bridge could ever serve, in the spelling a runtime uses.
+ *
+ * The membership test for "is this one of ours". A name not in here belongs to
+ * the runtime itself and is none of this file's business.
+ */
+const BRIDGE_TOOLS = new Set(KNOWN_TOOLS.map((id) => wireName(id)));
+
+/**
+ * Enough of a message to build a host with a room, for the catalogue only.
+ *
+ * `describe` needs to know WHICH tools a session gets, and the answer depends
+ * on whether there is a room — but no message is in hand when a run is caught
+ * up after a restart. Nothing is ever sent to it: `list()` reads the room's
+ * existence and nothing else.
+ */
+const PLACEHOLDER_INBOUND = {
+  id: "",
+  author: "",
+  text: "",
+  createdAt: 0,
+  room: { transport: "nip-17", id: "" },
+  addressesSelf: true,
+  event: { id: "", pubkey: "", created_at: 0, kind: 14, tags: [], content: "", sig: "" },
+} as unknown as Inbound;
 
 /**
  * How long past a failed turn to read for the session's own verdict.
@@ -361,6 +400,15 @@ export class EveServer {
     transcript: EveTranscript,
     roomless = false,
   ): Promise<void> {
+    /**
+     * Only the tools this session was actually offered.
+     *
+     * The runtime's `/info` lists every tool it can reach, which includes every
+     * tool the bridge could serve rather than the ones this host serves. A
+     * roomless run gets no `chat.*`, and a `git.state` the operator did not
+     * turn on is refused — publishing either as part of the setup describes an
+     * agent that never ran, and a reader has no way to tell.
+     */
     const describe = this.options.describe;
     if (!describe) return;
     // Said before the first head goes out, so it points at the snapshot this is
@@ -368,17 +416,24 @@ export class EveServer {
     transcript.expectSnapshot();
     try {
       const info = await describe();
-      if (info)
-        await transcript.snapshot(
-          roomless
-            ? {
-                ...info,
-                tools: (info.tools ?? []).filter(
-                  (tool) => !/^chat[._]/.test(tool.name),
-                ),
-              }
-            : info,
-        );
+      if (!info) return;
+      const offered = this.options.tools
+        ? new Set(
+            this.options.tools
+              .host(roomless ? undefined : PLACEHOLDER_INBOUND)
+              .list()
+              .map((spec) => wireName(spec.name)),
+          )
+        : undefined;
+      await transcript.snapshot({
+        ...info,
+        tools: (info.tools ?? []).filter(
+          (tool) =>
+            // A tool the bridge does not serve at all is the runtime's own —
+            // `bash`, `read_file` — and is offered whatever this host says.
+            !offered || !BRIDGE_TOOLS.has(tool.name) || offered.has(tool.name),
+        ),
+      });
     } catch (error) {
       this.log(`[hex] could not describe the session: ${message(error)}`);
     }
@@ -394,14 +449,29 @@ export class EveServer {
     operator: string,
     subjects: string[][],
     channel?: { transport: string; id?: string },
+    /** The room the request came from, when one did. */
+    room?: Inbound["room"],
   ): Promise<string[] | undefined> {
     if (!this.options.ground) return undefined;
     try {
+      /**
+       * Ask the transport what the room is.
+       *
+       * A model told "you are in group NkeVhXuWHGKKJCpn" knows nothing it can
+       * use; told the group's name, its topic and whether it is PUBLIC, it can
+       * decide how — and whether — to answer. Never fatal: a relay that will
+       * not answer costs a fact, not the run.
+       */
+      const about = room
+        ? await this.options.transport
+            .describeRoom?.(room)
+            .catch(() => undefined)
+        : undefined;
       const blocks = await this.options.ground({
         // Least variable first: this ordering is what lets a provider reuse the
         // cached prefix across every run this agent will ever do.
         target: this.options.transcript.agentPubkey,
-        channel,
+        channel: channel && { ...channel, ...(about ? { about } : {}) },
         operator,
         subjects,
       });
@@ -869,6 +939,7 @@ export class EveServer {
           peer,
           subjectsOf(inbound, addressed),
           channelOf(inbound),
+          inbound.room,
         ),
       );
       const transcript = new EveTranscript(

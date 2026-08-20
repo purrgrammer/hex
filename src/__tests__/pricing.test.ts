@@ -65,3 +65,96 @@ describe("Prices", () => {
     expect(prices.estimate("anything", { input: 10, output: 10 })).toBeUndefined();
   });
 });
+
+describe("cache-aware estimates", () => {
+  const table = {
+    data: [
+      {
+        id: "claude-sonnet-5",
+        pricing: {
+          currency: "USD",
+          input_per_1M_tokens: 3,
+          output_per_1M_tokens: 15,
+        },
+      },
+    ],
+  };
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify(table), { status: 200 })) as typeof fetch;
+
+  it("charges a cache hit as a cache hit, not as a fresh read", async () => {
+    /**
+     * `inputTokens` INCLUDES `cacheReadTokens` — a real step reported 3,765 in
+     * with 3,764 of them cached, meaning one token was actually read fresh.
+     * Charging the whole of `input` at the input rate billed every hit as a
+     * miss, and a long conversation runs at a 90% cache rate, so the estimate
+     * came out several times the invoice.
+     */
+    const prices = new Prices({ url: "https://example/models", fetchImpl });
+    await prices.load();
+
+    const priced = prices.estimate("anthropic/claude-sonnet-5", {
+      input: 100_000,
+      output: 1_000,
+      cacheRead: 90_000,
+      cacheWrite: 0,
+    });
+
+    // 10k fresh at $3 + 90k cached at $0.30 + 1k out at $15.
+    const expected = (10_000 * 3 + 90_000 * 0.3 + 1_000 * 15) / 1_000_000;
+    expect(Number(priced!.amount)).toBeCloseTo(expected, 6);
+
+    // And the old arithmetic, for the size of the error: it was 2.6x this.
+    const naive = (100_000 * 3 + 1_000 * 15) / 1_000_000;
+    expect(naive / Number(priced!.amount)).toBeGreaterThan(2);
+  });
+
+  it("charges a cache write on top, because it is not in `input`", async () => {
+    const prices = new Prices({ url: "https://example/models", fetchImpl });
+    await prices.load();
+    const priced = prices.estimate("anthropic/claude-sonnet-5", {
+      input: 1_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 1_000,
+    });
+    // 1k fresh at $3, plus 1k written at 1.25x.
+    expect(Number(priced!.amount)).toBeCloseTo((1_000 * 3 + 1_000 * 3.75) / 1_000_000, 6);
+  });
+
+  it("gives a provider it has never heard of no discount at all", async () => {
+    /**
+     * Wrong HIGH is the safe direction for a number someone is deciding by, and
+     * inventing a discount for a provider whose terms nobody here has read
+     * would be wrong LOW.
+     */
+    const prices = new Prices({ url: "https://example/models", fetchImpl });
+    await prices.load();
+    const priced = prices.estimate("claude-sonnet-5", {
+      input: 1_000,
+      output: 0,
+      cacheRead: 900,
+    });
+    expect(Number(priced!.amount)).toBeCloseTo(3 / 1_000, 6);
+  });
+
+  it("prefers a price the operator stated over the one the table sells", async () => {
+    /**
+     * A `/models` endpoint prices what that endpoint sells. Driving a provider
+     * directly makes the table somebody else's resale price for the same model
+     * — close enough to look right, wrong enough that the estimate stops
+     * matching the invoice.
+     */
+    const prices = new Prices({
+      url: "https://example/models",
+      fetchImpl,
+      models: { "anthropic/claude-sonnet-5": { input: 30, output: 150 } },
+    });
+    await prices.load();
+    const priced = prices.estimate("anthropic/claude-sonnet-5", {
+      input: 1_000,
+      output: 0,
+    });
+    expect(Number(priced!.amount)).toBeCloseTo(30 / 1_000, 6);
+  });
+});

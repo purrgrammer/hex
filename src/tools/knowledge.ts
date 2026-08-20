@@ -545,8 +545,18 @@ export class KnowledgeTools {
   async ground(input: {
     /** The agent itself. */
     target?: string;
-    /** The transport the request arrived over, e.g. `nip-17`, `nip-59`. */
-    channel?: { transport: string; id?: string };
+    /**
+     * How the request arrived, and what the room is.
+     *
+     * `about` comes from the transport, because only the transport can answer:
+     * a NIP-29 group's name and rules are an event on its own relay, and a
+     * Concord channel's are inside an encrypted list no relay will hand over.
+     */
+    channel?: {
+      transport: string;
+      id?: string;
+      about?: Record<string, unknown>;
+    };
     /** Who is asking. */
     operator?: string;
     subjects?: string[][];
@@ -566,17 +576,40 @@ export class KnowledgeTools {
       );
     }
 
-    if (input.channel)
+    if (input.channel) {
+      const { transport, id, about } = input.channel;
+      /**
+       * A private conversation's "room" IS the person on the other end.
+       *
+       * So the channel block resolves them, the same way the author block
+       * does — a model told "the room is 7fa56f5d…" has been told nothing,
+       * and 64 hex characters is the one representation of a person that
+       * carries no information at all.
+       */
+      const peer =
+        (transport === "nip-17" || transport === "nip-59") &&
+        id &&
+        HEX64.test(id)
+          ? await this.person(id).catch(() => undefined)
+          : undefined;
+
       blocks.push(
         block("channel", {
-          transport: input.channel.transport,
-          ...(input.channel.id ? { id: input.channel.id } : {}),
+          transport,
+          ...(id ? { id } : {}),
+          ...(peer ? { with: peer } : {}),
+          // Whatever the transport itself knows: a NIP-29 group's name, topic
+          // and whether it is public; a Concord channel's community and repo.
+          ...(about ?? {}),
           note:
-            input.channel.transport === "nip-59"
+            transport === "nip-59"
               ? "Asked for privately over a gift wrap. There is no room: your transcript is how this is read, and there is nobody to send a chat message to."
-              : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking.",
+              : about?.public
+                ? "A PUBLIC room. Anything you say here is readable by anyone, permanently. Say it with a chat tool; text you write outside one is private thinking."
+                : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking.",
         }),
       );
+    }
 
     if (input.operator) {
       const person = await this.person(input.operator).catch(() => undefined);

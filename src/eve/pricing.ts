@@ -23,9 +23,54 @@ export interface ModelPrice {
   currency: string;
 }
 
+/**
+ * What a cached token costs, as a fraction of a fresh one.
+ *
+ * A price list gives two numbers and a run reports four, and the gap between
+ * them was the whole error: a provider reports `inputTokens` INCLUSIVE of
+ * `cacheReadTokens`, so charging every input token at the input rate bills a
+ * cache hit as though it were a fresh read. On a session running at a 90% cache
+ * rate — which is the normal state of a long conversation — that overstates the
+ * input side by roughly eight times, and the estimate stops resembling the
+ * invoice.
+ *
+ * The ratios are per PROVIDER because they differ and are published. Anthropic
+ * charges a tenth for a read and a quarter extra for a write; OpenAI charges
+ * half for a read and nothing for a write. A provider this table has never
+ * heard of gets 1 and 0 — the old arithmetic, wrong HIGH, which is the safe
+ * direction for a number someone is deciding by.
+ */
+interface CacheRatios {
+  read: number;
+  write: number;
+}
+
+const CACHE_RATIOS: Record<string, CacheRatios> = {
+  anthropic: { read: 0.1, write: 1.25 },
+  openai: { read: 0.5, write: 0 },
+};
+
+const NO_DISCOUNT: CacheRatios = { read: 1, write: 0 };
+
+/** The provider half of a model id, when it carries one. */
+function ratiosFor(modelId: string): CacheRatios {
+  for (const [provider, ratios] of Object.entries(CACHE_RATIOS))
+    if (modelId.toLowerCase().includes(provider)) return ratios;
+  return NO_DISCOUNT;
+}
+
 export interface PricesOptions {
   /** An OpenAI-shaped `/models` endpoint. No default: a guessed URL is a lie. */
   url: string;
+  /**
+   * Prices the operator stated, which beat the fetched table.
+   *
+   * A `/models` endpoint prices what that endpoint SELLS. Point the runtime at
+   * a provider directly and the table becomes somebody else's resale price for
+   * the same model — close enough to look right and wrong enough that the
+   * estimate stops matching the invoice.
+   */
+  models?: Record<string, { input: number; output: number }>;
   token?: string;
   fetchImpl?: typeof fetch;
   /** How long a fetched table is trusted. Prices move slowly. */
@@ -119,7 +164,13 @@ export class Prices {
   /** What this many tokens of this model come to, or nothing. */
   estimate(
     modelId: string | undefined,
-    usage: { input: number; output: number },
+    usage: {
+      input: number;
+      output: number;
+      /** Included IN `input`, and charged at a fraction of it. */
+      cacheRead?: number;
+      cacheWrite?: number;
+    },
   ): { amount: string; currency: string } | undefined {
     if (!modelId) return undefined;
     // Kick a refresh rather than await one: a step must not wait on a price
@@ -127,22 +178,34 @@ export class Prices {
     if (this.stale) void this.load();
     let price: ModelPrice | undefined;
     for (const id of candidates(modelId)) {
-      price = this.table.get(id);
+      // Stated beats fetched, and the full id beats a suffix of it.
+      const stated = this.options.models?.[id];
+      price = stated ? { ...stated, currency: "USD" } : this.table.get(id);
       if (price) break;
     }
     if (!price) return undefined;
 
     /**
-     * Cached input is not discounted here.
+     * Cache reads are already IN `input`, and cost a fraction of it.
      *
-     * Eve reports `cacheRead` separately, but a table of two prices cannot say
-     * what a cache hit costs — and every provider prices it differently. Input
-     * tokens are counted at the input rate, which is the arithmetic the numbers
-     * support. Where it is wrong it is wrong HIGH, which is the safe direction
-     * for a figure someone is deciding by.
+     * This is the arithmetic that was wrong. A provider reports `inputTokens`
+     * inclusive of `cacheReadTokens` — 3,765 in and 3,764 of them cached means
+     * one token was actually read fresh — so charging the whole of `input` at
+     * the input rate bills every cache hit as a miss. A long conversation runs
+     * at a 90% cache rate, so the estimate came out several times the invoice.
+     *
+     * Writes are charged too, and on top: a cache write is a full read plus a
+     * premium, and it is NOT part of `input`.
      */
+    const ratios = ratiosFor(modelId);
+    const cacheRead = Math.min(usage.cacheRead ?? 0, usage.input);
+    const fresh = usage.input - cacheRead;
     const amount =
-      (usage.input * price.input + usage.output * price.output) / 1_000_000;
+      (fresh * price.input +
+        cacheRead * price.input * ratios.read +
+        (usage.cacheWrite ?? 0) * price.input * ratios.write +
+        usage.output * price.output) /
+      1_000_000;
     return { amount: amount.toFixed(6), currency: price.currency };
   }
 }

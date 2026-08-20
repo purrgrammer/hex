@@ -1299,6 +1299,7 @@ export class EveTranscript {
           .map((pubkey) => ({ pubkey })),
         trigger: this.record.trigger ? { id: this.record.trigger } : undefined,
         lastSeq: this.record.seq,
+        turns: this.record.turn,
         started: this.record.startedAt,
         ended: this.record.endedAt,
         model: this.model,

@@ -170,7 +170,20 @@ export interface EveConfig {
    * No default URL: a guessed price list is a made-up number with a currency on
    * it. What it produces is published marked `estimated`.
    */
-  pricing?: { url: string; tokenEnv?: string };
+  pricing?: {
+    url: string;
+    tokenEnv?: string;
+    /**
+     * Prices this operator KNOWS, which beat whatever the table says.
+     *
+     * A `/models` endpoint prices what that endpoint sells. Point the runtime
+     * at a provider directly and the table becomes somebody else's resale
+     * price for the same model — close enough to look right and wrong enough
+     * that the estimate stops matching the invoice. USD per million tokens,
+     * keyed by model id, checked before the fetched table.
+     */
+    models?: Record<string, { input: number; output: number }>;
+  };
 }
 
 export type TransportConfig =
@@ -573,6 +586,7 @@ function parseEve(value: unknown): EveConfig | undefined {
 function parsePricing(value: unknown): EveConfig["pricing"] {
   if (value === undefined) return undefined;
   const record = requireRecord(value, "eve.pricing");
+  rejectUnknown(record, ["url", "tokenEnv", "models"], "eve.pricing");
   const url = requireString(record.url, "eve.pricing.url");
   try {
     new URL(url);
@@ -585,6 +599,7 @@ function parsePricing(value: unknown): EveConfig["pricing"] {
       record.tokenEnv === undefined
         ? undefined
         : requireString(record.tokenEnv, "eve.pricing.tokenEnv"),
+    models: parsePriceOverrides(record.models),
   };
 }
 
@@ -749,4 +764,27 @@ export function parseConfigText(text: string): HexConfig {
     );
   }
   return parseConfig(json);
+}
+
+function parsePriceOverrides(
+  value: unknown,
+): Record<string, { input: number; output: number }> | undefined {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value, "eve.pricing.models");
+  const out: Record<string, { input: number; output: number }> = {};
+  for (const [id, raw] of Object.entries(record)) {
+    const entry = requireRecord(raw, `eve.pricing.models.${id}`);
+    const input = entry.input;
+    const output = entry.output;
+    if (typeof input !== "number" || input < 0)
+      throw new ConfigError(
+        `eve.pricing.models.${id}.input must be USD per million tokens`,
+      );
+    if (typeof output !== "number" || output < 0)
+      throw new ConfigError(
+        `eve.pricing.models.${id}.output must be USD per million tokens`,
+      );
+    out[id] = { input, output };
+  }
+  return Object.keys(out).length ? out : undefined;
 }

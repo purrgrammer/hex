@@ -28,6 +28,8 @@ import type { Inbound, Room, Transport } from "./types.js";
 
 /** A group chat message. */
 export const KIND_GROUP_MESSAGE = 9;
+/** What the relay says the group IS: name, topic, whether it is public. */
+export const KIND_GROUP_METADATA = 39000;
 
 /**
  * Which message an event replies to.
@@ -194,6 +196,51 @@ export class Nip29Transport implements Transport {
       ),
     );
     return merge(...streams);
+  }
+
+  /**
+   * What the group says it is: its kind 39000, from its own relay.
+   *
+   * A model told only "you are in group NkeVhXuWHGKKJCpn" knows nothing it can
+   * use. The name, the topic and whether the room is public are what decide how
+   * to answer — and whether the room is public decides what it is safe to say
+   * at all, which is not a judgement to leave to a guess.
+   *
+   * Never throws: a relay that will not answer costs the model a fact.
+   */
+  async describeRoom(room: Room): Promise<Record<string, unknown> | undefined> {
+    if (!room.relay) return undefined;
+    try {
+      const events = await requestEvents(
+        this.options.relays,
+        [room.relay],
+        [{ kinds: [KIND_GROUP_METADATA], "#d": [room.id], limit: 1 }],
+      );
+      const meta = events.sort((a, b) => b.created_at - a.created_at)[0];
+      if (!meta) return { id: room.id, relay: room.relay };
+
+      const tag = (name: string) =>
+        meta.tags.find((t) => t[0] === name && t[1])?.[1];
+      const flag = (name: string) =>
+        meta.tags.some((t) => t[0] === name) || undefined;
+
+      return {
+        id: room.id,
+        relay: room.relay,
+        name: tag("name"),
+        about: tag("about"),
+        picture: tag("picture"),
+        // NIP-29 states these as bare tags rather than values, and both
+        // matter to an agent deciding what to say: a public group is
+        // readable by anyone, forever.
+        public: flag("public"),
+        private: flag("private"),
+        open: flag("open"),
+        closed: flag("closed"),
+      };
+    } catch {
+      return { id: room.id, relay: room.relay };
+    }
   }
 
   /** The newest `limit` messages in a room, oldest first. */

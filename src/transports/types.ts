@@ -66,6 +66,19 @@ export interface Transport {
    * shorter conversation.
    */
   fetchById?(room: Room, id: string): Promise<Inbound | null>;
+  /**
+   * What this room IS, for the context a runtime is given before it reads.
+   *
+   * Only the transport can answer. A NIP-29 group's name and rules are a kind
+   * 39000 on the group's own relay; a private conversation's "room" is the
+   * person on the other end; a Concord channel's metadata is inside an
+   * encrypted community list that no relay will hand over. So the question is
+   * asked of whoever owns the protocol rather than answered by a switch
+   * somewhere else that has to be extended every time a transport is added.
+   *
+   * Optional, and its absence costs the model a fact rather than a run.
+   */
+  describeRoom?(room: Room): Promise<Record<string, unknown> | undefined>;
   /** Publish a reply and return its event id. */
   /**
    * `tags` rides on the message itself.

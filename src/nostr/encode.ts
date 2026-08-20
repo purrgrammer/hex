@@ -271,6 +271,9 @@ export function buildSessionHead(
   if (input.trigger)
     tags.push(["e", input.trigger.id, input.trigger.relay ?? "", "trigger"]);
   tags.push(["last-seq", String(input.lastSeq)]);
+  // Exchanges, which is what a person means by "turns" — `last-seq` counts
+  // events, and one question with a tool call is four of those.
+  if (input.turns !== undefined) tags.push(["turns", String(input.turns)]);
   tags.push(["started", String(input.started)]);
   if (input.ended !== undefined) tags.push(["ended", String(input.ended)]);
   if (input.model)
