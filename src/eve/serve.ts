@@ -686,17 +686,16 @@ export class EveServer {
      * instruction started and then follow a stream with nothing left in it.
      */
     const runs = control.command === "respond" || control.command === "steer";
-    let conversation: Conversation | undefined;
+    let conversation: Conversation | undefined = {
+      sessionId: record.sessionId,
+      transcript: new EveTranscript(
+        { ...this.options.transcript },
+        record.sessionId,
+      ),
+      finished: new Set(),
+    };
     let boundary: Boundary | undefined;
     if (runs) {
-      conversation = {
-        sessionId: record.sessionId,
-        transcript: new EveTranscript(
-          { ...this.options.transcript },
-          record.sessionId,
-        ),
-        finished: new Set(),
-      };
       try {
         boundary = await this.drain(conversation);
       } catch (error) {
@@ -802,7 +801,34 @@ export class EveServer {
       return;
     }
 
-    if (!conversation || !boundary) return;
+    if (!conversation) return;
+
+    /**
+     * A verb that does not start a turn still CHANGES something.
+     *
+     * `cancel`, `compact` and `clear` each leave a mark on the stream —
+     * `turn.cancelled`, the compaction pair, `context.cleared` — and each is
+     * followed by a `session.waiting` that says what the run's status now is.
+     * Nothing was reading for them, so the head kept saying `active` for a run
+     * that had been stopped, until some later catch-up noticed. An operator who
+     * presses stop and watches the status not change has been told the button
+     * did not work.
+     *
+     * Read to the next lull rather than followed to a turn's end: there is no
+     * turn here, and `follow` ends on one.
+     */
+    if (!runs) {
+      try {
+        await this.drain(conversation);
+      } catch (error) {
+        this.log(
+          `[hex] ${control.command} landed but its result went unread: ${message(error)}`,
+        );
+      }
+      return;
+    }
+
+    if (!boundary) return;
     /**
      * Follow it to the end, and say nothing at the end of it.
      *

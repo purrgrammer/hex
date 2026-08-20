@@ -704,6 +704,37 @@ describe("EveServer", () => {
     expect(sent[5]!.body).toEqual({ reason: "start over" });
   });
 
+  it("reads the result of a stop, so the head stops saying active", async () => {
+    /**
+     * `cancel`, `compact` and `clear` start no turn, and nothing was reading
+     * the stream for what they DID — so the head kept saying `active` for a run
+     * that had been stopped, until some later catch-up noticed. An operator who
+     * presses stop and watches the status not change has been told the button
+     * did not work.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, [
+      { type: "turn.cancelled", data: { turnId: "turn_0" } },
+      { type: "session.waiting", data: { wait: "next-user-message" } },
+    ] as never);
+    const out = sink();
+    const server_ = server(eve, transport(), out.impl);
+    await server_.handle(inbound("msg-1", "do something long"));
+    const before = out.sent.length;
+
+    const nostrId = store.transcriptFor(eve.session)!.nostrId;
+    await server_.control({
+      id: "c1",
+      operator: PEER,
+      agent: AGENT,
+      session: nostrId,
+      command: "cancel",
+    });
+
+    // Something was published AFTER the stop, which is the whole point: the
+    // reader watching this address learns the run is no longer running.
+    expect(out.sent.length).toBeGreaterThan(before);
+  });
+
   it("lets a steer cancel the running turn when the operator asks for it", async () => {
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
