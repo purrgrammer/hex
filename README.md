@@ -112,7 +112,7 @@ uses, because it is the same Hex:
 | `chat.react`    | One emoji on the message. Offered only if the transport has reactions. |
 | `chat.who`      | Who you are talking to, as an npub.                                    |
 | `chat.history`  | The conversation so far, your own replies included.                    |
-| `nostr.help` | A NIP's text or a kind's definition, from the NIPs repository.         |
+| `nostr.help`    | A NIP's text or a kind's definition, from the NIPs repository.         |
 | `nostr.req`     | A NIP-01 filter against relays. Read-only, capped.                     |
 | `nostr.resolve` | A bech32 entity turned into the person or event it names.              |
 | `nostr.publish` | Sign an event and put it on relays. Off unless configured.             |

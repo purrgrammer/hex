@@ -13,3 +13,6 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Agent worktrees and local tooling state.
+.claude/
