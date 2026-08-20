@@ -1082,6 +1082,46 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("keeps a turn's structured result rather than dropping it", async () => {
+    /**
+     * A run given an output schema answers with a `result` rather than with
+     * prose, and the prose channel is then empty. Ignoring the event would
+     * publish a turn that did its work and said nothing — the one failure that
+     * looks exactly like an agent with nothing to add.
+     *
+     * Hex never ASKS for a schema; nothing here wants one. This is the read
+     * side, so a runtime that was configured with one elsewhere still produces
+     * a readable transcript.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "result.completed",
+        data: { turnId: "turn_0", result: { verdict: "mergeable", tests: 29 } },
+      },
+      ++index,
+    );
+    await pub.handle(
+      { type: "turn.completed", data: { turnId: "turn_0" } },
+      ++index,
+    );
+
+    const turn = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 1777)
+      .at(-1)!;
+    expect(turn.content).toContain("mergeable");
+    store.close();
+  });
+
   it("clears awaiting-authorisation when the sign-in resolves", async () => {
     /**
      * `authorization.required` put the head in `payment-required` and nothing

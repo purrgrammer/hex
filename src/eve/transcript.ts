@@ -540,6 +540,12 @@ export class EveTranscript {
    * emit events this consumer has never heard of, and stopping on one would turn
    * an upgrade into an outage.
    */
+  /**
+   * One event off the runtime's stream, in the vocabulary of
+   * `runtime/events.ts` — hex's own, not any framework's. What the names mean
+   * and which fields each carries is written down there; this reads nothing
+   * that is not.
+   */
   async handle(event: EveEnvelope, index?: number): Promise<void> {
     if (index !== undefined) this.atIndex = index;
 

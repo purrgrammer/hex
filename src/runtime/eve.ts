@@ -98,6 +98,15 @@ export class EveRuntime implements Runtime {
     });
   }
 
+  /**
+   * Eve's stream, in hex's vocabulary.
+   *
+   * A pass-through, and the fact that it is one is the point: the names in
+   * `runtime/events.ts` were derived from Eve's, so this driver has nothing to
+   * translate. A driver for anything else translates here instead, and that
+   * translation is the whole of its work — which is only possible because the
+   * contract is written down somewhere other than inside the publisher.
+   */
   follow(
     session: string,
     options: { startIndex?: number; signal?: AbortSignal },
