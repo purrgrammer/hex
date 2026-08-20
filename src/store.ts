@@ -114,6 +114,17 @@ export interface StoredTranscript {
    */
   subjects?: string[][];
   /**
+   * How this run's events travel: wrapped to the operator, or also in the clear.
+   *
+   * Decided ONCE, when the session opens, from the room it opened in — and
+   * durable for the same reason the subjects beside it are. A session that
+   * started wrapped must never turn public halfway through: there is one chain
+   * and one `last-seq`, so a public copy that begins at turn twelve is a
+   * transcript with a hole nobody can fill. A group's own metadata flipping
+   * mid-run must not move it.
+   */
+  carriage?: "wrapped" | "public";
+  /**
    * The running total includes a figure nobody billed.
    *
    * Not persisted: a restart resumes a session whose earlier steps it did not
@@ -185,7 +196,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
   title       TEXT,
   channel     TEXT,
   described   INTEGER,
-  subjects    TEXT
+  subjects    TEXT,
+  carriage    TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
@@ -282,6 +294,8 @@ export class HexStore {
       db.exec(`ALTER TABLE transcripts ADD COLUMN described INTEGER`);
     if (!columns.includes("subjects"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN subjects TEXT`);
+    if (!columns.includes("carriage"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN carriage TEXT`);
 
     db.prepare(`DELETE FROM obeyed WHERE at < ?`).run(
       Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
@@ -428,6 +442,7 @@ export class HexStore {
       channel: parseChannel(row.channel),
       described: row.described === 1,
       subjects: parseSubjects(row.subjects),
+      carriage: row.carriage === "public" ? "public" : undefined,
     };
   }
 
@@ -470,8 +485,9 @@ export class HexStore {
         `INSERT INTO transcripts (
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
-           cost, pending, said_turn, title, channel, described, subjects
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           cost, pending, said_turn, title, channel, described, subjects,
+           carriage
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
            status = excluded.status, trigger = excluded.trigger,
@@ -481,7 +497,7 @@ export class HexStore {
            cost = excluded.cost, pending = excluded.pending,
            said_turn = excluded.said_turn, title = excluded.title,
            channel = excluded.channel, described = excluded.described,
-           subjects = excluded.subjects`,
+           subjects = excluded.subjects, carriage = excluded.carriage`,
       )
       .run(
         transcript.sessionId,
@@ -507,6 +523,7 @@ export class HexStore {
         transcript.subjects?.length
           ? JSON.stringify(transcript.subjects)
           : null,
+        transcript.carriage ?? null,
       );
   }
 }

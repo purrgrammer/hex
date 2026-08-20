@@ -40,7 +40,7 @@ import {
   type ToolServer,
 } from "../tools/types.js";
 import type { SessionControl } from "../nostr/decode-control.js";
-import type { Inbound } from "../transports/types.js";
+import type { Inbound, Room } from "../transports/types.js";
 
 /** What this needs of a transport: answer a message, and acknowledge one. */
 export interface ServeTransport {
@@ -146,6 +146,20 @@ export interface ServeOptions {
     operator?: string;
     subjects?: string[][];
   }) => Promise<string[]>;
+  /**
+   * Transports whose runs may also be published in the clear.
+   *
+   * Empty, and no run ever is. The gate is per transport because the question
+   * is per transport: a NIP-17 conversation has no public reading, while a
+   * NIP-29 group has forty people in it who can see the question and, without
+   * this, exactly one of whom can see the answer.
+   *
+   * Even for a listed transport a run is only public if its ROOM is — the
+   * group's own metadata has to say `public`. A private group's transcript
+   * stays wrapped, and its members go without rather than the room being
+   * unsealed on their behalf.
+   */
+  publicTransports?: string[];
   /** How long the pre-message read waits for silence. Injected in tests. */
   drainQuietMs?: number;
   log?: (line: string) => void;
@@ -484,6 +498,30 @@ export class EveServer {
    * Never fatal: a relay that will not answer costs the model a fact, and a run
    * refused because a profile could not be fetched costs it the whole job.
    */
+  /**
+   * Wrapped, or wrapped and public — decided once, from the room.
+   *
+   * Two conditions, both required. The operator has to have listed the
+   * transport, because publishing a transcript in the clear is permanent and
+   * carries everything the run did, tool output included; and the room itself
+   * has to say it is public, because a group that calls itself private is
+   * answering exactly this question.
+   *
+   * A room that cannot be described is treated as private. The failure mode of
+   * guessing wrong in the other direction is a permanent public record of a
+   * private conversation, and no relay timeout is worth that.
+   */
+  private async carriageFor(room?: Room): Promise<"wrapped" | "public"> {
+    const allowed = this.options.publicTransports ?? [];
+    if (!room || !allowed.includes(room.transport)) return "wrapped";
+    try {
+      const about = await this.options.transport.describeRoom?.(room);
+      return about?.public === true ? "public" : "wrapped";
+    } catch {
+      return "wrapped";
+    }
+  }
+
   private async grounding(
     operator: string,
     subjects: string[][],
@@ -1102,6 +1140,7 @@ export class EveServer {
        * A NIP-17 conversation is named by the person on the other end.
        */
       transcript.channel = channelOf(inbound);
+      transcript.carriage = await this.carriageFor(inbound.room);
       /**
        * What the run is about, lifted off the message that started it.
        *

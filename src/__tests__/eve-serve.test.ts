@@ -795,6 +795,83 @@ describe("EveServer", () => {
     expect(eve.posts.length).toBe(before);
   });
 
+  it("makes a run public only when the operator allowed it AND the room says so", async () => {
+    /**
+     * Two conditions, and neither alone is enough. Publishing a transcript in
+     * the clear is permanent and carries every tool result the run produced, so
+     * the operator says which transports may; and a group that calls itself
+     * private is answering exactly this question.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const bus = transport();
+    const rooms: Record<string, unknown> = { public: true };
+    const withRoom = {
+      ...bus,
+      describeRoom: async () => rooms,
+    };
+
+    const open = (publicTransports?: string[]) =>
+      new EveServer({
+        runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
+        transport: withRoom as never,
+        drainQuietMs: 40,
+        publicTransports,
+        transcript: {
+          agentPubkey: AGENT,
+          slug: "hex",
+          recipients: [PEER],
+          store,
+          sink: sink().impl,
+          setTimer: () => 0,
+          clearTimer: () => {},
+        },
+      });
+
+    // Allowed transport, public room.
+    await open(["nip-17"]).handle(inbound("msg-1", "first"));
+    expect(store.transcriptFor(eve.session)!.carriage).toBe("public");
+
+    // Same room, transport not allowed.
+    const second = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const noneAllowed = new EveServer({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: second.impl }),
+      transport: withRoom as never,
+      drainQuietMs: 40,
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: sink().impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+    await noneAllowed.handle(inbound("msg-2", "second"));
+    expect(store.transcriptFor(second.session)!.carriage).toBeUndefined();
+
+    // Allowed transport, room that does not say it is public.
+    rooms.public = undefined;
+    const third = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const privateRoom = new EveServer({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: third.impl }),
+      transport: withRoom as never,
+      drainQuietMs: 40,
+      publicTransports: ["nip-17"],
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: sink().impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+    await privateRoom.handle(inbound("msg-3", "third"));
+    expect(store.transcriptFor(third.session)!.carriage).toBeUndefined();
+  });
+
   it("carries each control verb to the route that serves it", async () => {
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);

@@ -14,7 +14,12 @@ import { parseArgs } from "node:util";
 import { basename } from "node:path";
 import { nip19 } from "nostr-tools";
 import { loadConfig } from "./config-file.js";
-import { createRelays, checkRelays, type RelayHealth } from "./relays.js";
+import {
+  createRelays,
+  checkRelays,
+  publishTo,
+  type RelayHealth,
+} from "./relays.js";
 import { resolveSigner } from "./signer.js";
 import { announceIdentity } from "./identity.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
@@ -986,14 +991,44 @@ async function main(): Promise<void> {
                 }
               : undefined,
           log: (line) => console.log(line),
+          publicTransports: transcriptConfig.public,
           transcript: {
             agentPubkey: resolved.pubkey,
             slug: transcriptConfig.slug,
             recipients: transcriptConfig.to,
             store,
-            // Always the gift-wrap door: a transcript goes to the operator,
-            // not to whichever room the question came from.
+            // Always the gift-wrap door: the operator's copy exists whatever
+            // else happens, because it is the one this agent's own reader
+            // depends on.
             sink: dms,
+            /**
+             * And, for a run in a public room, the same events in the clear.
+             *
+             * The SAME rumor, signed rather than rebuilt: a rumor is already
+             * hashed, so the two copies share an id and a reader holding both
+             * sees one session. Absent when nothing can sign, which is the
+             * same as no run ever being public.
+             */
+            clear: resolved.signer
+              ? {
+                  publish: async (rumor) => {
+                    const event = await resolved.signer.signEvent(rumor);
+                    const outcomes = await publishTo(
+                      relays,
+                      config.relays.publish,
+                      event,
+                    );
+                    return {
+                      delivered: outcomes
+                        .filter((outcome) => outcome.ok)
+                        .map((outcome) => outcome.relay),
+                      undeliverable: outcomes
+                        .filter((outcome) => !outcome.ok)
+                        .map((outcome) => outcome.relay),
+                    };
+                  },
+                }
+              : undefined,
             deltas: transcriptConfig.deltas,
             deltaRelays: config.relays.dm,
             prices,

@@ -65,6 +65,26 @@ export interface RumorSink {
   ): Promise<{ delivered: string[]; undeliverable: string[] }>;
 }
 
+/**
+ * The other door: the same rumor, signed and published where anyone can read it.
+ *
+ * A gift wrap answers "who may read this" with a list of names, which is right
+ * for a private message and wrong for a public group — a run somebody started in
+ * a room of forty people produced a transcript exactly one of them could open.
+ * The spec's own answer is to publish the same events in the clear, signed by
+ * the agent's key, to the agent's own write relays; the group answer already
+ * carries the session address, so anyone in the room can follow it.
+ *
+ * The SAME rumor, never a rebuilt one. A rumor is already hashed, so signing it
+ * adds a signature and nothing else, and the two copies share an id — which is
+ * what lets a reader holding both see one session rather than two.
+ */
+export interface ClearSink {
+  publish(
+    rumor: Rumor,
+  ): Promise<{ delivered: string[]; undeliverable: string[] }>;
+}
+
 export interface EveTranscriptOptions {
   agentPubkey: string;
   /** The `d` tag of the agent's definition. */
@@ -73,6 +93,13 @@ export interface EveTranscriptOptions {
   recipients: string[];
   store: HexStore;
   sink: RumorSink;
+  /**
+   * Where a public run's events also go. Absent means no run is ever public.
+   *
+   * Whether a given run uses it is the run's own `carriage`, decided from the
+   * room when the session opens — not from this being present.
+   */
+  clear?: ClearSink;
   /** Off means nothing streams; the turns still arrive when they close. */
   deltas?: boolean;
   /**
@@ -228,6 +255,28 @@ export class EveTranscript {
     this.record.subjects = value?.length ? value : undefined;
     this.options.store.saveTranscript(this.record);
   }
+
+  /** Wrapped to the operator, or wrapped AND published in the clear. */
+  get carriage(): "wrapped" | "public" {
+    return this.record.carriage ?? "wrapped";
+  }
+
+  set carriage(value: "wrapped" | "public") {
+    this.record.carriage = value === "public" ? "public" : undefined;
+    this.options.store.saveTranscript(this.record);
+  }
+
+  /**
+   * Stops the public copy after one failure, for the rest of this process.
+   *
+   * There is one chain and one `last-seq`, so a public copy with a hole in the
+   * middle is worse than one that visibly stops short: a reader is required to
+   * render a gap it can never fill, where a short chain simply reads as behind.
+   * In memory rather than durable on purpose — a restart is allowed to try
+   * again, and relays dedupe by event id, so a retry either fills the tail or
+   * changes nothing.
+   */
+  private clearStopped = false;
 
   /** How full the window was when compaction was asked for, until it completes. */
   private compactingAt?: number;
@@ -1490,6 +1539,7 @@ export class EveTranscript {
       // Read this far, and everything up to here is on a relay.
       this.record.streamIndex = this.atIndex;
       this.options.store.saveTranscript(this.record);
+      await this.sendClear(rumor, what, ephemeral);
       return true;
     } catch (error) {
       this.log(
@@ -1498,6 +1548,46 @@ export class EveTranscript {
         }`,
       );
       return false;
+    }
+  }
+
+  /**
+   * The public copy, for a run happening somewhere public.
+   *
+   * After the wrap and never instead of it: the operator's copy is the one the
+   * agent's own reader depends on, and a public relay that is down must not
+   * hold it hostage. So a failure here does not freeze the cursor — it stops
+   * the public copy and says so, which leaves a chain that is visibly short
+   * rather than one with a hole in the middle.
+   *
+   * Deltas are excluded. They evaporate at the relay by design, and a public
+   * stream of them is a separate question with a separate answer; what the
+   * public copy owes a reader is the turns and the head.
+   */
+  private async sendClear(
+    rumor: Rumor,
+    what: string,
+    ephemeral: boolean,
+  ): Promise<void> {
+    if (ephemeral) return;
+    if (this.carriage !== "public") return;
+    const clear = this.options.clear;
+    if (!clear || this.clearStopped) return;
+
+    try {
+      const { delivered } = await clear.publish(rumor);
+      if (delivered.length > 0) return;
+      this.clearStopped = true;
+      this.log(
+        `[hex] no relay took the public copy of ${what}; this session's public transcript stops here`,
+      );
+    } catch (error) {
+      this.clearStopped = true;
+      this.log(
+        `[hex] the public copy of ${what} failed, so this session's public transcript stops here: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 }

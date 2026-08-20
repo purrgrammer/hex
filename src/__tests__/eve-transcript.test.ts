@@ -152,7 +152,12 @@ describe("EveTranscript", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  function publisher(store: HexStore, impl: RumorSink, sessionId = SESSION) {
+  function publisher(
+    store: HexStore,
+    impl: RumorSink,
+    sessionId = SESSION,
+    extra: Partial<ConstructorParameters<typeof EveTranscript>[0]> = {},
+  ) {
     return new EveTranscript(
       {
         agentPubkey: AGENT,
@@ -162,6 +167,7 @@ describe("EveTranscript", () => {
         sink: impl,
         setTimer: () => 0,
         clearTimer: () => {},
+        ...extra,
       },
       sessionId,
     );
@@ -935,6 +941,133 @@ describe("EveTranscript", () => {
     // And a process that restarts and picks the session back up still knows.
     const resumed = publisher(store, impl);
     expect(resumed.subjects).toEqual([["a", repo]]);
+    store.close();
+  });
+
+  it("publishes a public run in the clear as well as wrapped, and the same event", async () => {
+    /**
+     * A gift wrap answers "who may read this" with a list of names, which is
+     * right for a private message and wrong for a room of forty people: the
+     * question was public and exactly one person could open the answer.
+     *
+     * The same rumor goes out both doors. A rumor is already hashed, so signing
+     * adds a signature and nothing else — which is what lets a reader holding
+     * both copies see one session rather than two.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const cleared: string[] = [];
+    const pub = publisher(store, impl, SESSION, {
+      clear: {
+        publish: async (rumor) => {
+          cleared.push(rumor.id);
+          return { delivered: ["wss://relay.example"], undeliverable: [] };
+        },
+      },
+    });
+    pub.carriage = "public";
+
+    let index = 0;
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "message.completed",
+        data: { turnId: "turn_0", message: "Here you go." },
+      },
+      ++index,
+    );
+    await pub.handle(
+      { type: "turn.completed", data: { turnId: "turn_0" } },
+      ++index,
+    );
+
+    const wrapped = sent.map((s) => s.rumor).filter((r) => r.kind === 1777);
+    expect(wrapped.length).toBeGreaterThan(0);
+    for (const rumor of wrapped) expect(cleared).toContain(rumor.id);
+    store.close();
+  });
+
+  it("keeps a wrapped run wrapped, whatever the clear door offers", async () => {
+    // The default, and the one that must not drift: a session opened in a
+    // private conversation has no public reading, and a sink being present is
+    // not a decision about this run.
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl } = sink();
+    const cleared: string[] = [];
+    const pub = publisher(store, impl, SESSION, {
+      clear: {
+        publish: async (rumor) => {
+          cleared.push(rumor.id);
+          return { delivered: ["wss://relay.example"], undeliverable: [] };
+        },
+      },
+    });
+
+    let index = 0;
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "message.completed",
+        data: { turnId: "turn_0", message: "Private." },
+      },
+      ++index,
+    );
+    await pub.handle(
+      { type: "turn.completed", data: { turnId: "turn_0" } },
+      ++index,
+    );
+
+    expect(cleared).toEqual([]);
+    store.close();
+  });
+
+  it("stops a public copy at the first refusal rather than leaving a hole", async () => {
+    /**
+     * There is one chain and one `last-seq`. A public copy missing an event in
+     * the middle is a gap a reader is required to render and can never fill; a
+     * copy that visibly stops short simply reads as behind. And the operator's
+     * wrap is never held hostage by a public relay being down.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const attempts: string[] = [];
+    const pub = publisher(store, impl, SESSION, {
+      clear: {
+        publish: async (rumor) => {
+          attempts.push(rumor.id);
+          return { delivered: [], undeliverable: ["wss://relay.example"] };
+        },
+      },
+    });
+    pub.carriage = "public";
+
+    let index = 0;
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "message.completed",
+        data: { turnId: "turn_0", message: "One." },
+      },
+      ++index,
+    );
+    await pub.handle(
+      { type: "turn.completed", data: { turnId: "turn_0" } },
+      ++index,
+    );
+
+    // Tried once, then stopped asking.
+    expect(attempts).toHaveLength(1);
+    // And the wrapped copy carried on regardless.
+    expect(sent.some((s) => s.rumor.kind === 1777)).toBe(true);
     store.close();
   });
 
