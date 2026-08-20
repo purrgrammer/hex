@@ -138,8 +138,21 @@ export interface ToolsConfig {
    */
   git?: {
     enabled: boolean;
-    /** Let the agent open and close issues. Off unless true. */
+    /** Let the agent open and close issues, and merge proposals. Off unless true. */
     write?: boolean;
+    /**
+     * Repository name to a checkout path ON THIS MACHINE.
+     *
+     * What turns on the `ngit`-backed proposal tools. Named rather than
+     * discovered: a tool that went looking for git directories would find every
+     * repository the operator has and act on ones it was never pointed at.
+     *
+     * These are host paths, not the sandbox's. An agent's own edits live in a
+     * container this process cannot see, so these checkouts are for reading and
+     * merging what others proposed, not for building patches out of work in
+     * progress.
+     */
+    checkouts?: Record<string, string>;
   };
 }
 
@@ -478,8 +491,18 @@ function parseGitTools(
 ): NonNullable<ToolsConfig["git"]> | undefined {
   if (value === undefined) return undefined;
   const record = requireRecord(value, "tools.git");
-  rejectUnknown(record, ["enabled", "write"], "tools.git");
-  return { enabled: record.enabled === true, write: record.write === true };
+  rejectUnknown(record, ["enabled", "write", "checkouts"], "tools.git");
+  const checkouts: Record<string, string> = {};
+  if (record.checkouts !== undefined) {
+    const named = requireRecord(record.checkouts, "tools.git.checkouts");
+    for (const [name, path] of Object.entries(named))
+      checkouts[name] = requireString(path, `tools.git.checkouts.${name}`);
+  }
+  return {
+    enabled: record.enabled === true,
+    write: record.write === true,
+    ...(Object.keys(checkouts).length ? { checkouts } : {}),
+  };
 }
 
 function parseBlossomTools(

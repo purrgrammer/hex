@@ -133,6 +133,23 @@ export const GIT_ISSUES_TOOL = "git.issues";
 export const GIT_PATCHES_TOOL = "git.patches";
 /** Opening or closing one. A public, permanent, signed event. */
 export const GIT_STATE_TOOL = "git.state";
+
+/**
+ * The proposal side of NIP-34, backed by `ngit` rather than by hand-built events.
+ *
+ * `git.issues` and `git.patches` READ what a repository has. These three act on
+ * proposals the way a maintainer does — list them, read one, merge it — and they
+ * exist because doing it by hand meant a human reading `ngit pr list` output and
+ * retyping decisions back in.
+ *
+ * They run against a checkout on the machine hosting this agent, named in
+ * `tools.git.checkouts`. Not the sandbox's copy: an agent's edits live in a
+ * container this process cannot see, which is the whole reason `git.propose`
+ * takes a ref rather than a patch.
+ */
+export const GIT_PROPOSALS_TOOL = "git.proposals";
+export const GIT_PROPOSAL_TOOL = "git.proposal";
+export const GIT_MERGE_TOOL = "git.merge";
 /**
  * Every tool id that exists, so config can refuse one that does not.
  *
@@ -155,6 +172,9 @@ export const KNOWN_TOOLS: readonly string[] = [
   GIT_ISSUES_TOOL,
   GIT_PATCHES_TOOL,
   GIT_STATE_TOOL,
+  GIT_PROPOSALS_TOOL,
+  GIT_PROPOSAL_TOOL,
+  GIT_MERGE_TOOL,
 ];
 
 /**

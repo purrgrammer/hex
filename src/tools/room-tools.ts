@@ -15,6 +15,7 @@ import type { KnowledgeTools } from "./knowledge.js";
 import type { PublishTools } from "./publish.js";
 import type { BlossomTools } from "./blossom-tools.js";
 import type { GitTools } from "./git-tools.js";
+import type { NgitTools } from "./ngit-tools.js";
 import { nip19 } from "nostr-tools";
 
 import {
@@ -124,6 +125,8 @@ export interface RoomToolsOptions {
    * which room asked has no bearing on the answer.
    */
   git?: GitTools;
+  /** Proposals on a checkout here, through `ngit`. See `NgitTools`. */
+  ngit?: NgitTools;
   /**
    * Which tools this channel gets, as ids or `namespace.*`.
    *
@@ -225,6 +228,7 @@ export class RoomTools implements ToolHost {
     if (this.options.publish) optional.push(...this.options.publish.list());
     if (this.options.blossom) optional.push(...this.options.blossom.list());
     if (this.options.git) optional.push(...this.options.git.list());
+    if (this.options.ngit) optional.push(...this.options.ngit.list());
 
     specs.push(
       ...(this.options.grants
@@ -393,6 +397,8 @@ export class RoomTools implements ToolHost {
       return this.options.blossom.call({ name, arguments: call.arguments });
     if (this.options.git?.handles(name))
       return this.options.git.call(name, call.arguments);
+    if (this.options.ngit?.handles(name))
+      return this.options.ngit.call(name, call.arguments);
 
     switch (name) {
       case RESPOND_TOOL:

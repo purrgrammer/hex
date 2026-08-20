@@ -29,6 +29,8 @@
  * an explicit, readable decision in a file rather than a model's improvisation.
  */
 
+import { createHash } from "node:crypto";
+
 import { finalizeEvent } from "nostr-tools/pure";
 import type { EventTemplate, NostrEvent } from "nostr-tools";
 
@@ -55,6 +57,9 @@ const DEFAULT_PER_HOUR = 10;
 /** Content this long is a document, not a note, and probably a mistake. */
 const MAX_CONTENT = 64 * 1024;
 
+/** NIP-34's patch. The one kind whose content has a shape worth checking. */
+const KIND_PATCH = 1617;
+
 export interface PublishToolsOptions {
   signer: EventSigner;
   pubkey: string;
@@ -68,6 +73,76 @@ export interface PublishToolsOptions {
   dryRun?: boolean;
   log?: (line: string) => void;
   now?: () => number;
+}
+
+/**
+ * A NIP-34 patch is `git format-patch` output, and nothing else will do.
+ *
+ * Four of the first six patches this agent published were corrupt, in three
+ * different ways: one lost its head, one its tail, one a hunk out of the middle,
+ * and a twin of that last one differed by twenty-seven bytes. None were near any
+ * size limit. Whatever loses the bytes, the damage is only cheap to fix BEFORE
+ * signing — after that it is a permanent broken proposal on four relays that a
+ * maintainer has to triage by hand.
+ *
+ * So the shape is checked rather than trusted. Not a parser: a patch that gets
+ * past this can still be wrong, but it cannot be obviously mangled.
+ */
+function malformedPatch(content: string): string | undefined {
+  if (!content.startsWith("From "))
+    return (
+      "a kind 1617 must be `git format-patch` output, which begins with " +
+      "`From <sha> <date>`. This one does not, so its beginning is missing — " +
+      "which is what happens when a large value loses its first chunk on the " +
+      "way here. Rebuild it and send the whole thing."
+    );
+
+  const lines = content.trimEnd().split("\n");
+  const last = lines[lines.length - 1] ?? "";
+  // `git format-patch` signs off with its own version after a `-- ` line.
+  if (!/^\d+\.\d+/.test(last) && last.trim() !== "--")
+    return (
+      "a kind 1617 ends with git's own version after a `-- ` line; this one " +
+      `ends with ${JSON.stringify(last.slice(0, 60))}, so the end is missing. ` +
+      "That is a truncated patch, not a short one."
+    );
+
+  if (!lines.some((line) => line.startsWith("diff --git ")))
+    return "a kind 1617 carries a diff, and there is no `diff --git` line in this one";
+
+  /**
+   * Every hunk header promises a number of lines. A chunk dropped from the
+   * middle breaks that promise while leaving both ends of the patch intact —
+   * which is exactly the corruption the two checks above cannot see.
+   */
+  for (let at = 0; at < lines.length; at += 1) {
+    const header = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(
+      lines[at] ?? "",
+    );
+    if (!header) continue;
+    const before = header[1] === undefined ? 1 : Number(header[1]);
+    const after = header[2] === undefined ? 1 : Number(header[2]);
+    let minus = 0;
+    let plus = 0;
+    for (let cursor = at + 1; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor] ?? "";
+      if (line.startsWith("@@") || line.startsWith("diff --git ")) break;
+      if (line.startsWith("-- ") || line.trimEnd() === "--") break;
+      if (line.startsWith("+")) plus += 1;
+      else if (line.startsWith("-")) minus += 1;
+      else if (line.startsWith(" ") || line === "") {
+        minus += 1;
+        plus += 1;
+      }
+    }
+    if (minus < before || plus < after)
+      return (
+        `the hunk at line ${at + 1} promises ${before} lines before and ` +
+        `${after} after, and carries ${minus} and ${plus}. Something was lost ` +
+        "from the middle of this patch."
+      );
+  }
+  return undefined;
 }
 
 export class PublishTools {
@@ -120,6 +195,16 @@ export class PublishTools {
                 "Leave this out unless the user named a relay. Hex publishes " +
                 "to its own configured relays otherwise.",
             },
+            sha256: {
+              type: "string",
+              description:
+                "The sha256 of `content`, computed where you built it. For a " +
+                "kind 1617 patch, ALWAYS send this: pipe the patch through " +
+                "`sha256sum` in the same command that produces it, and pass " +
+                "the hex digest here. Large values sometimes lose a chunk on " +
+                "the way to this tool, and this is the only thing that " +
+                "notices. A mismatch publishes nothing and tells you so.",
+            },
           },
         },
         prompt:
@@ -131,7 +216,8 @@ export class PublishTools {
         name: SIGN_TOOL,
         description:
           "Sign an event with Hex's key and return it WITHOUT publishing, for " +
-          "someone else to inspect or relay." + refused,
+          "someone else to inspect or relay." +
+          refused,
         parameters,
         prompt:
           "`nostr.sign` returns a signed event without sending it — the same" +
@@ -145,10 +231,7 @@ export class PublishTools {
     return name === PUBLISH_TOOL || name === SIGN_TOOL;
   }
 
-  async call(
-    name: string,
-    args: Record<string, unknown>,
-  ): Promise<ToolResult> {
+  async call(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     const template = this.templateFor(args);
     if ("error" in template) return { ok: false, output: template.error };
 
@@ -246,6 +329,39 @@ export class PublishTools {
       return {
         error: `that content is ${content.length} characters; the limit is ${MAX_CONTENT}`,
       };
+
+    /**
+     * The digest the caller computed where the content was BUILT.
+     *
+     * The shape check below catches a patch that arrives obviously mangled. It
+     * cannot catch one that lost a chunk and still parses, and one of the four
+     * broken patches differed from its intact twin by twenty-seven bytes. A
+     * digest taken in the sandbox — `git format-patch --stdout | sha256sum` —
+     * and checked here is the only thing that sees that, because it is the only
+     * thing that knows what was meant.
+     *
+     * Optional, and silent when absent: an agent publishing a note has nothing
+     * to compare against and should not be made to invent one.
+     */
+    const expected =
+      typeof args.sha256 === "string" ? args.sha256.trim().toLowerCase() : "";
+    if (expected) {
+      if (!/^[0-9a-f]{64}$/.test(expected))
+        return { error: "`sha256` must be 64 hex characters, or left out" };
+      const actual = createHash("sha256").update(content, "utf8").digest("hex");
+      if (actual !== expected)
+        return {
+          error:
+            `the content that arrived hashes to ${actual}, and you said ` +
+            `${expected}. It was damaged on the way here — ${content.length} ` +
+            "characters arrived. Nothing was published. Send it again.",
+        };
+    }
+
+    if (kind === KIND_PATCH) {
+      const wrong = malformedPatch(content);
+      if (wrong) return { error: wrong };
+    }
 
     const tags: string[][] = [];
     if (args.tags !== undefined) {

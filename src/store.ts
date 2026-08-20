@@ -40,6 +40,33 @@ import { TERMINAL_STATUSES } from "./nostr/types.js";
  * `nostr_id` is the 32-byte session id the wire uses, kept apart from Eve's own
  * session id — which is Eve's to shape and not something to hand a relay.
  */
+/**
+ * A published event, as it went out.
+ *
+ * `sessionId` is Eve's id rather than the wire's, so an event and the cursor
+ * beside it are joined by the same key the rest of this file uses. `seq` is
+ * copied out of the rumor's own tag so a reader can spot a hole without parsing
+ * every tag list again.
+ */
+export interface StoredEvent {
+  id: string;
+  sessionId?: string;
+  kind: number;
+  pubkey: string;
+  createdAt: number;
+  content: string;
+  tags: string[][];
+  seq?: number;
+}
+
+/** A correspondent, the room they wrote from, and the run they are in. */
+export interface StoredConversation {
+  peer: string;
+  room: string;
+  sessionId: string;
+  lastAt: number;
+}
+
 export interface StoredTranscript {
   sessionId: string;
   nostrId: string;
@@ -261,6 +288,37 @@ CREATE TABLE IF NOT EXISTS obeyed (
   at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS obeyed_at ON obeyed (at);
+
+/*
+ * Every event this agent published, kept where it can be read back.
+ *
+ * The transcript table above holds cursors — where a run stands — and none of
+ * what a run SAID: the turns leave as rumors, wrapped to the operator, and the
+ * only copy is on a relay behind somebody's key. That is right for the wire and
+ * useless for an operator sitting at the machine, who would have to log in as
+ * the reader to see what their own agent just did.
+ *
+ * So the publisher's one door is teed here. What lands is the rumor exactly as
+ * it went out — same id, same tags — which is what lets the local UI and the
+ * remote one render from one shape rather than two.
+ *
+ * Deltas are deliberately absent: kind 21777 is ephemeral, relays are told to
+ * drop it, and everything it carries is repeated by the turn that closes it.
+ * Storing them here would make this the one place in the system where an
+ * ephemeral event outlives the stream it belonged to.
+ */
+CREATE TABLE IF NOT EXISTS events (
+  id          TEXT PRIMARY KEY,
+  session_id  TEXT,
+  kind        INTEGER NOT NULL,
+  pubkey      TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  content     TEXT NOT NULL,
+  tags        TEXT NOT NULL,
+  seq         INTEGER
+);
+CREATE INDEX IF NOT EXISTS events_session ON events (session_id, created_at);
+CREATE INDEX IF NOT EXISTS events_kind ON events (kind, created_at);
 `;
 
 /**
@@ -581,6 +639,126 @@ export class HexStore {
         transcript.groupRelay ?? null,
       );
   }
+
+  /**
+   * File a published rumor, so the machine that sent it can still show it.
+   *
+   * `INSERT OR IGNORE`: the same rumor is offered again whenever a publish is
+   * retried, and the id is the hash of its content, so a second arrival is the
+   * same event and not a new one.
+   */
+  recordEvent(rumor: StoredEvent): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO events
+           (id, session_id, kind, pubkey, created_at, content, tags, seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        rumor.id,
+        rumor.sessionId ?? null,
+        rumor.kind,
+        rumor.pubkey,
+        rumor.createdAt,
+        rumor.content,
+        JSON.stringify(rumor.tags),
+        rumor.seq ?? null,
+      );
+  }
+
+  /**
+   * One run's events, oldest first.
+   *
+   * Ordered by `created_at` and then by rowid: a turn and the head that follows
+   * it are routinely stamped the same second, and reading them back in the wrong
+   * order shows a finished run whose last turn had not happened yet.
+   */
+  eventsFor(sessionId: string): StoredEvent[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM events WHERE session_id = ? ORDER BY created_at, rowid`,
+        )
+        .all(sessionId) as unknown as EventRow[]
+    ).map(readEvent);
+  }
+
+  /** The newest events across every run, for a feed. Newest first. */
+  recentEvents(limit = 200): StoredEvent[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM events ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+        .all(limit) as unknown as EventRow[]
+    ).map(readEvent);
+  }
+
+  /** Every run this home knows about, newest first. */
+  allTranscripts(limit = 200): StoredTranscript[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT session_id FROM transcripts ORDER BY started_at DESC LIMIT ?`,
+        )
+        .all(limit) as { session_id: string }[]
+    )
+      .map((row) => this.transcriptFor(row.session_id))
+      .filter((t): t is StoredTranscript => !!t);
+  }
+
+  /** Who has talked to this agent, and in which room. Newest first. */
+  conversations(limit = 200): StoredConversation[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT peer, room, session_id, last_at FROM conversations
+           ORDER BY last_at DESC LIMIT ?`,
+        )
+        .all(limit) as {
+        peer: string;
+        room: string;
+        session_id: string;
+        last_at: number;
+      }[]
+    ).map((row) => ({
+      peer: row.peer,
+      room: row.room,
+      sessionId: row.session_id,
+      lastAt: row.last_at,
+    }));
+  }
+}
+
+interface EventRow {
+  id: string;
+  session_id: string | null;
+  kind: number;
+  pubkey: string;
+  created_at: number;
+  content: string;
+  tags: string;
+  seq: number | null;
+}
+
+function readEvent(row: EventRow): StoredEvent {
+  let tags: string[][] = [];
+  try {
+    const parsed: unknown = JSON.parse(row.tags);
+    if (Array.isArray(parsed)) tags = parsed as string[][];
+  } catch {
+    // A hand-edited database is a database. An event with unreadable tags is
+    // still an event that happened, and dropping it would hide the run.
+    tags = [];
+  }
+  return {
+    id: row.id,
+    sessionId: row.session_id ?? undefined,
+    kind: row.kind,
+    pubkey: row.pubkey,
+    createdAt: row.created_at,
+    content: row.content,
+    tags,
+    seq: row.seq ?? undefined,
+  };
 }
 
 /**
