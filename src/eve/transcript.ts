@@ -34,6 +34,7 @@ import type {
   Cost,
   Rumor,
   SessionStatus,
+  StopReason,
   SubagentRef,
   TurnPart,
   TurnRole,
@@ -1024,9 +1025,31 @@ export class EveTranscript {
        * is left to the boundary event that follows. `aborted` is for a run
        * nobody is coming back to.
        */
-      case "turn.cancelled":
-        await this.flush("assistant", { stop: "error" });
+      /**
+       * Somebody stopped the run.
+       *
+       * `stop: "cancelled"`, not `error`: the turn did not break, it was ended
+       * by a hand on the control plane, and a transcript that calls the two the
+       * same thing loses the only part a reader cares about.
+       *
+       * The marker turn is for the case that used to vanish. `flush` publishes
+       * nothing when nothing was buffered, so a run cancelled between steps —
+       * which is most of them, since that is where the cancel lands — left no
+       * trace at all in the transcript, and the head's `aborted` was the whole
+       * story. The 1779 is the operator's INTENT; this is the fact of what
+       * became of it.
+       */
+      case "turn.cancelled": {
+        const said = this.pending.length > 0;
+        await this.flush("assistant", { stop: "cancelled" });
+        if (!said)
+          await this.append(
+            "tool",
+            [{ type: "text", text: "The run was stopped before it answered." }],
+            { alt: "Run stopped." },
+          );
         break;
+      }
 
       case "turn.failed":
       case "step.failed":
@@ -1122,8 +1145,7 @@ export class EveTranscript {
   private async flush(
     role: TurnRole,
     extra: {
-      stop?:
-        "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
+      stop?: StopReason;
       usage?: Usage;
       cost?: Cost;
       subagents?: SubagentRef[];
@@ -1177,8 +1199,7 @@ export class EveTranscript {
     role: TurnRole,
     parts: TurnPart[],
     extra: {
-      stop?:
-        "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
+      stop?: StopReason;
       usage?: Usage;
       cost?: Cost;
       subagents?: SubagentRef[];

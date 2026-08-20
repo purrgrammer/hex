@@ -27,8 +27,22 @@ export interface Rumor extends UnsignedRumor {
 
 export type TurnRole = "user" | "assistant" | "tool";
 
+/**
+ * Why a turn ended.
+ *
+ * `cancelled` is not the model's word for anything — no runtime reports it as a
+ * finish reason, because the model did not finish, somebody stopped it. It is
+ * here because `error` was standing in for it, and a run the operator stopped on
+ * purpose reading as a run that broke is the difference between a decision and a
+ * fault.
+ */
 export type StopReason =
-  "end_turn" | "max_tokens" | "tool_use" | "content_filter" | "error";
+  | "end_turn"
+  | "max_tokens"
+  | "tool_use"
+  | "content_filter"
+  | "cancelled"
+  | "error";
 
 export type DeltaKind = "text" | "reasoning" | "tool" | "heartbeat";
 

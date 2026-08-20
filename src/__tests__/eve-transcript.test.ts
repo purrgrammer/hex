@@ -772,6 +772,49 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("records a cancelled turn as cancelled, even when it had said nothing", async () => {
+    /**
+     * The two halves of the same bug. A cancel used to flush with
+     * `stop: "error"` — calling an operator's decision a fault — and to publish
+     * nothing whatsoever when the turn was between steps, which is where a
+     * cancel usually lands. The head said `aborted` and the transcript said
+     * the run simply stopped mid-sentence.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle({ type: "turn.cancelled", data: { turnId: "turn_0" } }, ++index);
+
+    const silent = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 1777)
+      .at(-1)!;
+    expect(silent.content).toContain("stopped before it answered");
+
+    // And with something buffered, the words it got out are the record — one
+    // turn, not the flush plus a marker saying it never spoke.
+    await pub.handle({ type: "turn.started", data: { turnId: "turn_1" } }, ++index);
+    await pub.handle(
+      {
+        type: "message.completed",
+        data: { turnId: "turn_1", message: "Halfway through I was" },
+      },
+      ++index,
+    );
+    await pub.handle({ type: "turn.cancelled", data: { turnId: "turn_1" } }, ++index);
+
+    const spoke = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 1777)
+      .at(-1)!;
+    expect(spoke.content).toContain("Halfway through I was");
+    expect(spoke.tags.find((t) => t[0] === "stop")?.[1]).toBe("cancelled");
+    store.close();
+  });
+
   it("clears awaiting-authorisation when the sign-in resolves", async () => {
     /**
      * `authorization.required` put the head in `payment-required` and nothing
