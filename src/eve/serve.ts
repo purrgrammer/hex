@@ -133,6 +133,17 @@ export interface ServeOptions {
 const DEFAULT_DRAIN_QUIET_MS = 1_500;
 
 /**
+ * How long past a failed turn to read for the session's own verdict.
+ *
+ * Eve follows a failed turn with `session.failed` or `session.waiting` almost
+ * immediately, so a second is generous. It is a DEADLINE rather than a count of
+ * events because the thing being waited on may simply never arrive: a stream
+ * that stays open and says nothing would otherwise pin the follow open forever,
+ * which is the failure this whole file is most careful about.
+ */
+const VERDICT_MS = 1_000;
+
+/**
  * Where a turn begins: how far the stream was read, and what had already ended.
  *
  * The index alone was not enough — see `follow`.
@@ -294,7 +305,18 @@ export class EveServer {
    * were the answer is how a transcript comes to describe an agent that never
    * ran.
    */
-  private async describe(transcript: EveTranscript): Promise<void> {
+  /**
+   * Publish what this run was set up with.
+   *
+   * `roomless` is not decoration: the runtime's own `/info` lists every tool
+   * the bridge can offer, which for a run with no room includes `chat.*` it was
+   * never given. A snapshot that claims a speaking tool the session did not
+   * have describes a different agent from the one that ran.
+   */
+  private async describe(
+    transcript: EveTranscript,
+    roomless = false,
+  ): Promise<void> {
     const describe = this.options.describe;
     if (!describe) return;
     // Said before the first head goes out, so it points at the snapshot this is
@@ -302,7 +324,17 @@ export class EveServer {
     transcript.expectSnapshot();
     try {
       const info = await describe();
-      if (info) await transcript.snapshot(info);
+      if (info)
+        await transcript.snapshot(
+          roomless
+            ? {
+                ...info,
+                tools: (info.tools ?? []).filter(
+                  (tool) => !/^chat[._]/.test(tool.name),
+                ),
+              }
+            : info,
+        );
     } catch (error) {
       this.log(`[hex] could not describe the session: ${message(error)}`);
     }
@@ -403,7 +435,7 @@ export class EveServer {
       this.log(
         `[hex] ${short(peer)} → eve session ${sessionId} (started over the control plane)`,
       );
-      void this.describe(transcript);
+      void this.describe(transcript, true);
       /**
        * Tools, but no room.
        *
@@ -507,7 +539,48 @@ export class EveServer {
      * `id` is the message that opened the run, so a reply threads onto the
      * conversation rather than onto nothing.
      */
-    this.bindRoomFor(record.sessionId, control.operator, record.trigger);
+    this.bindRoomFor(
+      record.sessionId,
+      control.operator,
+      record.trigger,
+      record.channel,
+    );
+
+    /**
+     * Somebody has to WATCH the turn a command starts.
+     *
+     * `respond` and `steer` both run a real turn, and nothing here was reading
+     * the stream while it ran — so the model thought, called tools, answered,
+     * and none of it was published. From the operator's side the instruction
+     * vanished: the session sat at the status it already had until some later
+     * catch-up noticed. A command that starts work and then looks away is
+     * indistinguishable from one that was never delivered.
+     *
+     * The boundary is taken BEFORE the instruction goes in, exactly as the
+     * message path does. Draining afterwards would wait out the very turn the
+     * instruction started and then follow a stream with nothing left in it.
+     */
+    const runs = control.command === "respond" || control.command === "steer";
+    let conversation: Conversation | undefined;
+    let boundary: Boundary | undefined;
+    if (runs) {
+      conversation = {
+        sessionId: record.sessionId,
+        transcript: new EveTranscript(
+          { ...this.options.transcript },
+          record.sessionId,
+        ),
+        finished: new Set(),
+      };
+      try {
+        boundary = await this.drain(conversation);
+      } catch (error) {
+        this.log(
+          `[hex] could not read ${record.sessionId} before a ${control.command}: ${message(error)}`,
+        );
+        conversation = undefined;
+      }
+    }
 
     try {
       switch (control.command) {
@@ -601,7 +674,20 @@ export class EveServer {
       this.log(
         `[hex] could not ${control.command} ${record.sessionId}: ${message(error)}`,
       );
+      return;
     }
+
+    if (!conversation || !boundary) return;
+    /**
+     * Follow it to the end, and say nothing at the end of it.
+     *
+     * The transcript is the answer — this instruction arrived over the control
+     * plane, not in a room, and a run steered from a session view is read in
+     * that same view. A question the turn stops on lands on the head as a
+     * pending request, which the client that sent this is already watching.
+     */
+    const asked: Asked[] = [];
+    await this.follow(conversation, control.operator, boundary, asked);
   }
 
   /**
@@ -864,10 +950,26 @@ export class EveServer {
     sessionId: string,
     operator: string,
     trigger?: string,
+    /** Where the run lives, so a roomless one is not handed a room. */
+    channel?: { transport: string; id?: string },
   ): void {
     const tools = this.options.tools;
     if (!tools) {
       this.log("[hex] no tool bridge, so a turn started here cannot speak");
+      return;
+    }
+
+    /**
+     * A run with no room does not acquire one by being steered.
+     *
+     * `nip-59` says the request arrived as a gift wrap and the transcript is
+     * how it is read. Manufacturing a DM room for it would hand the model
+     * speaking tools it should not have and put its answer in a conversation
+     * nobody opened — the operator asked in a session view and would be replied
+     * to somewhere else entirely.
+     */
+    if (channel && channel.transport === "nip-59") {
+      tools.bridge.bind(sessionId, tools.host());
       return;
     }
     /**
@@ -1042,13 +1144,26 @@ export class EveServer {
     const finished = new Set(boundary.finished);
     /** The turn this message started, once it has announced itself. */
     let ours: string | undefined;
+    /**
+     * Cuts the stream off if the verdict on a failed turn never comes.
+     *
+     * Aborting the read is the only thing that unblocks an `await` on a stream
+     * that has gone quiet, and a stream cut short here is already handled: the
+     * catch below treats it as "this process cannot report further", which is
+     * exactly what it is.
+     */
+    const verdict = new AbortController();
+    let verdictTimer: ReturnType<typeof setTimeout> | undefined;
+    const signal = this.options.signal
+      ? AbortSignal.any([this.options.signal, verdict.signal])
+      : verdict.signal;
 
     try {
       for await (const { index, event } of streamSession({
         host: this.options.host,
         sessionId: conversation.sessionId,
         startIndex: conversation.transcript.streamIndex,
-        signal: this.options.signal,
+        signal,
         fetchImpl: this.options.fetchImpl,
       })) {
         await conversation.transcript.handle(event, index);
@@ -1111,7 +1226,27 @@ export class EveServer {
           // A turn ending is only OUR turn ending when it is our turn. Before
           // this message's turn has announced itself, an ending belongs to
           // whatever came before it.
-          if (!turnId || turnId === ours) break;
+          if (!turnId || turnId === ours) {
+            /**
+             * A FAILED turn is not the end of the story, and stopping here lost
+             * the rest of it.
+             *
+             * Eve says a turn failed, and then says whether the SESSION failed
+             * with it — `session.failed` for a run that is over, or
+             * `session.waiting` for one that will take the next message
+             * normally. Breaking on the turn meant the second event was never
+             * read, so the transcript kept what a failed turn writes, `idle`,
+             * and a session that had died of an exhausted balance was published
+             * as one sitting quietly waiting for you.
+             *
+             * So a failure reads on, briefly, for the verdict. The bound is
+             * there because "read until something arrives" is how a follow
+             * hangs forever on a stream that has stopped talking.
+             */
+            if (event.type === "turn.completed") break;
+            verdictTimer ??= setTimeout(() => verdict.abort(), VERDICT_MS);
+            continue;
+          }
           continue;
         }
 
@@ -1125,14 +1260,20 @@ export class EveServer {
           if (ours) break;
           continue;
         }
+
       }
     } catch (error) {
       // A dropped stream is not a failed turn, but it does mean this process
       // cannot report on one — so it is said out loud and the answer, if any
       // arrived before the drop, is still sent.
-      this.log(
-        `[hex] the stream for ${short(who)} ended early: ${message(error)}`,
-      );
+      // An abort this method armed itself is the deadline doing its job, not a
+      // stream that broke.
+      if (!verdict.signal.aborted)
+        this.log(
+          `[hex] the stream for ${short(who)} ended early: ${message(error)}`,
+        );
+    } finally {
+      if (verdictTimer) clearTimeout(verdictTimer);
     }
 
     if (failed && !answer) return `That did not work: ${failed}`;

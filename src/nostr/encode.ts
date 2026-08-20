@@ -359,6 +359,7 @@ export function buildAgentDefinition(
       repo.path ?? "",
       repo.description ?? "",
     ]);
+  for (const recipient of input.recipients ?? []) tags.push(["p", recipient]);
   if (input.alt) tags.push(["alt", input.alt]);
 
   // The content IS the system prompt. Nothing wraps it, so anyone reading the

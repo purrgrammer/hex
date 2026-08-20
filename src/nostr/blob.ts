@@ -43,6 +43,78 @@ function clip(text: string, max: number): string {
 }
 
 /**
+ * Steps a JSON result is shrunk through, roomiest first.
+ *
+ * Each pass caps how long a string may be and how many entries an array keeps.
+ * The first one that fits wins, so a result loses only as much as it has to.
+ */
+const JSON_PASSES: { strings: number; entries: number }[] = [
+  { strings: 1_000, entries: 20 },
+  { strings: 400, entries: 12 },
+  { strings: 200, entries: 8 },
+  { strings: 120, entries: 5 },
+  { strings: 60, entries: 3 },
+  { strings: 40, entries: 1 },
+];
+
+/** One pass: cap every string and every array, all the way down. */
+function shrink(
+  value: unknown,
+  limits: { strings: number; entries: number },
+): unknown {
+  if (typeof value === "string")
+    return value.length <= limits.strings
+      ? value
+      : `${value.slice(0, limits.strings)}${TRUNCATION_MARKER}`;
+  if (Array.isArray(value))
+    return value
+      .slice(0, limits.entries)
+      .map((entry) => shrink(entry, limits));
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        shrink(entry, limits),
+      ]),
+    );
+  return value;
+}
+
+/**
+ * Shorten a JSON tool result WITHOUT making it stop being JSON.
+ *
+ * Cutting a long string in half is fine for a build log and destroys a JSON
+ * document: what arrives is a prefix that no parser will take, so a reader that
+ * knows how to render a REQ's answer as events renders a wall of broken text
+ * instead — which is exactly what happened, and it looked like a rendering bug
+ * rather than a truncation one.
+ *
+ * So a result that IS JSON is shrunk structurally: strings are capped and
+ * arrays are cut short, from the inside, until the whole thing fits. What comes
+ * out still parses, and the part's own `truncated` field is what says it is not
+ * the whole story.
+ *
+ * Returns undefined when the value is not JSON, or when no pass gets it under
+ * the limit — both meaning "fall back to clipping it as text".
+ */
+export function clipJson(text: string, max: number): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  // A bare string or number is not a document with structure to give up.
+  if (!parsed || typeof parsed !== "object") return undefined;
+
+  for (const limits of JSON_PASSES) {
+    const candidate = JSON.stringify(shrink(parsed, limits));
+    if (candidate.length <= max) return candidate;
+  }
+  return undefined;
+}
+
+/**
  * Bring one part within the inline limits, uploading an oversize tool result to
  * the sink when one is supplied. Never emits a part it knows a relay will
  * reject.
@@ -82,7 +154,8 @@ export async function fitPart(
     }
     return {
       ...part,
-      output: clip(part.output, outputMax),
+      // Structurally if it is JSON, as text if it is not.
+      output: clipJson(part.output, outputMax) ?? clip(part.output, outputMax),
       truncated: { bytes: part.output.length, sha256 },
     };
   }
@@ -102,7 +175,10 @@ function squeeze(part: TurnPart, share: number): TurnPart {
   if (part.type === "tool_result" && part.output)
     return part.output.length <= share
       ? part
-      : { ...part, output: clip(part.output, share) };
+      : {
+          ...part,
+          output: clipJson(part.output, share) ?? clip(part.output, share),
+        };
 
   // Arguments are arbitrary JSON with no honest clipping point, so an oversize
   // call drops them for a digest that still names which call it was.

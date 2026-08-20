@@ -394,6 +394,17 @@ export interface AgentDefinitionInput {
   suggestions?: string[];
   /** Checkouts this agent can read, and where they sit inside its sandbox. */
   repositories?: RepositorySpec[];
+  /**
+   * Who this is addressed to, when it travels privately.
+   *
+   * A definition sent over a wrapped channel needs the same `p` tags the rest
+   * of that session's events carry, or the client that receives it cannot tell
+   * it is one of the parties and drops it — which is exactly what happened:
+   * every session's prompt and tool list was published, delivered, and thrown
+   * away on arrival, so the viewer showed neither and looked as though hex had
+   * never sent them. A definition published PUBLICLY needs none of this.
+   */
+  recipients?: string[];
   alt?: string;
   createdAt?: number;
 }

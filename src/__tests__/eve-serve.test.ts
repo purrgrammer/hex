@@ -727,6 +727,32 @@ describe("EveServer", () => {
     });
   });
 
+  it("publishes a session that died as dead, not as idle", async () => {
+    /**
+     * A turn failing and a SESSION failing are different, and Eve says which in
+     * the event after the one that ends the turn. Stopping at the turn read the
+     * first and never the second, so a run that had died — an exhausted balance,
+     * a provider refusing — was published `idle`: a session sitting quietly,
+     * waiting for a message it would never take.
+     */
+    const eve = fakeEve(
+      [
+        { type: "session.started", data: {} },
+        { type: "turn.started", data: { turnId: "turn_0" } },
+        { type: "step.failed", data: { turnId: "turn_0", message: "no funds" } },
+        { type: "turn.failed", data: { turnId: "turn_0", message: "no funds" } },
+        { type: "session.failed", data: { message: "no funds" } },
+      ] as never,
+      8,
+    );
+    const out = sink();
+    const server_ = server(eve, transport(), out.impl);
+    await server_.handle(inbound("msg-1", "spend money I do not have"));
+
+    const heads = out.sent.filter((rumor) => rumor.kind === 31777);
+    expect(tag(heads[heads.length - 1]!, "status")?.[1]).toBe("error");
+  });
+
   it("starts a run nobody said anything to start", async () => {
     const eve = fakeEve(FIRST_TURN, 8);
     const bus = transport();

@@ -191,8 +191,20 @@ export class EveTranscript {
    *
    * `hex eve` following a session by id has no room at all, and says so by
    * leaving this unset rather than by guessing at one.
+   *
+   * Stored on the record rather than in a field of its own, so a session
+   * resumed by a later process still knows: held in memory it lasted exactly as
+   * long as the process, and every head republished after a restart quietly
+   * dropped it.
    */
-  channel?: { transport: string; id?: string };
+  get channel(): { transport: string; id?: string } | undefined {
+    return this.record.channel;
+  }
+
+  set channel(value: { transport: string; id?: string } | undefined) {
+    this.record.channel = value;
+    this.options.store.saveTranscript(this.record);
+  }
 
   /**
    * What this run is about, from the message that opened it.
@@ -356,6 +368,10 @@ export class EveTranscript {
       buildAgentDefinition(this.options.agentPubkey, {
         slug: this.record.nostrId,
         ...info,
+        // Addressed to the same people the session is. Without this the
+        // snapshot arrives at a client that cannot see itself among the
+        // parties and is discarded unread.
+        recipients: this.options.recipients,
         alt: `${info.name} — how this session was set up`,
       }),
       "session definition",
@@ -1283,7 +1299,7 @@ export class EveTranscript {
           : undefined,
         deltaRelays:
           this.options.deltas === false ? undefined : this.options.deltaRelays,
-        channel: this.channel,
+        channel: this.record.channel,
         subjects: this.subjects,
         /**
          * Whichever definition describes this run.

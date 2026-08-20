@@ -776,23 +776,7 @@ async function main(): Promise<void> {
          * to run turns, not to decide what an agent may do.
          */
         const bridgeConfig = config.eve?.bridge;
-        let bridge: ToolBridge | undefined;
-        if (bridgeConfig) {
-          const token = process.env[bridgeConfig.tokenEnv];
-          if (!token)
-            fail(
-              `eve.bridge.tokenEnv names $${bridgeConfig.tokenEnv}, which is not set — the bridge will not open without a shared token`,
-            );
-          bridge = new ToolBridge({
-            port: bridgeConfig.port,
-            token,
-            log: (line) => console.log(line),
-          });
-          await bridge.start();
-        }
-        const knowledge = bridge
-          ? new KnowledgeTools({ relays, readRelays: config.relays.read })
-          : undefined;
+
 
         /**
          * The write tools, only if the config asked for them.
@@ -803,7 +787,7 @@ async function main(): Promise<void> {
          */
         const publishConfig = config.tools?.publish;
         const publishing =
-          bridge && publishConfig?.enabled
+          bridgeConfig && publishConfig?.enabled
             ? new PublishTools({
                 signer: resolved.signer,
                 pubkey: resolved.pubkey,
@@ -825,7 +809,7 @@ async function main(): Promise<void> {
          */
         const blossomConfig = config.tools?.blossom;
         const blossomFor = (inbound?: Inbound) =>
-          bridge && blossomConfig?.enabled
+          bridgeConfig && blossomConfig?.enabled
             ? new BlossomTools({
                 servers: blossomConfig.servers,
                 signer: resolved.signer,
@@ -841,6 +825,51 @@ async function main(): Promise<void> {
                 log: (line) => console.log(line),
               })
             : undefined;
+
+        /**
+         * The read tools, shared by every session.
+         *
+         * Built once and handed to both the per-message host and the bridge's
+         * roomless fallback, so a run reading relays gets the same reader
+         * whether or not anybody is talking to it.
+         */
+        const knowledge: KnowledgeTools | undefined = bridgeConfig
+          ? new KnowledgeTools({ relays, readRelays: config.relays.read })
+          : undefined;
+
+        let bridge: ToolBridge | undefined;
+        if (bridgeConfig) {
+          const token = process.env[bridgeConfig.tokenEnv];
+          if (!token)
+            fail(
+              `eve.bridge.tokenEnv names $${bridgeConfig.tokenEnv}, which is not set — the bridge will not open without a shared token`,
+            );
+          bridge = new ToolBridge({
+            port: bridgeConfig.port,
+            token,
+            /**
+             * What any session can do, room or no room.
+             *
+             * Built lazily and per call so it is never a stale object, and with
+             * no `incoming` — which is what drops `chat.*` from it. Reading
+             * relays, resolving entities, publishing as the agent and uploading
+             * a blob are all things a run can legitimately want without there
+             * being anybody to talk to.
+             */
+            fallback: () =>
+              new RoomTools({
+                transport,
+                requestedBy: transcriptConfig.to[0],
+                selfPubkey: resolved.pubkey,
+                knowledge,
+                publish: publishing,
+                blossom: blossomFor(),
+                log: (line) => console.log(line),
+              }),
+            log: (line) => console.log(line),
+          });
+          await bridge.start();
+        }
 
         const server = new EveServer({
           host,

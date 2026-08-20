@@ -39,6 +39,21 @@ export interface ToolBridgeOptions {
   port: number;
   /** Shared secret, sent as `Authorization: Bearer <token>`. */
   token: string;
+  /**
+   * The tools a session gets when nothing has been bound to it.
+   *
+   * Everything here used to hang off a bound room, which conflated two
+   * unrelated things: WHERE to speak, and WHETHER the runtime may read a relay
+   * at all. A session with no room bound — one resumed after a restart, one
+   * started over the control plane — was told "there is nobody to speak to"
+   * when it asked to publish an event, which is neither true nor an answer to
+   * the question it asked.
+   *
+   * So the network tools are always available and `chat.*` is the part that
+   * depends on a room. A host with no room offers no `chat.*` and refuses one
+   * with a sentence, which is the honest shape of the constraint.
+   */
+  fallback?: () => ToolHost;
   log?: (line: string) => void;
 }
 
@@ -129,7 +144,9 @@ export class ToolBridge {
       return { status: 401, body: { ok: false, output: "bad token" } };
 
     if (url.pathname === "/tools" && request.method === "GET") {
-      const host = this.hosts.get(url.searchParams.get("session") ?? "");
+      const host =
+        this.hosts.get(url.searchParams.get("session") ?? "") ??
+        this.options.fallback?.();
       const specs: ToolSpec[] = host ? host.list() : [];
       return { status: 200, body: { tools: specs } };
     }
@@ -154,14 +171,14 @@ export class ToolBridge {
         if (already) return { status: 200, body: already };
       }
 
-      const host = this.hosts.get(sessionId);
+      const host = this.hosts.get(sessionId) ?? this.options.fallback?.();
       if (!host)
         return {
           status: 200,
           body: {
             ok: false,
             output:
-              "this session has no room bound to it, so there is nobody to speak to",
+              "this session has no tools bound to it and this agent offers no default set",
           },
         };
 

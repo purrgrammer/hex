@@ -82,6 +82,16 @@ export interface StoredTranscript {
    */
   title?: string;
   /**
+   * Where the run is happening, so a restart does not lose it.
+   *
+   * Held only in memory, it survived exactly as long as the process: every head
+   * republished after a restart dropped the channel, so a run started over the
+   * control plane stopped saying so and a reader went looking for a room that
+   * does not exist. It is also what tells a resumed session whether binding a
+   * chat room is the right thing to do.
+   */
+  channel?: { transport: string; id?: string };
+  /**
    * The running total includes a figure nobody billed.
    *
    * Not persisted: a restart resumes a session whose earlier steps it did not
@@ -150,7 +160,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
   cost        TEXT,
   pending     TEXT,
   said_turn   TEXT,
-  title       TEXT
+  title       TEXT,
+  channel     TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
@@ -212,6 +223,8 @@ export class HexStore {
       db.exec(`ALTER TABLE transcripts ADD COLUMN said_turn TEXT`);
     if (!columns.includes("title"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN title TEXT`);
+    if (!columns.includes("channel"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN channel TEXT`);
 
     return new HexStore(db);
   }
@@ -328,6 +341,7 @@ export class HexStore {
       pending: parsePending(row.pending),
       saidTurn: row.said_turn == null ? undefined : String(row.said_turn),
       title: row.title == null ? undefined : String(row.title),
+      channel: parseChannel(row.channel),
     };
   }
 
@@ -370,8 +384,8 @@ export class HexStore {
         `INSERT INTO transcripts (
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
-           cost, pending, said_turn, title
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           cost, pending, said_turn, title, channel
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
            status = excluded.status, trigger = excluded.trigger,
@@ -379,7 +393,8 @@ export class HexStore {
            in_tokens = excluded.in_tokens, out_tokens = excluded.out_tokens,
            cache_read = excluded.cache_read, cache_write = excluded.cache_write,
            cost = excluded.cost, pending = excluded.pending,
-           said_turn = excluded.said_turn, title = excluded.title`,
+           said_turn = excluded.said_turn, title = excluded.title,
+           channel = excluded.channel`,
       )
       .run(
         transcript.sessionId,
@@ -400,6 +415,7 @@ export class HexStore {
         transcript.pending?.length ? JSON.stringify(transcript.pending) : null,
         transcript.saidTurn ?? null,
         transcript.title ?? null,
+        transcript.channel ? JSON.stringify(transcript.channel) : null,
       );
   }
 }
@@ -419,6 +435,23 @@ function parsePending(value: unknown): string[] | undefined {
     if (!Array.isArray(parsed)) return undefined;
     const ids = parsed.filter((id): id is string => typeof id === "string");
     return ids.length ? ids : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The stored channel, or nothing. A row written before the column existed. */
+function parseChannel(
+  value: unknown,
+): { transport: string; id?: string } | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object") return undefined;
+    const transport = (parsed as { transport?: unknown }).transport;
+    if (typeof transport !== "string" || !transport) return undefined;
+    const id = (parsed as { id?: unknown }).id;
+    return { transport, ...(typeof id === "string" && id ? { id } : {}) };
   } catch {
     return undefined;
   }
