@@ -738,6 +738,21 @@ export class EveTranscript {
         // A result closes the assistant's step, so whatever it said goes first —
         // otherwise the transcript reads as the answer arriving after its tools.
         await this.flush("assistant");
+        /**
+         * The child this call started, named on the turn that reports it.
+         *
+         * It cannot go on the turn that made the CALL, which is where it
+         * belongs by rights: the runtime announces a subagent after the step
+         * that requested it has completed, so by the time this side knows a
+         * child exists the calling turn is already published. Verified on a
+         * live run — the child ran, and no tag was ever emitted.
+         *
+         * The result turn carries the same `callId` and is about the same call,
+         * so it is the honest second choice. Taken out of the map as it is used,
+         * so no later turn claims it twice.
+         */
+        const child = this.subagents.get(id);
+        if (child) this.subagents.delete(id);
         await this.append(
           "tool",
           [
@@ -749,7 +764,10 @@ export class EveTranscript {
               output: outputText(result.output),
             },
           ],
-          { alt: `${name}: ${result.isError === true ? "failed" : "ok"}` },
+          {
+            alt: `${name}: ${result.isError === true ? "failed" : "ok"}`,
+            ...(child ? { subagents: [child] } : {}),
+          },
         );
         break;
       }
@@ -1320,8 +1338,16 @@ export class EveTranscript {
       .filter((part) => part.type === "text")
       .map((part) => String((part as { text?: unknown }).text ?? ""))
       .join(" ");
-    // Only the children this turn's own calls started: a pointer on a turn that
-    // did not spawn it is a reader following a link to the wrong place.
+    /**
+     * Only the children this turn's own calls started: a pointer on a turn that
+     * did not spawn one sends a reader to the wrong transcript.
+     *
+     * Usually empty, because the runtime announces a subagent after the step
+     * that requested it has completed — so the calling turn is published before
+     * this side has heard of the child, and `action.result` is where the
+     * pointer actually lands. This stays for the case where the announcement
+     * does arrive in time.
+     */
     const called = new Set(
       parts
         .filter((part) => isKnownPart(part) && part.type === "tool_call")

@@ -1163,9 +1163,19 @@ describe("EveTranscript", () => {
   });
 
   it("names the child session a subagent call started", async () => {
-    // A subagent's work is a separate session — own head, own chain — so the turn
-    // that spawned it can only point at it. Without the pointer the row is a dead
-    // end, which is exactly where a reader most wants to follow.
+    /**
+     * A subagent's work is a separate session — own head, own chain — so the
+     * turn that spawned it can only point at it. Without the pointer the row is
+     * a dead end, which is exactly where a reader most wants to follow.
+     *
+     * The ORDER here is the real one, read off a live run, and it is the whole
+     * reason this was broken. The runtime announces the child AFTER the step
+     * that requested it has completed: `actions.requested`, `step.completed` —
+     * which flushes the turn carrying the `tool_call` — and only then
+     * `subagent.called`. The previous version of this test put the
+     * announcement first, which never happens, so the code and the test were
+     * wrong together and the suite was green while no tag was ever published.
+     */
     const store = HexStore.open(agentHome(home, AGENT).db);
     const { impl, sent } = sink();
     const pub = publisher(store, impl);
@@ -1197,6 +1207,14 @@ describe("EveTranscript", () => {
       },
       ++index,
     );
+    // The call's turn is published HERE, before anyone has heard of a child.
+    await pub.handle(
+      {
+        type: "step.completed",
+        data: { finishReason: "tool-calls", stepIndex: 0, turnId: "turn_0" },
+      },
+      ++index,
+    );
     await pub.handle(
       {
         type: "subagent.called",
@@ -1211,18 +1229,32 @@ describe("EveTranscript", () => {
       },
       ++index,
     );
+    // And the result, which carries the same callId and is where the pointer
+    // can still honestly go.
+    await pub.handle(
+      {
+        type: "action.result",
+        data: {
+          result: { kind: "tool-result", callId: "call_sub", output: "POTATO" },
+          stepIndex: 0,
+          turnId: "turn_0",
+        },
+      },
+      ++index,
+    );
     await pub.handle(
       {
         type: "step.completed",
-        data: { finishReason: "tool-calls", stepIndex: 0, turnId: "turn_0" },
+        data: { finishReason: "stop", stepIndex: 1, turnId: "turn_0" },
       },
-      index + 1,
+      ++index,
     );
 
     const turn = sent
       .filter((s) => s.rumor.kind === 1777)
       .map((s) => s.rumor)
       .find((t) => t.tags.some((x) => x[0] === "subagent"))!;
+    expect(turn).toBeDefined();
     expect(turn.tags.find((t) => t[0] === "subagent")).toEqual([
       "subagent",
       "call_sub",
