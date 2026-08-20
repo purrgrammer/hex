@@ -255,6 +255,34 @@ function subjectsOf(inbound: Inbound, addressed: string[] = []): string[][] {
  * on different relays with the same id are two, which is exactly why NIP-29
  * puts the host in the identifier.
  */
+/**
+ * A channel string back into the room it names.
+ *
+ * The inverse of `channelOf`, and it exists because the durable record keeps the
+ * channel and a restart has nothing else to rebuild a room from. NIP-29 writes a
+ * group as `<relay-host>'<group-id>`, so that is what has to come apart again;
+ * anything else names its room directly.
+ */
+function roomOf(channel?: {
+  transport: string;
+  id?: string;
+}): Room | undefined {
+  if (!channel?.id) return undefined;
+  if (channel.transport === "nip-29") {
+    const at = channel.id.indexOf("'");
+    if (at <= 0) return undefined;
+    return {
+      transport: "nip-29",
+      id: channel.id.slice(at + 1),
+      relay: `wss://${channel.id.slice(0, at)}`,
+    };
+  }
+  return {
+    transport: channel.transport as Room["transport"],
+    id: channel.id,
+  };
+}
+
 function channelOf(inbound: Inbound): { transport: string; id?: string } {
   const room = inbound.room;
   if (room.transport === "nip-29" && room.relay) {
@@ -377,6 +405,28 @@ export class EveServer {
        * head: run afterwards, the head that had already gone out pointed at no
        * definition and the reader saw nothing until the next one.
        */
+      /**
+       * Give it back the room it was speaking in.
+       *
+       * The bridge binds hosts in memory, so a restart leaves every run it
+       * picks up with no room — and a host with no room offers no `chat.*` at
+       * all. The model finished its work, reached for `chat.respond`, was told
+       * no such tool exists, and having no way to report the result DID IT
+       * AGAIN. Seen live: the same patch published twice, ninety-nine seconds
+       * apart, by a run that could not say it had already succeeded.
+       *
+       * Everything needed is durable now — the channel and the message that
+       * started it — so this is the same binding the DM path does, from the
+       * record instead of from an inbound message.
+       */
+      this.bindRoomFor(
+        record.sessionId,
+        this.options.transcript.recipients[0] ??
+          this.options.transcript.agentPubkey,
+        record.trigger,
+        record.channel,
+      );
+
       const describing = conversation.transcript.described
         ? undefined
         : this.describe(
@@ -1297,7 +1347,19 @@ export class EveServer {
     const peer =
       this.options.transcript.store.peerForSession(sessionId) ?? operator;
 
-    this.log(`[hex] bound a room on ${sessionId} for ${short(peer)}`);
+    /**
+     * The room the run is actually IN, not a NIP-17 one for everybody.
+     *
+     * This used to hardcode a DM room, so a group run that had to be rebound —
+     * steered, or picked up after a restart — was handed a conversation with
+     * one person instead of the room forty people were watching. Its answer
+     * would have gone to the wrong place, if it had been able to answer at all.
+     */
+    const room = roomOf(channel) ?? { transport: "nip-17", id: peer };
+
+    this.log(
+      `[hex] bound a ${room.transport} room on ${sessionId} for ${short(peer)}`,
+    );
     tools.bridge.bind(
       sessionId,
       tools.host({
@@ -1305,7 +1367,7 @@ export class EveServer {
         author: peer,
         text: "",
         createdAt: Math.floor(Date.now() / 1000),
-        room: { transport: "nip-17", id: peer },
+        room,
         addressesSelf: true,
         event: {
           id: trigger ?? sessionId,

@@ -801,6 +801,72 @@ describe("EveServer", () => {
     expect(eve.posts.length).toBe(before);
   });
 
+  it("gives a caught-up run its room back, in the protocol it was in", async () => {
+    /**
+     * The live failure, and an expensive one. The bridge binds tool hosts in
+     * memory, so a restart left every run it picked up with no room — and a
+     * host with no room offers no `chat.*`. The model finished its work,
+     * reached for `chat.respond`, was told there is no such tool, and having no
+     * way to report the result DID THE WORK AGAIN: the same patch published
+     * twice, ninety-nine seconds apart.
+     *
+     * The second half matters as much. Binding used to hardcode a NIP-17 room,
+     * so a group run rebound after a restart would have answered one person
+     * privately instead of the room that asked.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const bound: {
+      session: string;
+      room?: { transport: string; id?: string };
+    }[] = [];
+    const tools = {
+      bridge: { bind: () => {}, release: () => {} } as never,
+      host: (incoming?: Inbound) => {
+        bound.push({ session: "", room: incoming?.room });
+        return {} as never;
+      },
+    };
+
+    const options = () => ({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
+      transport: transport(),
+      drainQuietMs: 40,
+      tools,
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: sink().impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+
+    await new EveServer(options()).handle({
+      ...inbound("msg-group", "first"),
+      room: {
+        transport: "nip-29",
+        id: "GROUPID",
+        relay: "wss://groups.example",
+      },
+    });
+
+    // Reopen the run the way a kill does, then catch it up in a new process.
+    const record = store.transcriptFor(eve.session)!;
+    store.saveTranscript({ ...record, status: "active", streamIndex: 3 });
+    bound.length = 0;
+    await new EveServer(options()).catchUp();
+
+    // A room, and the RIGHT room.
+    expect(bound.length).toBeGreaterThan(0);
+    expect(bound.at(-1)!.room).toEqual({
+      transport: "nip-29",
+      id: "GROUPID",
+      relay: "wss://groups.example",
+    });
+  });
+
   it("files a run in its group, and leaves every other run wrapped", async () => {
     /**
      * The room decides, and the GROUP RELAY decides who may read it. That is
