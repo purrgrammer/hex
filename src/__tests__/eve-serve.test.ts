@@ -315,6 +315,61 @@ describe("EveServer", () => {
     expect(tag(later, "title")).toEqual(["title", "which relays serve 30166?"]);
   });
 
+  it("gives a steered turn a room, so what it produces can be said", async () => {
+    /**
+     * A steer runs a real turn with real tools, and the tool host was bound in
+     * the DM path ONLY — so every `chat_respond` from an operator-started turn
+     * came back "this session has no room bound to it". The agent worked,
+     * reasoned, built its answer and could not speak it: silent, and
+     * indistinguishable from an agent with nothing to add.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const bus = transport();
+    const { impl } = sink();
+    const bound: string[] = [];
+
+    const hex = new EveServer({
+      host: HOST,
+      transport: bus,
+      fetchImpl: eve.impl,
+      drainQuietMs: 40,
+      tools: {
+        bridge: {
+          bind: (sessionId: string) => bound.push(sessionId),
+          release: () => {},
+        } as never,
+        host: () => ({}) as never,
+      },
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+
+    await hex.handle(inbound("m1", "how many kinds?"));
+    const before = bound.length;
+
+    const head = (await hex.handle(inbound("m2", "again", "m1")), undefined);
+    void head;
+
+    await hex.control({
+      id: "ctl_1",
+      session: store.transcriptFor(eve.session)!.nostrId,
+      operator: PEER,
+      command: "steer",
+      text: "now do the other thing",
+    } as never);
+
+    // The room was bound again for the turn the operator started.
+    expect(bound.length).toBeGreaterThan(before);
+    expect(bound.at(-1)).toBe(eve.session);
+  });
+
   it("says which protocol and which room the session is running in", async () => {
     /**
      * A transcript read later is read away from the conversation that produced

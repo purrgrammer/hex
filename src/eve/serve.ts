@@ -313,6 +313,21 @@ export class EveServer {
     const say = (what: string) =>
       this.log(`[hex] ${short(control.operator)} → ${what}`);
 
+    /**
+     * Give the turn a room before starting it.
+     *
+     * A steer runs a real turn, with tools — and the tool host is bound in the
+     * DM path only, so a steered turn had none: every `chat_respond` came back
+     * "this session has no room bound to it", and the agent worked, reasoned,
+     * built its answer and could not say it. Silent, and indistinguishable from
+     * an agent that had nothing to add.
+     *
+     * The room is rebuilt from the conversation this session belongs to. Its
+     * `id` is the message that opened the run, so a reply threads onto the
+     * conversation rather than onto nothing.
+     */
+    this.bindRoomFor(record.sessionId, record.trigger);
+
     try {
       switch (control.command) {
         case "respond": {
@@ -608,6 +623,46 @@ export class EveServer {
    * question that allowed it, and Eve is the one that decides whether this
    * request will take one.
    */
+  /**
+   * Bind a tool host to a session that no inbound message is driving.
+   *
+   * Enough of an `Inbound` to answer with: who, where, and what to thread
+   * onto. The text is empty because nothing was said — this is a turn the
+   * operator started, not a message anybody sent.
+   */
+  private bindRoomFor(sessionId: string, trigger?: string): void {
+    const tools = this.options.tools;
+    if (!tools) return;
+    const peer = this.options.transcript.store.peerForSession(sessionId);
+    if (!peer) {
+      this.log(
+        `[hex] no conversation is on record for ${sessionId}, so a turn started here cannot speak`,
+      );
+      return;
+    }
+
+    tools.bridge.bind(
+      sessionId,
+      tools.host({
+        id: trigger ?? sessionId,
+        author: peer,
+        text: "",
+        createdAt: Math.floor(Date.now() / 1000),
+        room: { transport: "nip-17", id: peer },
+        addressesSelf: true,
+        event: {
+          id: trigger ?? sessionId,
+          pubkey: peer,
+          created_at: Math.floor(Date.now() / 1000),
+          kind: 14,
+          tags: [],
+          content: "",
+          sig: "",
+        },
+      } as unknown as Inbound),
+    );
+  }
+
   private async answerQuestion(
     inbound: Inbound,
     answering: { sessionId: string; requestId: string },

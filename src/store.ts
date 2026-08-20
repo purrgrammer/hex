@@ -236,6 +236,19 @@ export class HexStore {
     return row?.session_id;
   }
 
+  /**
+   * Who a session belongs to — the reverse of `conversationFor`.
+   *
+   * A control event names a session, and answering one needs the ROOM: a turn
+   * an operator steered into life still has to speak to somebody.
+   */
+  peerForSession(sessionId: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT peer FROM conversations WHERE session_id = ?")
+      .get(sessionId) as { peer?: string } | undefined;
+    return row?.peer;
+  }
+
   /** Remember it, or move this correspondent to a different session. */
   rememberConversation(peer: string, sessionId: string, at: number): void {
     this.db
