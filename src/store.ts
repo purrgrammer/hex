@@ -103,6 +103,17 @@ export interface StoredTranscript {
    */
   described?: boolean;
   /**
+   * What the run is about, as pointer tags.
+   *
+   * Durable because the head repeats them on EVERY publish and the head is
+   * republished on every status change. Held in memory they survived the first
+   * publish and no other: a run started about a repository said so once, and
+   * every head after it — the ones a reader actually sees, because a
+   * replaceable event keeps only the newest — was about nothing. Every "runs
+   * about this repository" list was empty for exactly that reason.
+   */
+  subjects?: string[][];
+  /**
    * The running total includes a figure nobody billed.
    *
    * Not persisted: a restart resumes a session whose earlier steps it did not
@@ -173,7 +184,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
   said_turn   TEXT,
   title       TEXT,
   channel     TEXT,
-  described   INTEGER
+  described   INTEGER,
+  subjects    TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
@@ -268,6 +280,8 @@ export class HexStore {
       db.exec(`ALTER TABLE transcripts ADD COLUMN channel TEXT`);
     if (!columns.includes("described"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN described INTEGER`);
+    if (!columns.includes("subjects"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN subjects TEXT`);
 
     db.prepare(`DELETE FROM obeyed WHERE at < ?`).run(
       Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
@@ -413,6 +427,7 @@ export class HexStore {
       title: row.title == null ? undefined : String(row.title),
       channel: parseChannel(row.channel),
       described: row.described === 1,
+      subjects: parseSubjects(row.subjects),
     };
   }
 
@@ -455,8 +470,8 @@ export class HexStore {
         `INSERT INTO transcripts (
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
-           cost, pending, said_turn, title, channel, described
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           cost, pending, said_turn, title, channel, described, subjects
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
            status = excluded.status, trigger = excluded.trigger,
@@ -465,7 +480,8 @@ export class HexStore {
            cache_read = excluded.cache_read, cache_write = excluded.cache_write,
            cost = excluded.cost, pending = excluded.pending,
            said_turn = excluded.said_turn, title = excluded.title,
-           channel = excluded.channel, described = excluded.described`,
+           channel = excluded.channel, described = excluded.described,
+           subjects = excluded.subjects`,
       )
       .run(
         transcript.sessionId,
@@ -488,6 +504,9 @@ export class HexStore {
         transcript.title ?? null,
         transcript.channel ? JSON.stringify(transcript.channel) : null,
         transcript.described ? 1 : null,
+        transcript.subjects?.length
+          ? JSON.stringify(transcript.subjects)
+          : null,
       );
   }
 }
@@ -513,6 +532,28 @@ function parsePending(value: unknown): string[] | undefined {
 }
 
 /** The stored channel, or nothing. A row written before the column existed. */
+/**
+ * The subject tags, defensively.
+ *
+ * Anything that is not an array of string arrays reads as no subjects, which
+ * errs towards a head that says nothing about what it is about rather than one
+ * carrying a malformed tag a relay would reject.
+ */
+function parseSubjects(value: unknown): string[][] | undefined {
+  if (typeof value !== "string" || !value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return undefined;
+    const tags = parsed.filter(
+      (tag): tag is string[] =>
+        Array.isArray(tag) && tag.every((part) => typeof part === "string"),
+    );
+    return tags.length ? tags : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function parseChannel(
   value: unknown,
 ): { transport: string; id?: string } | undefined {

@@ -1105,8 +1105,25 @@ describe("EveServer", () => {
       describe: async () => ({
         name: "Hex",
         instructions: "You are Hex.",
-        tools: [{ name: "chat_respond", description: "Speak." }],
+        // What the runtime reports: its OWN tools. A tool resolved per turn
+        // does not exist yet when `/info` answers, so this list never carries
+        // one — the snapshot's other half comes from the host below.
+        tools: [{ name: "bash", description: "Run a command." }],
       }),
+      tools: {
+        bridge: { bind: () => {}, release: () => {} } as never,
+        host: () =>
+          ({
+            list: () => [
+              {
+                name: "chat.respond",
+                description: "Speak.",
+                parameters: { type: "object" },
+                prompt: "",
+              },
+            ],
+          }) as never,
+      },
       transcript: {
         agentPubkey: AGENT,
         slug: "hex",
@@ -1126,9 +1143,13 @@ describe("EveServer", () => {
     // not be one.
     expect(definitions).toHaveLength(1);
     expect(definitions[0]!.content).toBe("You are Hex.");
+    // Both halves, each from the side that knows it: the runtime's own tool,
+    // and the one this package offered for this run. Neither side can report
+    // the other's, and a snapshot missing either describes an agent that did
+    // not run — one with no shell, or one with no way to speak.
     expect(
       definitions[0]!.tags.filter((t) => t[0] === "tool").map((t) => t[1]),
-    ).toEqual(["chat_respond"]);
+    ).toEqual(["bash", "chat_respond"]);
 
     // The `d` is the session, and the head points at exactly that address.
     const d = definitions[0]!.tags.find((t) => t[0] === "d")![1]!;

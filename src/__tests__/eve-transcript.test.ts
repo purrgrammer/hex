@@ -319,7 +319,9 @@ describe("EveTranscript", () => {
             ? { type, data: { requestId: "req_1", outcome: "approved" } }
             : {
                 type,
-                data: { resolutions: [{ requestId: "req_1", outcome: "answered" }] },
+                data: {
+                  resolutions: [{ requestId: "req_1", outcome: "answered" }],
+                },
               },
           index++,
         );
@@ -597,7 +599,12 @@ describe("EveTranscript", () => {
                 { id: "approve", label: "Approve" },
                 { id: "cancel", label: "Cancel" },
               ],
-              action: { kind: "tool-call", callId: "call_1", toolName: "bash", input: {} },
+              action: {
+                kind: "tool-call",
+                callId: "call_1",
+                toolName: "bash",
+                input: {},
+              },
             },
           ],
         },
@@ -615,7 +622,10 @@ describe("EveTranscript", () => {
     expect(statusOf()).toBe("awaiting-input");
 
     // The head names what is open, so a reader knows what to answer.
-    const head = sent.map((s) => s.rumor).filter((r) => r.kind === 31777).at(-1)!;
+    const head = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 31777)
+      .at(-1)!;
     expect(head.tags.filter((t) => t[0] === "input").map((t) => t[1])).toEqual([
       "req_1",
     ]);
@@ -626,8 +636,7 @@ describe("EveTranscript", () => {
       .filter((r) => r.kind === 1777)
       .flatMap((r) => JSON.parse(r.content) as { type: string }[])
       .find((part) => part.type === "input_request") as
-      | { prompt: string; options: { id: string }[] }
-      | undefined;
+      { prompt: string; options: { id: string }[] } | undefined;
     expect(asked?.prompt).toBe("Approve tool call: bash");
     expect(asked?.options.map((o) => o.id)).toEqual(["approve", "cancel"]);
 
@@ -664,7 +673,10 @@ describe("EveTranscript", () => {
       type: "message.received",
       data: { message: "do the thing", turnId: "turn_0" },
     };
-    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
     await pub.handle({ ...said, meta: { id: "evt_first" } }, ++index);
     await pub.handle({ ...said, meta: { id: "evt_replay" } }, ++index);
 
@@ -675,7 +687,10 @@ describe("EveTranscript", () => {
     expect(users).toHaveLength(1);
 
     // A genuinely new turn is not the same message.
-    await pub.handle({ type: "turn.started", data: { turnId: "turn_1" } }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_1" } },
+      ++index,
+    );
     await pub.handle(
       {
         type: "message.received",
@@ -705,7 +720,10 @@ describe("EveTranscript", () => {
     const pub = publisher(store, impl);
 
     let index = 0;
-    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
     // A step that says something, and a step that says nothing new.
     await pub.handle(
       { type: "message.completed", data: { message: "hello" } },
@@ -735,7 +753,10 @@ describe("EveTranscript", () => {
     );
     // The head republishes on a status change, so the totals reach a reader at
     // the turn boundary rather than after every step.
-    await pub.handle({ type: "turn.completed", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle(
+      { type: "turn.completed", data: { turnId: "turn_0" } },
+      ++index,
+    );
 
     const head = sent
       .map((s) => s.rumor)
@@ -760,7 +781,10 @@ describe("EveTranscript", () => {
     const pub = publisher(store, impl);
 
     let index = 0;
-    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
     await pub.handle({ type: "compaction.completed", data: {} }, ++index);
 
     const turn = sent
@@ -785,8 +809,14 @@ describe("EveTranscript", () => {
     const pub = publisher(store, impl);
 
     let index = 0;
-    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
-    await pub.handle({ type: "turn.cancelled", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      { type: "turn.cancelled", data: { turnId: "turn_0" } },
+      ++index,
+    );
 
     const silent = sent
       .map((s) => s.rumor)
@@ -796,7 +826,10 @@ describe("EveTranscript", () => {
 
     // And with something buffered, the words it got out are the record — one
     // turn, not the flush plus a marker saying it never spoke.
-    await pub.handle({ type: "turn.started", data: { turnId: "turn_1" } }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_1" } },
+      ++index,
+    );
     await pub.handle(
       {
         type: "message.completed",
@@ -804,7 +837,10 @@ describe("EveTranscript", () => {
       },
       ++index,
     );
-    await pub.handle({ type: "turn.cancelled", data: { turnId: "turn_1" } }, ++index);
+    await pub.handle(
+      { type: "turn.cancelled", data: { turnId: "turn_1" } },
+      ++index,
+    );
 
     const spoke = sent
       .map((s) => s.rumor)
@@ -827,7 +863,10 @@ describe("EveTranscript", () => {
     const pub = publisher(store, impl);
 
     let index = 0;
-    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
     await pub.handle(
       {
         type: "authorization.required",
@@ -861,6 +900,41 @@ describe("EveTranscript", () => {
     expect(head.tags.find((t) => t[0] === "status")?.[1]).toBe(
       "payment-required",
     );
+    store.close();
+  });
+
+  it("keeps what a run is about across every head it publishes", async () => {
+    /**
+     * The bug this fixes was invisible from the inside: subjects lived on the
+     * transcript object, so the FIRST head carried them and none after did —
+     * and a head is replaceable, so the only one a reader sees is the last.
+     * Every "runs about this repository" list was empty while the data sat
+     * there in the first version of each head.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+    const repo = "30617:1a2b:grimoire";
+    pub.subjects = [["a", repo]];
+
+    let index = 0;
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      { type: "turn.completed", data: { turnId: "turn_0" } },
+      ++index,
+    );
+
+    const heads = sent.map((s) => s.rumor).filter((r) => r.kind === 31777);
+    expect(heads.length).toBeGreaterThan(1);
+    for (const head of heads)
+      expect(head.tags.find((t) => t[0] === "a")?.[1]).toBe(repo);
+
+    // And a process that restarts and picks the session back up still knows.
+    const resumed = publisher(store, impl);
+    expect(resumed.subjects).toEqual([["a", repo]]);
     store.close();
   });
 

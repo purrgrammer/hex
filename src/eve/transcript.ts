@@ -212,8 +212,22 @@ export class EveTranscript {
    *
    * Set once by whoever started the run; the head repeats it on every publish
    * so a reader can find every session about a thing without reading titles.
+   *
+   * On the RECORD, not on this object. Held here it survived the first head and
+   * nothing after: a head is republished on every status change, a resumed
+   * conversation builds a fresh transcript, and the newest head is the only one
+   * a reader of a replaceable event ever sees. So a run started about a
+   * repository said so once, invisibly, and every "runs about this repository"
+   * list was empty.
    */
-  subjects?: string[][];
+  get subjects(): string[][] | undefined {
+    return this.record.subjects;
+  }
+
+  set subjects(value: string[][] | undefined) {
+    this.record.subjects = value?.length ? value : undefined;
+    this.options.store.saveTranscript(this.record);
+  }
 
   /** How full the window was when compaction was asked for, until it completes. */
   private compactingAt?: number;
@@ -388,7 +402,6 @@ export class EveTranscript {
     this.record.described = true;
     this.options.store.saveTranscript(this.record);
   }
-
 
   /**
    * A snapshot is coming, so point at it now.
@@ -1509,7 +1522,6 @@ function summarise(text: string, limit = 72): string {
 function isTerminal(status: SessionStatus): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }
-
 
 /** The choices offered, keeping only what a reader can actually render. */
 function optionsOf(

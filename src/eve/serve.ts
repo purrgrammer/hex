@@ -437,22 +437,41 @@ export class EveServer {
     try {
       const info = await describe();
       if (!info) return;
-      const offered = this.options.tools
-        ? new Set(
-            this.options.tools
-              .host(roomless ? undefined : PLACEHOLDER_INBOUND)
-              .list()
-              .map((spec) => wireName(spec.name)),
-          )
-        : undefined;
+      /**
+       * The runtime's tools, then ours — asked of the side that decides each.
+       *
+       * `/info` lists the runtime's own static tools and nothing else: a tool
+       * resolved per turn does not exist yet when the endpoint answers, and
+       * everything this package serves is resolved per turn precisely BECAUSE
+       * whether it exists depends on the run. Filtering that list therefore
+       * removed tools it never contained, and the snapshot described an agent
+       * with a shell and no way to speak.
+       *
+       * So the runtime's half is filtered — a bridge tool it happens to know
+       * about is still ours to include or not — and this package's half is
+       * added from the host itself, which is the only thing that can say what
+       * this session was actually offered.
+       */
+      const host = this.options.tools?.host(
+        roomless ? undefined : PLACEHOLDER_INBOUND,
+      );
+      const ours = (host?.list() ?? []).map((spec) => ({
+        name: wireName(spec.name),
+        description: spec.description,
+        parameters: spec.parameters,
+      }));
+      const mine = new Set(ours.map((tool) => tool.name));
       await transcript.snapshot({
         ...info,
-        tools: (info.tools ?? []).filter(
-          (tool) =>
-            // A tool the bridge does not serve at all is the runtime's own —
-            // `bash`, `read_file` — and is offered whatever this host says.
-            !offered || !BRIDGE_TOOLS.has(tool.name) || offered.has(tool.name),
-        ),
+        tools: [
+          ...(info.tools ?? []).filter(
+            (tool) =>
+              // A tool the bridge could never serve is the runtime's own —
+              // `bash`, `read_file` — and is offered whatever this host says.
+              !BRIDGE_TOOLS.has(tool.name) && !mine.has(tool.name),
+          ),
+          ...ours,
+        ],
       });
     } catch (error) {
       this.log(`[hex] could not describe the session: ${message(error)}`);
