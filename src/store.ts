@@ -201,7 +201,36 @@ CREATE TABLE IF NOT EXISTS questions (
   asked_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS questions_session ON questions (session_id);
+
+/*
+ * Control events already carried out.
+ *
+ * Durable for the same reason the questions table is, and discovered the same way: a
+ * restart re-obeyed a stop the operator had pressed before it. The NIP-17 read
+ * floor is two days below the start time, deliberately loose because NIP-59
+ * randomises a wrap's timestamp backwards and a strict floor would drop
+ * messages sent now — so
+ * every restart is handed the whole two-day window again, and an in-memory
+ * guard has forgotten all of it.
+ *
+ * Pruned on open rather than never: this is a replay guard, not a log, and the
+ * horizon only has to outlast the window a relay could hand back.
+ */
+CREATE TABLE IF NOT EXISTS obeyed (
+  control_id TEXT PRIMARY KEY,
+  at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS obeyed_at ON obeyed (at);
 `;
+
+/**
+ * How long a carried-out control event is remembered.
+ *
+ * Ten times the two-day read floor, because the cost of remembering too long is
+ * a few hundred rows and the cost of forgetting too early is an instruction
+ * obeyed twice.
+ */
+const OBEYED_HORIZON_SECONDS = 30 * 24 * 60 * 60;
 
 export class HexStore {
   private constructor(private readonly db: DatabaseSync) {}
@@ -240,11 +269,38 @@ export class HexStore {
     if (!columns.includes("described"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN described INTEGER`);
 
+    db.prepare(`DELETE FROM obeyed WHERE at < ?`).run(
+      Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
+    );
+
     return new HexStore(db);
   }
 
   close(): void {
     this.db.close();
+  }
+
+  /** Whether this exact control event has already been carried out. */
+  wasObeyed(controlId: string): boolean {
+    return Boolean(
+      this.db
+        .prepare(`SELECT 1 FROM obeyed WHERE control_id = ?`)
+        .get(controlId),
+    );
+  }
+
+  /**
+   * Record that one was carried out.
+   *
+   * Called only AFTER the instruction landed. A command that failed because the
+   * runtime was down should be retried by the next relay's redelivery, not
+   * dropped forever, and the scope checks are what make redelivering a command
+   * that DID land harmless.
+   */
+  markObeyed(controlId: string, at = Math.floor(Date.now() / 1000)): void {
+    this.db
+      .prepare(`INSERT OR IGNORE INTO obeyed (control_id, at) VALUES (?, ?)`)
+      .run(controlId, at);
   }
 
   /**

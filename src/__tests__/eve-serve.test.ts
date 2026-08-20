@@ -152,10 +152,16 @@ function fakeEve(
   const stored = [...events];
   /** Every create mints a new id, as a real host does. */
   const created: string[] = [];
+  /** Set to refuse the next POST, the way a host that is down refuses one. */
+  const state = { failNext: false };
 
   const impl = (async (url: string | URL, init?: RequestInit) => {
     const path = new URL(String(url)).pathname;
     if (init?.method === "POST") {
+      if (state.failNext) {
+        state.failNext = false;
+        return { ok: false, status: 503, statusText: "Service Unavailable" };
+      }
       posts.push({ path, body: JSON.parse(String(init.body)) });
       // Only a CONTINUE appends. Creating a session with the first message is
       // what produced the events already stored, and a cancel produces none.
@@ -204,7 +210,14 @@ function fakeEve(
     };
   }) as unknown as typeof fetch;
 
-  return { impl, posts, session };
+  return {
+    impl,
+    posts,
+    session,
+    set failNext(value: boolean) {
+      state.failNext = value;
+    },
+  };
 }
 
 function sink() {
@@ -663,6 +676,125 @@ describe("EveServer", () => {
     expect(out.sent.some((rumor) => rumor.kind === 1777)).toBe(true);
   });
 
+  it("refuses a control event a previous process already carried out", async () => {
+    /**
+     * The load-bearing one, and it was watched happening. The DM read floor is
+     * two days below the start time — NIP-59 randomises a wrap's timestamp
+     * backwards, so a strict floor drops messages sent now — which means every
+     * restart is handed the whole two-day window again. An in-memory guard has
+     * forgotten all of it, so a stop the operator pressed an hour before the
+     * restart was pressed again on whatever was running after it.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const first = server(eve, transport(), sink().impl);
+    await first.handle(inbound("msg-1", "first"));
+    const nostrId = store.transcriptFor(eve.session)!.nostrId;
+    const stop = {
+      id: "c-stop",
+      operator: PEER,
+      agent: AGENT,
+      session: nostrId,
+      command: "cancel" as const,
+    };
+
+    const before = eve.posts.length;
+    await first.control(stop);
+    const after = eve.posts.length;
+    // The first one has to have LANDED, or this test passes for the wrong
+    // reason — two refusals also leave the count unchanged.
+    expect(after).toBe(before + 1);
+
+    // A different process, reading the same home and the same relay window.
+    store.close();
+    store = HexStore.open(agentHome(home, AGENT).db);
+    const second = server(eve, transport(), sink().impl);
+    await second.control(stop);
+
+    expect(eve.posts.length).toBe(after);
+  });
+
+  it("retries a control event whose runtime was down, rather than dropping it", async () => {
+    // The other side of marking on success: an instruction that never landed is
+    // not an instruction that was carried out, and the next relay's redelivery
+    // is its retry.
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.handle(inbound("msg-1", "first"));
+    const nostrId = store.transcriptFor(eve.session)!.nostrId;
+    const stop = {
+      id: "c-stop",
+      operator: PEER,
+      agent: AGENT,
+      session: nostrId,
+      command: "cancel" as const,
+    };
+
+    eve.failNext = true;
+    await server_.control(stop);
+    expect(store.wasObeyed("c-stop")).toBe(false);
+
+    // A second process, so the in-memory guard is not what lets it through.
+    const retry = server(eve, transport(), sink().impl);
+    const before = eve.posts.length;
+    await retry.control(stop);
+    expect(eve.posts.length).toBe(before + 1);
+  });
+
+  it("takes no instructions for a run that already ended", async () => {
+    /**
+     * The scope rule at the granularity this side can be trusted at. Terminal
+     * is the only status that cannot be stale in the dangerous direction —
+     * `idle` can be, because the mirror updates on a drain, so refusing a stop
+     * on that basis would refuse the instruction that most needs to land.
+     */
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.handle(inbound("msg-1", "first"));
+    const record = store.transcriptFor(eve.session)!;
+    store.saveTranscript({ ...record, status: "aborted" });
+    const before = eve.posts.length;
+
+    const base = {
+      operator: PEER,
+      agent: AGENT,
+      session: record.nostrId,
+    };
+    await server_.control({ ...base, id: "c1", command: "cancel" });
+    await server_.control({ ...base, id: "c2", command: "compact" });
+    await server_.control({
+      ...base,
+      id: "c3",
+      command: "steer",
+      text: "more",
+    });
+
+    expect(eve.posts.length).toBe(before);
+    // And a refusal computed from a local mirror stays open to reconsidering.
+    expect(store.wasObeyed("c1")).toBe(false);
+  });
+
+  it("ignores an answer to a question the run is not waiting on", async () => {
+    // A redelivered `respond` for a request Eve has already closed would be
+    // posted as a second answer to a settled question.
+    const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    const server_ = server(eve, transport(), sink().impl);
+    await server_.handle(inbound("msg-1", "first"));
+    const nostrId = store.transcriptFor(eve.session)!.nostrId;
+    const before = eve.posts.length;
+
+    await server_.control({
+      id: "c1",
+      operator: PEER,
+      agent: AGENT,
+      session: nostrId,
+      command: "respond",
+      request: "req_gone",
+      option: "approve",
+    });
+
+    expect(eve.posts.length).toBe(before);
+  });
+
   it("carries each control verb to the route that serves it", async () => {
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
@@ -671,7 +803,12 @@ describe("EveServer", () => {
 
     // A reader knows the WIRE's session id — 32 random bytes — and never the
     // runtime's. Using the runtime's here would test a path no reader can take.
-    const nostrId = store.transcriptFor(eve.session)!.nostrId;
+    const record = store.transcriptFor(eve.session)!;
+    const nostrId = record.nostrId;
+    // The run has to actually be waiting on the request being answered — an
+    // answer to a question nobody asked is refused, which is the whole point of
+    // the scope rule.
+    store.saveTranscript({ ...record, pending: ["req_1"] });
     const base = { id: "", operator: PEER, agent: AGENT, session: nostrId };
     await server_.control({
       ...base,

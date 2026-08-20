@@ -31,6 +31,7 @@
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
 import { asRecord, payload, stringField } from "./types.js";
 import { sessionAddress } from "../nostr/encode.js";
+import { TERMINAL_STATUSES } from "../nostr/types.js";
 import type { Runtime } from "../runtime/types.js";
 import {
   KNOWN_TOOLS,
@@ -646,13 +647,28 @@ export class EveServer {
    *
    * Already-obeyed commands are dropped rather than repeated: four relays deliver
    * the same wrap four times, and a `cancel` obeyed twice stops a turn that had
-   * nothing to do with it.
+   * nothing to do with it. The memory is durable as well as in-process — the DM
+   * read floor is two days below the start time, so every restart is handed the
+   * whole window again and an in-memory guard has forgotten all of it. Watched
+   * happen: a restart re-pressed a stop from an hour earlier.
+   *
+   * Marked only once the instruction LANDS. One that failed because the runtime
+   * was down should be retried by the next redelivery rather than dropped
+   * forever, and the scope checks below are what make redelivering one that did
+   * land harmless. The residual is a crash between the two, which replays a
+   * command once — a no-op against a settled target for every verb but `steer`.
    */
   async control(control: SessionControl): Promise<void> {
     if (!this.obeyed.admit(control.id)) return;
+    const store = this.options.transcript.store;
+    if (store.wasObeyed(control.id)) return;
 
     // The one verb with no session behind it yet — it is how one begins.
-    if (control.command === "start") return await this.start(control);
+    if (control.command === "start") {
+      await this.start(control);
+      store.markObeyed(control.id);
+      return;
+    }
 
     /**
      * The address names the session on the WIRE; the runtime knows its own id.
@@ -663,9 +679,7 @@ export class EveServer {
      * event for a session this process has never published is not ours to act
      * on, which is also how a stale instruction for a forgotten run is refused.
      */
-    const record = this.options.transcript.store.transcriptForNostrId(
-      control.session,
-    );
+    const record = store.transcriptForNostrId(control.session);
     if (!record) {
       this.log(
         `[hex] a ${control.command} names a session this agent did not publish`,
@@ -675,6 +689,28 @@ export class EveServer {
 
     const say = (what: string) =>
       this.log(`[hex] ${short(control.operator)} → ${what}`);
+
+    /**
+     * A run that ended takes no more instructions.
+     *
+     * The spec's scope rule, at the only granularity this side can be trusted
+     * at. A finer one is tempting — refuse a `cancel` whose turn already ended —
+     * and it is not available: the turn ids are the runtime's and nothing here
+     * keeps them. What IS local and durable is the status, and terminal is the
+     * one value that cannot be stale in the dangerous direction. `idle` can:
+     * the mirror updates on a drain, so a session Eve is genuinely mid-turn on
+     * reads idle here for as long as it takes to read it, and refusing a stop
+     * on that basis would refuse the one instruction that most needs to land.
+     *
+     * NOT marked obeyed. A refusal computed from a local mirror should be free
+     * to come out differently on the next delivery.
+     */
+    if ((TERMINAL_STATUSES as readonly string[]).includes(record.status)) {
+      this.log(
+        `[hex] a ${control.command} for a run that already ${record.status} — ignored`,
+      );
+      return;
+    }
 
     /**
      * Give the turn a room before starting it.
@@ -737,6 +773,24 @@ export class EveServer {
           if (!control.request) {
             this.log(
               "[hex] a respond with no request id names nothing to answer",
+            );
+            return;
+          }
+          /**
+           * The request has to still be open, and the check runs HERE.
+           *
+           * After the drain, against a re-read record: the drain is what
+           * refreshes the pending set, so checking at the top of this method
+           * would refuse an answer to a question the drain was about to
+           * surface. The stored list reads as empty when it cannot be parsed,
+           * which errs towards refusing a legitimate answer — so the refusal
+           * names the request rather than passing in silence.
+           */
+          const open =
+            store.transcriptForNostrId(control.session)?.pending ?? [];
+          if (!open.includes(control.request)) {
+            this.log(
+              `[hex] ${control.request} is not a question ${record.sessionId} is waiting on — ignored`,
             );
             return;
           }
@@ -833,8 +887,15 @@ export class EveServer {
       this.log(
         `[hex] could not ${control.command} ${record.sessionId}: ${message(error)}`,
       );
+      // Deliberately NOT marked: the next relay's redelivery is this
+      // instruction's retry, and a runtime that was down a second ago may not
+      // be down now.
       return;
     }
+
+    // It landed. A redelivered copy is now refused for good rather than for as
+    // long as this process happens to live.
+    store.markObeyed(control.id);
 
     if (!conversation) return;
 
