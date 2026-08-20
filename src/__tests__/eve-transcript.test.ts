@@ -815,6 +815,55 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("publishes where to go when a run needs a sign-in", async () => {
+    /**
+     * `payment-required` told a reader the run was stuck and nothing about what
+     * would unstick it: the URL, the device code and the deadline all arrive on
+     * this event and were dropped. It is the one blocked state where the
+     * transcript is the instruction.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const pub = publisher(store, impl);
+
+    let index = 0;
+    await pub.handle({ type: "turn.started", data: { turnId: "turn_0" } }, ++index);
+    await pub.handle(
+      {
+        type: "authorization.required",
+        data: {
+          turnId: "turn_0",
+          name: "salesforce",
+          authorization: {
+            displayName: "Salesforce",
+            url: "https://example.com/device",
+            userCode: "WXYZ-1234",
+          },
+        },
+      },
+      ++index,
+    );
+
+    const turn = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 1777)
+      .at(-1)!;
+    expect(turn.content).toContain("https://example.com/device");
+    expect(turn.content).toContain("WXYZ-1234");
+    expect(turn.content).toContain("Salesforce");
+    // And it is not a question: nobody answers this one, they go and do it.
+    expect(turn.content).toContain("Nothing to reply to");
+
+    const head = sent
+      .map((s) => s.rumor)
+      .filter((r) => r.kind === 31777)
+      .at(-1)!;
+    expect(head.tags.find((t) => t[0] === "status")?.[1]).toBe(
+      "payment-required",
+    );
+    store.close();
+  });
+
   it("clears awaiting-authorisation when the sign-in resolves", async () => {
     /**
      * `authorization.required` put the head in `payment-required` and nothing

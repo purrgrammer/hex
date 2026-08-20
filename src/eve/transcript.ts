@@ -988,9 +988,47 @@ export class EveTranscript {
         break;
       }
 
-      case "authorization.required":
+      /**
+       * A sign-in the agent cannot do for itself.
+       *
+       * The status alone told a reader the run was stuck and nothing about what
+       * would unstick it — the URL, the device code and the deadline all
+       * arrived on this event and were dropped. A person who cannot see where
+       * to go cannot go there, so this is the one blocked state where the
+       * transcript IS the instruction.
+       *
+       * Prose rather than a part type of its own: every client renders text,
+       * and a URL in text is a link in any of them. A structured part would
+       * render better in exactly one client and be invisible in the rest.
+       */
+      case "authorization.required": {
+        const challenge = asRecord(data.authorization) ?? {};
+        const provider =
+          stringField(challenge, "displayName") ??
+          stringField(data, "name") ??
+          "a service";
+        const url = stringField(challenge, "url");
+        const code = stringField(challenge, "userCode");
+        const instructions = stringField(challenge, "instructions");
+        const expires = stringField(challenge, "expiresAt");
+
+        const lines = [
+          `This run needs you to sign in to ${provider} before it can go on.`,
+        ];
+        if (url) lines.push(`Open ${url}`);
+        if (code) lines.push(`and enter the code ${code}.`);
+        if (!url && instructions) lines.push(instructions);
+        if (expires) lines.push(`The invitation expires at ${expires}.`);
+        // Said out loud because it is the difference between this and every
+        // other blocked state: nobody has to answer here, only to go.
+        lines.push("Nothing to reply to — the run resumes on its own.");
+
+        await this.append("tool", [{ type: "text", text: lines.join(" ") }], {
+          alt: `Sign-in required: ${provider}`,
+        });
         await this.status("payment-required");
         break;
+      }
 
       /**
        * The sign-in resolved, whichever way it went.
