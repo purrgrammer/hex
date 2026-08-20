@@ -49,9 +49,24 @@ export type RoomToolsTransport = Pick<Transport, "reply"> & {
  * A run started over the control plane has no room, so these tools are not
  * offered; this is the answer if one is somehow reached anyway.
  */
+/**
+ * The tools that exist only where there is somewhere to speak.
+ *
+ * Named as a set so a call to one of them without a room can be answered with
+ * the reason rather than with "no such tool".
+ */
+const KNOWN_ROOM_TOOLS = new Set([
+  RESPOND_TOOL,
+  REACT_TOOL,
+  WHO_TOOL,
+  HISTORY_TOOL,
+]);
+
 const NO_ROOM =
   "this session has no room — it was started over the control plane, and its " +
-  "transcript is how it is read. There is nobody to reply to.";
+  "transcript is how it is read. There is nobody to reply to. Say what you " +
+  "would have said as your answer; it is already being published. Do not " +
+  "repeat work you have finished in order to find another way to report it.";
 
 export interface RoomToolsOptions {
   transport: RoomToolsTransport;
@@ -201,9 +216,7 @@ export class RoomTools implements ToolHost {
      * model that, and a model that has been handed a speaking tool will use
      * it — the answer then goes nowhere and the run looks like it said nothing.
      */
-    const specs: ToolSpec[] = this.options.incoming
-      ? this.chatTools()
-      : [];
+    const specs: ToolSpec[] = this.options.incoming ? this.chatTools() : [];
 
     // Whatever else the runtime can do — the same set either way, because
     // reading relays and publishing do not need a room.
@@ -316,8 +329,8 @@ export class RoomTools implements ToolHost {
         },
         prompt:
           "`chat.history` is the conversation so far, your own replies" +
-          " included. Anything that refers to earlier — \"as I said\", \"that" +
-          " one\", a pronoun with no antecedent — is a reason to read it rather" +
+          ' included. Anything that refers to earlier — "as I said", "that' +
+          ' one", a pronoun with no antecedent — is a reason to read it rather' +
           " than to guess.",
       });
 
@@ -347,13 +360,28 @@ export class RoomTools implements ToolHost {
     // Offered and callable are the same set. `list()` is what a well-behaved
     // model reads, but a call is what actually happens, and a model that names
     // a tool it was never shown must not reach the thing behind it.
-    if (!offered.some((spec) => spec.name === name))
+    if (!offered.some((spec) => spec.name === name)) {
+      /**
+       * A chat tool that is missing because there is no room says WHY.
+       *
+       * "There is no tool called chat_respond" reads to a model like a typo,
+       * and a model that has just finished a long piece of work and cannot
+       * report it does the work again looking for another way out. Seen live:
+       * the same patch published twice, ninety-nine seconds apart, with two of
+       * these refusals in between.
+       *
+       * The honest answer is not that the tool does not exist. It is that this
+       * run has nowhere to speak and does not need one.
+       */
+      if (!this.conversation && KNOWN_ROOM_TOOLS.has(name))
+        return { ok: false, output: NO_ROOM };
       return {
         ok: false,
         output: `there is no tool called "${call.name}". Available: ${offered
           .map((spec) => spec.name)
           .join(", ")}`,
       };
+    }
 
     this.activity.push({ name, detail: describeCall(call.arguments) });
 

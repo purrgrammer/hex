@@ -97,13 +97,22 @@ describe("RoomTools.list", () => {
     expect(roomless.room).toBeUndefined();
     expect(roomless.requestedBy).toBe(AUTHOR);
 
-    // And a call for one is refused with a sentence rather than a crash.
+    /**
+     * And a call for one is refused with the REASON, not with "no such tool".
+     *
+     * That distinction cost a real run. "There is no tool called chat_respond"
+     * reads to a model like a typo, so one that had just finished a long piece
+     * of work and could not report it did the work again looking for another
+     * way out — the same patch published twice, ninety-nine seconds apart.
+     */
     const refused = await roomless.call({
       name: RESPOND_TOOL,
       arguments: { text: "hello?" },
     });
     expect(refused.ok).toBe(false);
-    expect(refused.output).toContain("no tool called");
+    expect(refused.output).toContain("no room");
+    expect(refused.output).toContain("Do not repeat work");
+    expect(refused.output).not.toContain("no tool called");
   });
 
   it("reads the thread with both halves in it", async () => {
