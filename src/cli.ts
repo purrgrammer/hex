@@ -991,7 +991,6 @@ async function main(): Promise<void> {
                 }
               : undefined,
           log: (line) => console.log(line),
-          publicTransports: transcriptConfig.public,
           transcript: {
             agentPubkey: resolved.pubkey,
             slug: transcriptConfig.slug,
@@ -1002,22 +1001,19 @@ async function main(): Promise<void> {
             // depends on.
             sink: dms,
             /**
-             * And, for a run in a public room, the same events in the clear.
+             * And, for a run in a group, the same event filed in that group.
              *
-             * The SAME rumor, signed rather than rebuilt: a rumor is already
-             * hashed, so the two copies share an id and a reader holding both
-             * sees one session. Absent when nothing can sign, which is the
-             * same as no run ever being public.
+             * The SAME rumor, signed rather than rebuilt: it already carries
+             * its `h` tag, so signing adds a signature and nothing else and the
+             * two copies share an id. It goes to the group's own relay and
+             * nowhere else — that relay is the group's access control, and
+             * publishing anywhere else would route around it.
              */
-            clear: resolved.signer
+            group: resolved.signer
               ? {
-                  publish: async (rumor) => {
+                  publish: async (rumor, relay) => {
                     const event = await resolved.signer.signEvent(rumor);
-                    const outcomes = await publishTo(
-                      relays,
-                      config.relays.publish,
-                      event,
-                    );
+                    const outcomes = await publishTo(relays, [relay], event);
                     return {
                       delivered: outcomes
                         .filter((outcome) => outcome.ok)

@@ -404,9 +404,15 @@ describe("EveServer", () => {
     expect(tag(head, "transport")).toEqual(["transport", "nip-17"]);
     expect(tag(head, "channel")).toEqual(["channel", PEER]);
 
-    // Unindexed on purpose: a single-letter tag would let a relay group every
-    // session an agent ever ran with one person, which is the association the
-    // gift wrap exists to withhold.
+    /**
+     * Unindexed on purpose: a single-letter tag would let a relay group every
+     * session an agent ever ran with one person, which is the association the
+     * gift wrap exists to withhold.
+     *
+     * A NIP-29 run is the one exception and it is not one really — its `h` tag
+     * names the ROOM, not the correspondent, on a relay where the room is the
+     * one thing that is already public. This is a NIP-17 run, so there is none.
+     */
     expect(head.tags.some((t) => t[0] === "t" || t[0] === "h")).toBe(false);
   });
 
@@ -795,27 +801,21 @@ describe("EveServer", () => {
     expect(eve.posts.length).toBe(before);
   });
 
-  it("makes a run public only when the operator allowed it AND the room says so", async () => {
+  it("files a run in its group, and leaves every other run wrapped", async () => {
     /**
-     * Two conditions, and neither alone is enough. Publishing a transcript in
-     * the clear is permanent and carries every tool result the run produced, so
-     * the operator says which transports may; and a group that calls itself
-     * private is answering exactly this question.
+     * The room decides, and the GROUP RELAY decides who may read it. That is
+     * the whole reason there is no config gate here: the group's own access
+     * control is the decision, and asking an operator to make it a second time
+     * in a config file lets the two answers disagree.
      */
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const bus = transport();
-    const rooms: Record<string, unknown> = { public: true };
-    const withRoom = {
-      ...bus,
-      describeRoom: async () => rooms,
-    };
 
-    const open = (publicTransports?: string[]) =>
+    const open = (room?: { transport: string; id: string; relay?: string }) =>
       new EveServer({
         runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
-        transport: withRoom as never,
+        transport: bus,
         drainQuietMs: 40,
-        publicTransports,
         transcript: {
           agentPubkey: AGENT,
           slug: "hex",
@@ -825,17 +825,20 @@ describe("EveServer", () => {
           setTimer: () => 0,
           clearTimer: () => {},
         },
+      }).handle({
+        ...inbound("msg-" + (room?.id ?? "dm"), "first"),
+        ...(room ? { room } : {}),
       });
 
-    // Allowed transport, public room.
-    await open(["nip-17"]).handle(inbound("msg-1", "first"));
-    expect(store.transcriptFor(eve.session)!.carriage).toBe("public");
+    // A NIP-17 conversation has no group and no second reader.
+    await open();
+    expect(store.transcriptFor(eve.session)!.carriage).toBeUndefined();
 
-    // Same room, transport not allowed.
-    const second = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
-    const noneAllowed = new EveServer({
-      runtime: new EveRuntime({ host: HOST, fetchImpl: second.impl }),
-      transport: withRoom as never,
+    // A NIP-29 group does, and the relay hosting it is where the copy goes.
+    const grouped = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+    await new EveServer({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: grouped.impl }),
+      transport: bus,
       drainQuietMs: 40,
       transcript: {
         agentPubkey: AGENT,
@@ -846,30 +849,19 @@ describe("EveServer", () => {
         setTimer: () => 0,
         clearTimer: () => {},
       },
-    });
-    await noneAllowed.handle(inbound("msg-2", "second"));
-    expect(store.transcriptFor(second.session)!.carriage).toBeUndefined();
-
-    // Allowed transport, room that does not say it is public.
-    rooms.public = undefined;
-    const third = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
-    const privateRoom = new EveServer({
-      runtime: new EveRuntime({ host: HOST, fetchImpl: third.impl }),
-      transport: withRoom as never,
-      drainQuietMs: 40,
-      publicTransports: ["nip-17"],
-      transcript: {
-        agentPubkey: AGENT,
-        slug: "hex",
-        recipients: [PEER],
-        store,
-        sink: sink().impl,
-        setTimer: () => 0,
-        clearTimer: () => {},
+    }).handle({
+      ...inbound("msg-group", "first"),
+      room: {
+        transport: "nip-29",
+        id: "GROUPID",
+        relay: "wss://groups.example",
       },
     });
-    await privateRoom.handle(inbound("msg-3", "third"));
-    expect(store.transcriptFor(third.session)!.carriage).toBeUndefined();
+
+    const record = store.transcriptFor(grouped.session)!;
+    expect(record.carriage).toBe("group");
+    expect(record.group).toBe("GROUPID");
+    expect(record.groupRelay).toBe("wss://groups.example");
   });
 
   it("carries each control verb to the route that serves it", async () => {

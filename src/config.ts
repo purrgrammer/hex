@@ -74,21 +74,6 @@ export interface TranscriptConfig {
   deltas: boolean;
   /** Publish the kind-31779 definition at startup. */
   announce: boolean;
-  /**
-   * Transports whose runs are ALSO published in the clear, unwrapped.
-   *
-   * Empty by default, and deliberately: a public transcript is permanent, is
-   * signed by this agent, and contains everything the run did — the model's
-   * reasoning, every tool call and every tool result, including whatever a
-   * shell printed. Turning it on for a transport is a decision about all of
-   * that, so it is stated rather than inferred.
-   *
-   * `["nip-29"]` is the case it exists for: a group of forty people can see the
-   * question and, wrapped to the operator, exactly one of them can see the
-   * answer. Even then only a group whose own metadata says `public` gets a
-   * public transcript.
-   */
-  public: string[];
 }
 
 /**
@@ -450,19 +435,7 @@ function parseTranscript(value: unknown): TranscriptConfig | undefined {
         : requireString(record.slug, "transcript.slug"),
     deltas: record.deltas === undefined ? true : record.deltas === true,
     announce: record.announce === undefined ? true : record.announce === true,
-    public: parsePublicTransports(record.public),
   };
-}
-
-function parsePublicTransports(value: unknown): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value))
-    throw new ConfigError(
-      'transcript.public must be a list of transport names, e.g. ["nip-29"]',
-    );
-  return value.map((entry, index) =>
-    requireString(entry, `transcript.public[${index}]`),
-  );
 }
 
 function parseTools(value: unknown): ToolsConfig | undefined {

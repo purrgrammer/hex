@@ -69,6 +69,24 @@ export function parseSessionAddress(
   return { kind, agent, session };
 }
 
+/**
+ * File an already-built rumor in a NIP-29 group, re-hashing it.
+ *
+ * The tag has to be on the event BEFORE it is wrapped, or the wrapped copy and
+ * the group copy are two events with two ids and a reader holding both sees a
+ * session twice. Re-stamping is what makes that true: the id is the hash of the
+ * tags, so adding one after the fact without re-hashing produces an event whose
+ * id is a lie.
+ *
+ * Threaded here rather than through every input type because it applies to all
+ * of them equally and depends on nothing any of them carry.
+ */
+export function inGroup(rumor: Rumor, group: string | undefined): Rumor {
+  if (!group) return rumor;
+  if (rumor.tags.some((tag) => tag[0] === "h")) return rumor;
+  return stamp({ ...rumor, tags: [...rumor.tags, ["h", group]] });
+}
+
 function stamp(rumor: UnsignedRumor): Rumor {
   return {
     ...rumor,

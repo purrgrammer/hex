@@ -234,24 +234,7 @@ describe("transcript and eve sections", () => {
       slug: "hex",
       deltas: true,
       announce: true,
-      // Nothing is public unless it is said out loud. A transcript in the clear
-      // is permanent and carries every tool result the run produced.
-      public: [],
     });
-  });
-
-  it("takes the transports whose runs may be public", () => {
-    const config = parseConfig({
-      ...minimal,
-      transcript: { to: [OPERATOR], public: ["nip-29"] },
-    });
-    expect(config.transcript?.public).toEqual(["nip-29"]);
-    expect(() =>
-      parseConfig({
-        ...minimal,
-        transcript: { to: [OPERATOR], public: "nip-29" },
-      }),
-    ).toThrow(/list of transport names/);
   });
 
   it("refuses a transcript with nobody to read it", () => {

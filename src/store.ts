@@ -114,16 +114,19 @@ export interface StoredTranscript {
    */
   subjects?: string[][];
   /**
-   * How this run's events travel: wrapped to the operator, or also in the clear.
+   * How this run's events travel: wrapped to the operator, or also to its group.
    *
    * Decided ONCE, when the session opens, from the room it opened in — and
    * durable for the same reason the subjects beside it are. A session that
-   * started wrapped must never turn public halfway through: there is one chain
-   * and one `last-seq`, so a public copy that begins at turn twelve is a
-   * transcript with a hole nobody can fill. A group's own metadata flipping
-   * mid-run must not move it.
+   * started wrapped must never acquire a second copy halfway through: there is
+   * one chain and one `last-seq`, so a group copy beginning at turn twelve is a
+   * transcript with a hole nobody can fill.
    */
-  carriage?: "wrapped" | "public";
+  carriage?: "wrapped" | "group";
+  /** The NIP-29 group id this run happens in, for its `h` tag. */
+  group?: string;
+  /** The relay that hosts that group — the only one the group copy goes to. */
+  groupRelay?: string;
   /**
    * The running total includes a figure nobody billed.
    *
@@ -197,7 +200,9 @@ CREATE TABLE IF NOT EXISTS transcripts (
   channel     TEXT,
   described   INTEGER,
   subjects    TEXT,
-  carriage    TEXT
+  carriage    TEXT,
+  grp         TEXT,
+  grp_relay   TEXT
 );
 CREATE INDEX IF NOT EXISTS transcripts_status ON transcripts (status);
 CREATE INDEX IF NOT EXISTS transcripts_nostr_id ON transcripts (nostr_id);
@@ -296,6 +301,10 @@ export class HexStore {
       db.exec(`ALTER TABLE transcripts ADD COLUMN subjects TEXT`);
     if (!columns.includes("carriage"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN carriage TEXT`);
+    if (!columns.includes("grp"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN grp TEXT`);
+    if (!columns.includes("grp_relay"))
+      db.exec(`ALTER TABLE transcripts ADD COLUMN grp_relay TEXT`);
 
     db.prepare(`DELETE FROM obeyed WHERE at < ?`).run(
       Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
@@ -442,7 +451,9 @@ export class HexStore {
       channel: parseChannel(row.channel),
       described: row.described === 1,
       subjects: parseSubjects(row.subjects),
-      carriage: row.carriage === "public" ? "public" : undefined,
+      carriage: row.carriage === "group" ? "group" : undefined,
+      group: row.grp == null ? undefined : String(row.grp),
+      groupRelay: row.grp_relay == null ? undefined : String(row.grp_relay),
     };
   }
 
@@ -486,8 +497,8 @@ export class HexStore {
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
            cost, pending, said_turn, title, channel, described, subjects,
-           carriage
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           carriage, grp, grp_relay
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            seq = excluded.seq, prev = excluded.prev, turn = excluded.turn,
            status = excluded.status, trigger = excluded.trigger,
@@ -497,7 +508,8 @@ export class HexStore {
            cost = excluded.cost, pending = excluded.pending,
            said_turn = excluded.said_turn, title = excluded.title,
            channel = excluded.channel, described = excluded.described,
-           subjects = excluded.subjects, carriage = excluded.carriage`,
+           subjects = excluded.subjects, carriage = excluded.carriage,
+           grp = excluded.grp, grp_relay = excluded.grp_relay`,
       )
       .run(
         transcript.sessionId,
@@ -524,6 +536,8 @@ export class HexStore {
           ? JSON.stringify(transcript.subjects)
           : null,
         transcript.carriage ?? null,
+        transcript.group ?? null,
+        transcript.groupRelay ?? null,
       );
   }
 }

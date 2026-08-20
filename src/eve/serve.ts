@@ -146,20 +146,6 @@ export interface ServeOptions {
     operator?: string;
     subjects?: string[][];
   }) => Promise<string[]>;
-  /**
-   * Transports whose runs may also be published in the clear.
-   *
-   * Empty, and no run ever is. The gate is per transport because the question
-   * is per transport: a NIP-17 conversation has no public reading, while a
-   * NIP-29 group has forty people in it who can see the question and, without
-   * this, exactly one of whom can see the answer.
-   *
-   * Even for a listed transport a run is only public if its ROOM is — the
-   * group's own metadata has to say `public`. A private group's transcript
-   * stays wrapped, and its members go without rather than the room being
-   * unsealed on their behalf.
-   */
-  publicTransports?: string[];
   /** How long the pre-message read waits for silence. Injected in tests. */
   drainQuietMs?: number;
   log?: (line: string) => void;
@@ -499,27 +485,26 @@ export class EveServer {
    * refused because a profile could not be fetched costs it the whole job.
    */
   /**
-   * Wrapped, or wrapped and public — decided once, from the room.
+   * Wrapped to the operator, or filed in the group it happened in.
    *
-   * Two conditions, both required. The operator has to have listed the
-   * transport, because publishing a transcript in the clear is permanent and
-   * carries everything the run did, tool output included; and the room itself
-   * has to say it is public, because a group that calls itself private is
-   * answering exactly this question.
+   * A gift wrap answers "who may read this" with a list of names, which is
+   * right for a private message and wrong for a group: the question was
+   * visible to everyone in the room and the answer to one person who had not
+   * asked it.
    *
-   * A room that cannot be described is treated as private. The failure mode of
-   * guessing wrong in the other direction is a permanent public record of a
-   * private conversation, and no relay timeout is worth that.
+   * The answer is NOT to publish it in the open. It is to put it where the
+   * conversation already is — the relay that hosts the group, carrying the
+   * group's `h` tag — and let that relay decide who may read it, which is the
+   * thing it exists to decide. A private group stays private without this side
+   * having to reason about it, and a public group is readable by whoever the
+   * group is readable by.
+   *
+   * No config gate, for the same reason: the group's own access control is the
+   * decision, and asking an operator to make it a second time here would let
+   * the two answers disagree.
    */
-  private async carriageFor(room?: Room): Promise<"wrapped" | "public"> {
-    const allowed = this.options.publicTransports ?? [];
-    if (!room || !allowed.includes(room.transport)) return "wrapped";
-    try {
-      const about = await this.options.transport.describeRoom?.(room);
-      return about?.public === true ? "public" : "wrapped";
-    } catch {
-      return "wrapped";
-    }
+  private carriageFor(room?: Room): "wrapped" | "group" {
+    return room?.transport === "nip-29" && room.relay ? "group" : "wrapped";
   }
 
   private async grounding(
@@ -1140,7 +1125,17 @@ export class EveServer {
        * A NIP-17 conversation is named by the person on the other end.
        */
       transcript.channel = channelOf(inbound);
-      transcript.carriage = await this.carriageFor(inbound.room);
+      /**
+       * Only a group run carries a group. A NIP-17 room's "id" is the person
+       * on the other end, and tagging a transcript with `h` for THAT would put
+       * a correspondent's pubkey in a single-letter tag — the exact association
+       * the gift wrap exists to withhold.
+       */
+      transcript.carriage = this.carriageFor(inbound.room);
+      if (transcript.carriage === "group") {
+        transcript.group = inbound.room?.id;
+        transcript.groupRelay = inbound.room?.relay;
+      }
       /**
        * What the run is about, lifted off the message that started it.
        *

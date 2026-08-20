@@ -944,7 +944,7 @@ describe("EveTranscript", () => {
     store.close();
   });
 
-  it("publishes a public run in the clear as well as wrapped, and the same event", async () => {
+  it("files a group run in its group as well as wrapping it, as one event", async () => {
     /**
      * A gift wrap answers "who may read this" with a list of names, which is
      * right for a private message and wrong for a room of forty people: the
@@ -958,14 +958,16 @@ describe("EveTranscript", () => {
     const { impl, sent } = sink();
     const cleared: string[] = [];
     const pub = publisher(store, impl, SESSION, {
-      clear: {
-        publish: async (rumor) => {
+      group: {
+        publish: async (rumor: { id: string }) => {
           cleared.push(rumor.id);
           return { delivered: ["wss://relay.example"], undeliverable: [] };
         },
       },
     });
-    pub.carriage = "public";
+    pub.carriage = "group";
+    pub.group = "GROUPID";
+    pub.groupRelay = "wss://groups.example";
 
     let index = 0;
     await pub.handle(
@@ -986,11 +988,18 @@ describe("EveTranscript", () => {
 
     const wrapped = sent.map((s) => s.rumor).filter((r) => r.kind === 1777);
     expect(wrapped.length).toBeGreaterThan(0);
-    for (const rumor of wrapped) expect(cleared).toContain(rumor.id);
+    for (const rumor of wrapped) {
+      // One event, two doors. The `h` tag is on the copy that gets WRAPPED as
+      // well, which is what makes the ids match — tagging only the group copy
+      // would put two events at one `seq`, the signature this NIP tells a
+      // client to read as a forgery.
+      expect(rumor.tags).toContainEqual(["h", "GROUPID"]);
+      expect(cleared).toContain(rumor.id);
+    }
     store.close();
   });
 
-  it("keeps a wrapped run wrapped, whatever the clear door offers", async () => {
+  it("keeps a wrapped run wrapped, whatever the group door offers", async () => {
     // The default, and the one that must not drift: a session opened in a
     // private conversation has no public reading, and a sink being present is
     // not a decision about this run.
@@ -998,8 +1007,8 @@ describe("EveTranscript", () => {
     const { impl } = sink();
     const cleared: string[] = [];
     const pub = publisher(store, impl, SESSION, {
-      clear: {
-        publish: async (rumor) => {
+      group: {
+        publish: async (rumor: { id: string }) => {
           cleared.push(rumor.id);
           return { delivered: ["wss://relay.example"], undeliverable: [] };
         },
@@ -1027,7 +1036,7 @@ describe("EveTranscript", () => {
     store.close();
   });
 
-  it("stops a public copy at the first refusal rather than leaving a hole", async () => {
+  it("stops a group copy at the first refusal rather than leaving a hole", async () => {
     /**
      * There is one chain and one `last-seq`. A public copy missing an event in
      * the middle is a gap a reader is required to render and can never fill; a
@@ -1038,14 +1047,16 @@ describe("EveTranscript", () => {
     const { impl, sent } = sink();
     const attempts: string[] = [];
     const pub = publisher(store, impl, SESSION, {
-      clear: {
-        publish: async (rumor) => {
+      group: {
+        publish: async (rumor: { id: string }) => {
           attempts.push(rumor.id);
           return { delivered: [], undeliverable: ["wss://relay.example"] };
         },
       },
     });
-    pub.carriage = "public";
+    pub.carriage = "group";
+    pub.group = "GROUPID";
+    pub.groupRelay = "wss://groups.example";
 
     let index = 0;
     await pub.handle(

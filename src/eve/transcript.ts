@@ -27,6 +27,7 @@ import {
   buildDelta,
   buildSessionHead,
   buildTurn,
+  inGroup,
 } from "../nostr/encode.js";
 import type {
   AgentToolSpec,
@@ -66,22 +67,27 @@ export interface RumorSink {
 }
 
 /**
- * The other door: the same rumor, signed and published where anyone can read it.
+ * The other door: the same event, signed and filed in the group it happened in.
  *
  * A gift wrap answers "who may read this" with a list of names, which is right
- * for a private message and wrong for a public group — a run somebody started in
- * a room of forty people produced a transcript exactly one of them could open.
- * The spec's own answer is to publish the same events in the clear, signed by
- * the agent's key, to the agent's own write relays; the group answer already
- * carries the session address, so anyone in the room can follow it.
+ * for a private message and wrong for a group — a run somebody started in a room
+ * of forty people produced a transcript exactly one of them could open, and that
+ * one had not asked the question.
  *
- * The SAME rumor, never a rebuilt one. A rumor is already hashed, so signing it
- * adds a signature and nothing else, and the two copies share an id — which is
- * what lets a reader holding both see one session rather than two.
+ * NOT published in the open. It goes to the relay that hosts the group, carrying
+ * the group's `h` tag, and that relay decides who may read it — which is the
+ * thing a group relay exists to decide. A private group stays private without
+ * this side reasoning about it at all, and no operator has to make an access
+ * decision twice in two places that can disagree.
+ *
+ * The SAME rumor, never a rebuilt one: it carries its `h` tag before it is
+ * wrapped, so signing adds a signature and nothing else and the two copies share
+ * an id. That is what lets a reader holding both see one session rather than two.
  */
-export interface ClearSink {
+export interface GroupSink {
   publish(
     rumor: Rumor,
+    relay: string,
   ): Promise<{ delivered: string[]; undeliverable: string[] }>;
 }
 
@@ -94,12 +100,12 @@ export interface EveTranscriptOptions {
   store: HexStore;
   sink: RumorSink;
   /**
-   * Where a public run's events also go. Absent means no run is ever public.
+   * Where a group run's events also go. Absent means they only ever wrap.
    *
    * Whether a given run uses it is the run's own `carriage`, decided from the
    * room when the session opens — not from this being present.
    */
-  clear?: ClearSink;
+  group?: GroupSink;
   /** Off means nothing streams; the turns still arrive when they close. */
   deltas?: boolean;
   /**
@@ -257,26 +263,58 @@ export class EveTranscript {
   }
 
   /** Wrapped to the operator, or wrapped AND published in the clear. */
-  get carriage(): "wrapped" | "public" {
+  get carriage(): "wrapped" | "group" {
     return this.record.carriage ?? "wrapped";
   }
 
-  set carriage(value: "wrapped" | "public") {
-    this.record.carriage = value === "public" ? "public" : undefined;
+  set carriage(value: "wrapped" | "group") {
+    this.record.carriage = value === "group" ? "group" : undefined;
     this.options.store.saveTranscript(this.record);
   }
 
   /**
-   * Stops the public copy after one failure, for the rest of this process.
+   * The group this run is in. Every one of its events carries it as an `h` tag.
    *
-   * There is one chain and one `last-seq`, so a public copy with a hole in the
+   * On the rumor BEFORE it is wrapped, so the wrapped copy and the group copy
+   * are one event with one id. A DM relay never sees it either way — it is
+   * inside the seal.
+   */
+  get group(): string | undefined {
+    return this.record.group;
+  }
+
+  set group(value: string | undefined) {
+    this.record.group = value;
+    this.options.store.saveTranscript(this.record);
+  }
+
+  /** The relay hosting that group. The group copy goes nowhere else. */
+  get groupRelay(): string | undefined {
+    return this.record.groupRelay;
+  }
+
+  set groupRelay(value: string | undefined) {
+    this.record.groupRelay = value;
+    this.options.store.saveTranscript(this.record);
+  }
+
+  /**
+   * Stops the group copy after one refusal, for the rest of this process.
+   *
+   * There is one chain and one `last-seq`, so a group copy with a hole in the
    * middle is worse than one that visibly stops short: a reader is required to
    * render a gap it can never fill, where a short chain simply reads as behind.
    * In memory rather than durable on purpose — a restart is allowed to try
    * again, and relays dedupe by event id, so a retry either fills the tail or
    * changes nothing.
+   *
+   * Today it stops on the first event of every group run, because NIP-29 relays
+   * accept a fixed list of kinds and none of them lists these — measured, not
+   * assumed: `groups.0xchat.com` answers kind 1777 and 31777 with "not allowed"
+   * to an authenticated member. That is the honest shape of the constraint, and
+   * the latch is what keeps it to one log line instead of one per turn.
    */
-  private clearStopped = false;
+  private groupStopped = false;
 
   /** How full the window was when compaction was asked for, until it completes. */
   private compactingAt?: number;
@@ -1506,11 +1544,19 @@ export class EveTranscript {
 
   /** Send one rumor. Returns whether it reached at least one recipient. */
   private async send(
-    rumor: Rumor,
+    original: Rumor,
     what: string,
     ephemeral = false,
   ): Promise<boolean> {
     if (this.options.recipients.length === 0) return false;
+    /**
+     * Filed in its group before it goes anywhere, wrapped copy included.
+     *
+     * One event, one id, two doors. Tagging only the group copy would produce
+     * two events a reader would count as two turns at one `seq` — which this
+     * NIP tells a client to treat as the signature of a forgery.
+     */
+    const rumor = inGroup(original, this.group);
     try {
       const { delivered, undeliverable } = await this.options.sink.publishRumor(
         rumor,
@@ -1539,7 +1585,7 @@ export class EveTranscript {
       // Read this far, and everything up to here is on a relay.
       this.record.streamIndex = this.atIndex;
       this.options.store.saveTranscript(this.record);
-      await this.sendClear(rumor, what, ephemeral);
+      await this.sendGroup(rumor, what, ephemeral);
       return true;
     } catch (error) {
       this.log(
@@ -1552,39 +1598,40 @@ export class EveTranscript {
   }
 
   /**
-   * The public copy, for a run happening somewhere public.
+   * The group copy, for a run happening in one.
    *
    * After the wrap and never instead of it: the operator's copy is the one the
-   * agent's own reader depends on, and a public relay that is down must not
-   * hold it hostage. So a failure here does not freeze the cursor — it stops
-   * the public copy and says so, which leaves a chain that is visibly short
-   * rather than one with a hole in the middle.
+   * agent's own reader depends on, and a group relay that is down — or that
+   * refuses the kind — must not hold it hostage. So a failure here does not
+   * freeze the cursor; it stops the group copy and says so, leaving a chain
+   * that is visibly short rather than one with a hole in the middle.
    *
-   * Deltas are excluded. They evaporate at the relay by design, and a public
-   * stream of them is a separate question with a separate answer; what the
-   * public copy owes a reader is the turns and the head.
+   * Deltas are excluded. They evaporate at the relay by design, and streaming
+   * them into a group is a separate question with a separate answer; what the
+   * group copy owes a reader is the turns and the head.
    */
-  private async sendClear(
+  private async sendGroup(
     rumor: Rumor,
     what: string,
     ephemeral: boolean,
   ): Promise<void> {
     if (ephemeral) return;
-    if (this.carriage !== "public") return;
-    const clear = this.options.clear;
-    if (!clear || this.clearStopped) return;
+    if (this.carriage !== "group") return;
+    const sink = this.options.group;
+    const relay = this.groupRelay;
+    if (!sink || !relay || this.groupStopped) return;
 
     try {
-      const { delivered } = await clear.publish(rumor);
+      const { delivered } = await sink.publish(rumor, relay);
       if (delivered.length > 0) return;
-      this.clearStopped = true;
+      this.groupStopped = true;
       this.log(
-        `[hex] no relay took the public copy of ${what}; this session's public transcript stops here`,
+        `[hex] ${relay} did not take the group copy of ${what}; this session's group transcript stops here`,
       );
     } catch (error) {
-      this.clearStopped = true;
+      this.groupStopped = true;
       this.log(
-        `[hex] the public copy of ${what} failed, so this session's public transcript stops here: ${
+        `[hex] the group copy of ${what} failed, so this session's group transcript stops here: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
