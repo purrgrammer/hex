@@ -413,3 +413,94 @@ describe("nostr.resolve", () => {
     expect(result.output).toContain("not a decodable");
   });
 });
+
+describe("nostr.resolve hands back the tag, not just the thing", () => {
+  /**
+   * Turning an entity into a tag is the step models get wrong.
+   *
+   * An `naddr` becomes `["a", "<kind>:<pubkey>:<d>"]` and nothing about the
+   * bech32 says so, so a model asked to find replies to an article built the
+   * value by hand and queried for something that does not exist. Resolving
+   * already knows every part; withholding the assembled string was making the
+   * caller redo work this tool had finished.
+   */
+  it("gives an `a` tag for an naddr even when the event is not there", async () => {
+    const pubkey = "b".repeat(64);
+    const entity = nip19.naddrEncode({
+      kind: 30023,
+      pubkey,
+      identifier: "my-article",
+    });
+
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const tools = new KnowledgeTools({ relays, readRelays: [relay.url] });
+
+    const result = await tools.call(RESOLVE_TOOL, { entity });
+    const read = JSON.parse(result.output) as {
+      tag: string[];
+      address: string;
+      filter: Record<string, unknown>;
+    };
+
+    // Not `ok: false`. The coordinate is derivable from the naddr alone, so a
+    // relay that lacks the event is no reason to withhold the one string the
+    // caller most needs.
+    expect(result.ok).toBe(true);
+    expect(read.tag).toEqual(["a", `30023:${pubkey}:my-article`]);
+    expect(read.address).toBe(`30023:${pubkey}:my-article`);
+    expect(read.filter).toEqual({
+      kinds: [30023],
+      authors: [pubkey],
+      "#d": ["my-article"],
+    });
+  });
+});
+
+describe("nostr.req takes a tag the way the schema asks for it", () => {
+  /**
+   * The bug this closes ran the wrong query every time and said nothing.
+   *
+   * `tags` was a free-form map, which compiles to a JSON Schema object with
+   * `additionalProperties` and no `properties` — an OpenAI-shaped provider
+   * cannot express that, so the model sent `tags: {}` and the filter went out
+   * as `{kinds:[1621]}`: the whole relay instead of the one repository asked
+   * about, answered confidently from a hundred unrelated events.
+   */
+  it("reads a bare top-level `a`, which is what the tool now asks for", async () => {
+    const address = `30617:${"c".repeat(64)}:grimoire`;
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const tools = new KnowledgeTools({ relays, readRelays: [relay.url] });
+
+    const result = await tools.call(REQ_TOOL, {
+      kinds: [1621],
+      a: [address],
+      limit: 10,
+    });
+    const read = JSON.parse(result.output) as {
+      filter: Record<string, unknown>;
+    };
+
+    expect(result.ok).toBe(true);
+    // The tag REACHED the filter. Before, this key was simply absent.
+    expect(read.filter["#a"]).toEqual([address]);
+  });
+
+  it("still reads the spec spelling and the map, so nothing that worked stops", async () => {
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const tools = new KnowledgeTools({ relays, readRelays: [relay.url] });
+
+    const viaHash = JSON.parse(
+      (await tools.call(REQ_TOOL, { "#t": ["nostr"] })).output,
+    ) as { filter: Record<string, unknown> };
+    expect(viaHash.filter["#t"]).toEqual(["nostr"]);
+
+    const viaMap = JSON.parse(
+      (await tools.call(REQ_TOOL, { tags: { t: ["nostr"] } })).output,
+    ) as { filter: Record<string, unknown> };
+    expect(viaMap.filter["#t"]).toEqual(["nostr"]);
+  });
+});
+

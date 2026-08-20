@@ -150,6 +150,27 @@ export class KnowledgeTools {
               type: "number",
               description: "Unix seconds; only events at or before this time.",
             },
+            e: {
+              type: "array",
+              items: { type: "string" },
+              description: "Event ids, hex — replies to or references of them.",
+            },
+            p: {
+              type: "array",
+              items: { type: "string" },
+              description: "Pubkeys, hex — events mentioning those people.",
+            },
+            a: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                'Addressable coordinates, "<kind>:<pubkey>:<d>". `nostr.resolve` returns one ready-made as its `tag`.',
+            },
+            t: {
+              type: "array",
+              items: { type: "string" },
+              description: "Hashtags, without the #.",
+            },
             tags: {
               type: "object",
               description:
@@ -188,7 +209,9 @@ export class KnowledgeTools {
         name: RESOLVE_TOOL,
         description:
           "Turn a bech32 entity into what it names: a profile for an npub or " +
-          "nprofile, the event itself for a note, nevent or naddr.",
+          "nprofile, the event itself for a note, nevent or naddr. Also returns " +
+          "`tag` and `filter` — the tag to put on an event and the filter to " +
+          "query by — so you never have to build an `a` or `e` value yourself.",
         parameters: {
           type: "object",
           properties: {
@@ -347,6 +370,23 @@ export class KnowledgeTools {
         Object.entries(args).filter(([key]) => key.startsWith("#")),
       ),
     );
+    /**
+     * Top-level `e`, `a`, `t` — bare, the way the tool now ASKS for them.
+     *
+     * The schema used to offer a free-form `tags` map, which compiles to a JSON
+     * Schema object with `additionalProperties` and no `properties`. An
+     * OpenAI-shaped provider cannot express that, so every call arrived with
+     * `tags: {}` and the query ran with no tag at all. The parameters are named
+     * now, and a single-character key is unambiguously one of them: every other
+     * parameter this tool takes is a word.
+     */
+    tagSources.push(
+      Object.fromEntries(
+        Object.entries(args).filter(
+          ([key, value]) => key.length === 1 && value !== undefined,
+        ),
+      ),
+    );
 
     let tagged = 0;
     for (const source of tagSources)
@@ -474,13 +514,31 @@ export class KnowledgeTools {
         { timeoutMs: this.options.requestTimeoutMs },
       );
       const profile = events.sort((a, b) => b.created_at - a.created_at)[0];
+      const metadata = profile ? safeJson(profile.content) : null;
       return {
         ok: true,
         output: JSON.stringify({
           type: "profile",
           pubkey,
           npub: nip19.npubEncode(pubkey),
-          metadata: profile ? safeJson(profile.content) : null,
+          metadata,
+          /**
+           * How to REFER to this in a filter or an event, spelled out.
+           *
+           * A model that has resolved an entity almost always wants to query
+           * about it next, and turning it into the right tag is a step it gets
+           * wrong — `naddr` into an `a` value especially. Handing back the tag
+           * removes the step rather than documenting it.
+           */
+          tag: ["p", pubkey],
+          filter: { authors: [pubkey] },
+          // Said out loud, because `metadata: null` alone reads to a model as
+          // "this person has no name" rather than "nobody here had their kind 0".
+          ...(metadata
+            ? {}
+            : {
+                note: "No kind 0 for this pubkey on the relays Hex reads. The person exists; their profile is not here.",
+              }),
         }),
       };
     }
@@ -502,6 +560,8 @@ export class KnowledgeTools {
             output: JSON.stringify({
               type: "event",
               event: describeEvent(event),
+              tag: ["e", event.id],
+              filter: { ids: [event.id] },
             }),
           }
         : {
@@ -519,17 +579,36 @@ export class KnowledgeTools {
         { timeoutMs: this.options.requestTimeoutMs },
       );
       const event = events.sort((a, b) => b.created_at - a.created_at)[0];
+      const address = `${kind}:${pubkey}:${identifier}`;
+      /**
+       * The `a` value, whether or not the event itself was found.
+       *
+       * An addressable event's coordinate is derivable from the naddr alone, so
+       * a relay that does not hold the event is no reason to withhold the one
+       * string the caller is most likely to need — and "not found" plus no tag
+       * is what sent models off inventing their own.
+       */
+      const addressable = {
+        tag: ["a", address],
+        filter: { kinds: [kind], authors: [pubkey], "#d": [identifier] },
+        address,
+      };
       return event
         ? {
             ok: true,
             output: JSON.stringify({
               type: "event",
               event: describeEvent(event),
+              ...addressable,
             }),
           }
         : {
-            ok: false,
-            output: `${entity} could not be loaded from the relays Hex reads`,
+            ok: true,
+            output: JSON.stringify({
+              type: "address",
+              ...addressable,
+              note: `${entity} is not on the relays Hex reads, but this is how to refer to it.`,
+            }),
           };
     }
 
