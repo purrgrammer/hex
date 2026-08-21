@@ -21,7 +21,6 @@ import {
   type RelayHealth,
 } from "./relays.js";
 import { resolveSigner } from "./signer.js";
-import { connect } from "node:net";
 
 import { announceIdentity } from "./identity.js";
 import { retract } from "./retract.js";
@@ -36,7 +35,15 @@ import { resolveMemberships } from "./concord/join.js";
 import { channelStreams, currentRoot } from "./concord/membership.js";
 import { TransportRouter } from "./transports/router.js";
 import { fileMessageTags, imetaTag, upload, type Uploaded } from "./blossom.js";
-import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
+import {
+  HexStore,
+  LeaseHeldError,
+  WRITER_LEASE_HEARTBEAT_SECONDS,
+  agentHome,
+  expandHome,
+  DEFAULT_HOME,
+  type WriterLease,
+} from "./store.js";
 import { streamSession } from "./eve/stream.js";
 import { EveTranscript, type RumorSink } from "./eve/transcript.js";
 import { EveServer } from "./eve/serve.js";
@@ -83,6 +90,44 @@ Config defaults to ./hex.config.json.
 Secrets come from the environment. Every command loads a \`.env\` beside the
 config, or --env-file <path>; a variable already exported always wins.
 `;
+
+/**
+ * Take the writer lease or die saying who has it.
+ *
+ * `serve` and `eve` both publish transcript heads under one key, and two of
+ * them writing at once forks a session's seq chain. The heartbeat keeps the
+ * lease alive; one that comes back "lost" means another process took over,
+ * and the only safe move is to stop writing before anything forks.
+ */
+function holdWriterLease(store: HexStore, command: string): WriterLease {
+  let lease: WriterLease;
+  try {
+    lease = store.acquireWriterLease();
+  } catch (error) {
+    if (error instanceof LeaseHeldError)
+      fail(
+        `${error.message} — another \`hex serve\` or \`hex eve\` owns this ` +
+          `agent home; stop it before running \`hex ${command}\``,
+      );
+    throw error;
+  }
+  const beat = setInterval(() => {
+    if (lease.heartbeat()) return;
+    console.error(
+      "[hex] the writer lease was taken over by another process — exiting before two writers fork the store",
+    );
+    process.exit(1);
+  }, WRITER_LEASE_HEARTBEAT_SECONDS * 1000);
+  beat.unref();
+  return {
+    generation: lease.generation,
+    heartbeat: () => lease.heartbeat(),
+    release: () => {
+      clearInterval(beat);
+      lease.release();
+    },
+  };
+}
 
 /** The NIP-29 half of a config's transports. */
 function groupTransports(transports: TransportConfig[]) {
@@ -329,7 +374,8 @@ async function main(): Promise<void> {
        */
       case "rm": {
         const ids = args.filter((arg) => !arg.startsWith("-"));
-        if (ids.length === 0) fail('usage: hex rm [config] <event-id...> [--reason "why"]');
+        if (ids.length === 0)
+          fail('usage: hex rm [config] <event-id...> [--reason "why"]');
 
         const resolved = await resolveSigner(config.identity.signer, {
           baseDir: loaded.baseDir,
@@ -359,7 +405,9 @@ async function main(): Promise<void> {
         for (const target of result.targets)
           console.log(
             `${target.id.slice(0, 12)}  ${
-              target.refused ? `refused — ${target.refused}` : `kind ${target.kind}  retracted`
+              target.refused
+                ? `refused — ${target.refused}`
+                : `kind ${target.kind}  retracted`
             }`,
           );
         if (result.request)
@@ -380,7 +428,8 @@ async function main(): Promise<void> {
               " these events, and readers that cached them, are not obliged to" +
               " forget.",
           );
-        if (result.targets.some((target) => target.refused)) process.exitCode = 1;
+        if (result.targets.some((target) => target.refused))
+          process.exitCode = 1;
         return;
       }
 
@@ -401,36 +450,6 @@ async function main(): Promise<void> {
         if (named.length === 0 && !values.all)
           fail("usage: hex stop [config] <session-id...> | --all");
 
-        /**
-         * Refuse while the daemon is up, unless told otherwise.
-         *
-         * Two processes publishing heads for one session fork its `seq` chain,
-         * and a reader is required to read a fork as a fork rather than as a
-         * continuation — an unfixable mess, from a mistake that takes one
-         * forgotten terminal. The tool bridge's port is the tell: `serve`
-         * binds it and nothing else does.
-         */
-        const bridgePort = config.eve?.bridge?.port;
-        if (bridgePort && !values.force) {
-          const up = await new Promise<boolean>((settle) => {
-            const socket = connect({ port: bridgePort, host: "127.0.0.1" });
-            const done = (answer: boolean) => {
-              socket.destroy();
-              settle(answer);
-            };
-            socket.setTimeout(500, () => done(false));
-            socket.once("connect", () => done(true));
-            socket.once("error", () => done(false));
-          });
-          if (up)
-            fail(
-              `something is listening on the tool bridge port ${bridgePort}, ` +
-                "which means `hex serve` is running. Stop it first — two " +
-                "processes publishing heads for one session fork its seq " +
-                "chain. Pass --force if you are sure it is something else.",
-            );
-        }
-
         const resolved = await resolveSigner(config.identity.signer, {
           baseDir: loaded.baseDir,
           relays,
@@ -442,6 +461,25 @@ async function main(): Promise<void> {
           resolved.pubkey,
         );
         const store = HexStore.open(home.db);
+
+        /**
+         * Refuse while the daemon is up, unless told otherwise.
+         *
+         * Two processes publishing heads for one session fork its `seq` chain,
+         * and a reader is required to read a fork as a fork rather than as a
+         * continuation — an unfixable mess, from a mistake that takes one
+         * forgotten terminal. The writer lease is the tell: `serve` and `eve`
+         * hold it, and a live row names exactly who.
+         */
+        const holder = store.writerLeaseHolder();
+        if (holder && !values.force)
+          fail(
+            `hex serve is running (pid ${holder.pid} on ${holder.hostname}). ` +
+              "Stop it first — two processes publishing heads for one " +
+              "session fork its seq chain. Pass --force if you are sure " +
+              "it is dead.",
+          );
+
         const targets = values.all
           ? store.openTranscripts().map((record) => record.sessionId)
           : named;
@@ -454,7 +492,9 @@ async function main(): Promise<void> {
 
         const transcriptConfig = config.transcript;
         if (!transcriptConfig)
-          fail("no transcript configuration — nothing publishes a head to close");
+          fail(
+            "no transcript configuration — nothing publishes a head to close",
+          );
 
         const dms = new Nip17Transport({
           relays,
@@ -591,7 +631,8 @@ async function main(): Promise<void> {
               currentRoot(membership)?.epoch ?? "?"
             }`,
           );
-          for (const relay of membership.relays) console.log(`  relay ${relay}`);
+          for (const relay of membership.relays)
+            console.log(`  relay ${relay}`);
           for (const channel of membership.channels) {
             const streams = channelStreams(membership, channel);
             console.log(
@@ -846,6 +887,9 @@ async function main(): Promise<void> {
           resolved.pubkey,
         );
         const store = HexStore.open(home.db);
+        // Exclusive: a second `eve` or a running `serve` following the same
+        // home would fork a session's seq chain.
+        const lease = holdWriterLease(store, "eve");
 
         /**
          * Where a rumor goes.
@@ -973,6 +1017,7 @@ async function main(): Promise<void> {
         else if (disconnected) await transcript.close();
         else await transcript.close("done");
         transport?.stop();
+        lease.release();
         store.close();
         await resolved.close();
         return;
@@ -1005,6 +1050,9 @@ async function main(): Promise<void> {
           resolved.pubkey,
         );
         const store = HexStore.open(home.db);
+        // Exclusive: a second `serve` — or an `eve` following one of this
+        // daemon's sessions — would fork a seq chain.
+        const lease = holdWriterLease(store, "serve");
 
         const startedAt = Math.floor(Date.now() / 1000);
         const dms = new Nip17Transport({
@@ -1552,6 +1600,7 @@ async function main(): Promise<void> {
         await server.close();
         bridge?.stop();
         transport.stop();
+        lease.release();
         store.close();
         await resolved.close();
         return;

@@ -23,7 +23,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname as osHostname } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { TERMINAL_STATUSES } from "./nostr/types.js";
@@ -352,6 +352,23 @@ CREATE TABLE IF NOT EXISTS concord_rumors (
   own      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS concord_rumors_at ON concord_rumors (at);
+
+/*
+ * Who may write to this home right now.
+ *
+ * A row, not a pidfile: acquisition inside BEGIN IMMEDIATE is atomic across
+ * processes, and the TTL means a SIGKILL'd holder expires instead of wedging
+ * the store. The generation only ever grows — release zeroes expires_at and
+ * keeps the row — because it doubles as the fencing token later writes check.
+ */
+CREATE TABLE IF NOT EXISTS writer_lease (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),
+  generation  INTEGER NOT NULL,
+  pid         INTEGER NOT NULL,
+  hostname    TEXT NOT NULL,
+  acquired_at INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL
+);
 `;
 
 /**
@@ -381,6 +398,62 @@ export interface PublishedEvent {
   subject: string;
   sha256: string;
   at: number;
+}
+
+/**
+ * How long a lease lives without a heartbeat.
+ *
+ * Long enough that a stalled event loop does not lose a healthy process its
+ * lease, short enough that a SIGKILL'd holder frees the store before anyone
+ * files a bug about it. Heartbeats should land at a quarter of this.
+ */
+export const WRITER_LEASE_TTL_SECONDS = 60;
+
+/** How often a holder should call `heartbeat()`. */
+export const WRITER_LEASE_HEARTBEAT_SECONDS = 15;
+
+/** Who holds the writer lease, as the row remembers them. */
+export interface WriterLeaseHolder {
+  generation: number;
+  pid: number;
+  hostname: string;
+  acquiredAt: number;
+  expiresAt: number;
+}
+
+/**
+ * An exclusive claim on writing to one agent home.
+ *
+ * An interface rather than a class on purpose: today the token comes from a
+ * sqlite row, later it can come from a published, expiring claim on the wire —
+ * the generation semantics are identical either way, so code fencing on
+ * `generation` never has to know which one it holds.
+ */
+export interface WriterLease {
+  readonly generation: number;
+  /**
+   * Extend the lease, and say whether it is still ours.
+   *
+   * False means another process took over — the only correct response is to
+   * stop writing and exit loudly, because every write from here on forks
+   * state the new holder believes it owns.
+   */
+  heartbeat(): boolean;
+  /** Let it go on a clean shutdown, keeping the generation for the next holder. */
+  release(): void;
+}
+
+/** Thrown when the lease is held by a live process. Names the holder. */
+export class LeaseHeldError extends Error {
+  constructor(readonly holder: WriterLeaseHolder) {
+    const age = Math.max(0, Math.floor(Date.now() / 1000) - holder.acquiredAt);
+    super(
+      `the writer lease on this agent home is held by pid ${holder.pid} ` +
+        `on ${holder.hostname} (generation ${holder.generation}, ` +
+        `acquired ${age}s ago)`,
+    );
+    this.name = "LeaseHeldError";
+  }
 }
 
 export class HexStore {
@@ -464,6 +537,114 @@ export class HexStore {
     );
 
     return new HexStore(db);
+  }
+
+  // ── Writer lease ──────────────────────────────────────────────────────────
+
+  /**
+   * Take the exclusive right to write to this home, or say who has it.
+   *
+   * The whole read-decide-write runs under BEGIN IMMEDIATE, so two processes
+   * racing for one file cannot both see "expired" and both take generation
+   * N+1 — the loser blocks on the lock and then sees the winner's row.
+   */
+  acquireWriterLease(options?: { ttlSecs?: number }): WriterLease {
+    const ttl = options?.ttlSecs ?? WRITER_LEASE_TTL_SECONDS;
+    const now = Math.floor(Date.now() / 1000);
+    this.db.exec("BEGIN IMMEDIATE");
+    let generation: number;
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT generation, pid, hostname, acquired_at, expires_at
+             FROM writer_lease WHERE id = 1`,
+        )
+        .get() as
+        | {
+            generation: number;
+            pid: number;
+            hostname: string;
+            acquired_at: number;
+            expires_at: number;
+          }
+        | undefined;
+      if (row && row.expires_at > now)
+        throw new LeaseHeldError({
+          generation: Number(row.generation),
+          pid: Number(row.pid),
+          hostname: String(row.hostname),
+          acquiredAt: Number(row.acquired_at),
+          expiresAt: Number(row.expires_at),
+        });
+      // Absent or expired: take over. The generation always moves forward,
+      // even over an expired or released row — it never repeats.
+      generation = (row ? Number(row.generation) : 0) + 1;
+      this.db
+        .prepare(
+          `INSERT INTO writer_lease (id, generation, pid, hostname, acquired_at, expires_at)
+           VALUES (1, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             generation = excluded.generation, pid = excluded.pid,
+             hostname = excluded.hostname, acquired_at = excluded.acquired_at,
+             expires_at = excluded.expires_at`,
+        )
+        .run(generation, process.pid, osHostname(), now, now + ttl);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      // A connection left inside BEGIN IMMEDIATE wedges every later write.
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+
+    const db = this.db;
+    return {
+      generation,
+      heartbeat(): boolean {
+        const at = Math.floor(Date.now() / 1000);
+        const changed = db
+          .prepare(
+            `UPDATE writer_lease SET expires_at = ?
+              WHERE id = 1 AND generation = ?`,
+          )
+          .run(at + ttl, generation).changes;
+        return changed > 0;
+      },
+      release(): void {
+        // Expire rather than delete: the row's generation is what makes the
+        // next holder's strictly greater.
+        db.prepare(
+          `UPDATE writer_lease SET expires_at = 0
+            WHERE id = 1 AND generation = ?`,
+        ).run(generation);
+      },
+    };
+  }
+
+  /** Who holds the lease right now, or nothing if it is free or expired. */
+  writerLeaseHolder(): WriterLeaseHolder | undefined {
+    const now = Math.floor(Date.now() / 1000);
+    const row = this.db
+      .prepare(
+        `SELECT generation, pid, hostname, acquired_at, expires_at
+           FROM writer_lease WHERE id = 1 AND expires_at > ?`,
+      )
+      .get(now) as
+      | {
+          generation: number;
+          pid: number;
+          hostname: string;
+          acquired_at: number;
+          expires_at: number;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      generation: Number(row.generation),
+      pid: Number(row.pid),
+      hostname: String(row.hostname),
+      acquiredAt: Number(row.acquired_at),
+      expiresAt: Number(row.expires_at),
+    };
   }
 
   // ── Concord ───────────────────────────────────────────────────────────────
