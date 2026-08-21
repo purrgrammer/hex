@@ -1739,13 +1739,15 @@ export class HexStore {
   }
 
   /**
-   * The runtime session a correspondent is talking to, if any.
+   * Which session was last opened for this correspondent in this room.
    *
-   * In the database rather than in memory, and the reason is not tidiness: held in
-   * memory, a restart forgot who was talking about what, so the next message
-   * opened a NEW session — the person's history gone, the old session left idle
-   * forever with nobody to close it, and the reader shown two unrelated runs for
-   * one conversation.
+   * NOT how a message finds its session — that is `threadSession`, and this
+   * asking the other question is what made a reply walk into an hours-old run.
+   * Nothing routes on this any more; it is here so a test can assert what was
+   * remembered, and so an operator can ask "what is this person's last run".
+   *
+   * The table's real job now is the reverse direction: a session's owner and
+   * its lane, which `peerForSession` and `conversationForSession` read.
    */
   conversationFor(peer: string, room: string): string | undefined {
     const row = this.db
@@ -1757,7 +1759,7 @@ export class HexStore {
   }
 
   /**
-   * Who a session belongs to — the reverse of `conversationFor`.
+   * Who a session belongs to. One of the two questions this table exists for.
    *
    * A control event names a session, and answering one needs the ROOM: a turn
    * an operator steered into life still has to speak to somebody.

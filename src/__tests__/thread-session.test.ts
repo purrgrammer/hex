@@ -333,3 +333,39 @@ describe("a second speaker in someone else's run", () => {
     expect(attributed("carry on", OTHER_SPEAKER, undefined)).toBe("carry on");
   });
 });
+
+/**
+ * A question names its session, so answering it must not ask a different one.
+ *
+ * `answerQuestion` used to look the conversation up by (peer, room) — the same
+ * question that made a reply walk into an hours-old run — and then respond to
+ * the session the QUESTION named. Two different sessions, one drain and one
+ * answer, whenever those disagreed: which is exactly what happens once a person
+ * has two threads open in one room.
+ */
+describe("answering a question hex asked", () => {
+  const ROOM = { transport: "concord" as const, id: "community:channel" };
+  let home: string;
+  let store: HexStore;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "answering-"));
+    store = HexStore.open(join(home, "data.db"));
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("finds the session by the question, not by the room", () => {
+    const asked = "ff".repeat(32);
+    store.rememberQuestion(asked, "wrun_ASKED", "req-1", 1);
+    // The same person's LAST session in this room is a different one.
+    store.rememberConversation(OPERATOR, roomKey(ROOM), "wrun_OTHER", 2);
+
+    // The question is the only thing that knows which run is waiting.
+    expect(store.questionAsked(asked)?.sessionId).toBe("wrun_ASKED");
+    expect(store.conversationFor(OPERATOR, roomKey(ROOM))).toBe("wrun_OTHER");
+  });
+});

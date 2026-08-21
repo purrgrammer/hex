@@ -1620,7 +1620,7 @@ export class EveServer {
 
     let conversation = inbound.replyToId
       ? threaded !== undefined
-        ? (this.bySession(threaded, key) ?? this.resume(key))
+        ? this.bySession(threaded, key)
         : undefined
       : undefined;
     if (!conversation && inbound.replyToId)
@@ -1993,9 +1993,18 @@ export class EveServer {
      * turn the answer starts, and then follow a stream with nothing left in it —
      * every turn the answer unblocked published by nobody.
      */
-    const conversation =
-      this.conversations.get(conversationKey(inbound)) ??
-      this.resume(conversationKey(inbound));
+    /*
+     * The session being ANSWERED, not whatever this person last had open here.
+     *
+     * The question names its session — that is the whole point of remembering
+     * it — and looking the conversation up by (peer, room) instead could drain
+     * one session's stream and then answer a different one's request. The same
+     * confusion, in the same shape, as the resume bug this table caused before.
+     */
+    const conversation = this.bySession(
+      answering.sessionId,
+      conversationKey(inbound),
+    );
     const boundary = conversation ? await this.drain(conversation) : undefined;
 
     try {
@@ -2356,30 +2365,6 @@ export class EveServer {
     for (const conversation of this.conversations.values())
       if (conversation.sessionId === sessionId) return conversation;
     return undefined;
-  }
-
-  private resume(key: string): Conversation | undefined {
-    const [author = key, room = ""] = key.split(KEY_SEPARATOR);
-    const sessionId = this.options.transcript.store.conversationFor(
-      author,
-      room,
-    );
-    if (!sessionId) return undefined;
-    const conversation: Conversation = {
-      sessionId,
-      transcript: new EveTranscript(this.transcriptOptions(), sessionId),
-      /**
-       * Nothing is known to have ended, because this process did not watch it.
-       *
-       * The pre-message read fills this in: it passes the previous turn's ending
-       * on its way to the boundary, which is exactly where that knowledge comes
-       * from after a restart.
-       */
-      finished: new Set(),
-    };
-    this.conversations.set(key, conversation);
-    this.log(`[hex] ${short(author)} → resumed eve session ${sessionId}`);
-    return conversation;
   }
 
   /**
