@@ -1,7 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { firstValueFrom } from "rxjs";
 import { filter as rxFilter, take, toArray } from "rxjs/operators";
-import { generateSecretKey, getEventHash, getPublicKey } from "nostr-tools/pure";
+import {
+  generateSecretKey,
+  getEventHash,
+  getPublicKey,
+} from "nostr-tools/pure";
 import { PrivateKeySigner } from "applesauce-signers";
 
 import { createRelays, publishTo } from "../relays.js";
@@ -11,7 +15,11 @@ import {
   channelGroupKey,
   communityIdOf,
 } from "../concord/derive.js";
-import { KIND_COMMENT, KIND_MESSAGE, KIND_SEAL_ENCRYPTED } from "../concord/kinds.js";
+import {
+  KIND_COMMENT,
+  KIND_MESSAGE,
+  KIND_SEAL_ENCRYPTED,
+} from "../concord/kinds.js";
 import {
   buildRumor,
   channelBindingTags,
@@ -256,6 +264,77 @@ describe("ConcordTransport.reply", () => {
     expect(opened.tags).toContainEqual(["epoch", "2"]);
   });
 
+  it("treats a reply in a thread it is running as addressed to it", async () => {
+    /**
+     * The live miss. A thread whose ROOT is the operator's own mention: the
+     * follow-up threads onto that root, so its parent is their message and not
+     * anything Hex wrote. "Did Hex write the parent" says no, and every message
+     * after the first would need the mention typed again.
+     */
+    const opening = await memberMessage("hex, research NIP 5D");
+    relay = await startMockRelay({ kind: "normal", events: [opening.wrap] });
+    relays = createRelays();
+    transport = transportFor(relay.url);
+
+    const stream = transport.start();
+    const [inbound] = await firstValueFrom(stream.pipe(take(1), toArray()));
+    expect(inbound?.addressesSelf).toBe(true);
+
+    const root = inbound!.id;
+    const followUp = buildRumor({
+      kind: KIND_COMMENT,
+      content: "oh yea i meant that one 5A",
+      tags: [
+        ...channelBindingTags(PUBLIC_CHANNEL, 2n),
+        // Threaded onto the ROOT, which is theirs — exactly what was observed.
+        ["E", root, "", member],
+        ["P", member],
+        ["e", root, "", member],
+        ["p", member],
+      ],
+      pubkey: member,
+      ms: Date.now(),
+    });
+    const seal = await sealRumor(
+      followUp,
+      KIND_SEAL_ENCRYPTED,
+      opening.group,
+      memberSigner,
+    );
+    await publishTo(relays, [relay.url], wrapSeal(seal, opening.group), 1000);
+
+    transport.stop();
+    transport = new ConcordTransport({
+      signer,
+      pubkey: hexPubkey,
+      memberships: [membership(relay.url)],
+      mentions: ["hex"],
+      since: 0,
+      publishTimeoutMs: 1000,
+      relays: relays!,
+      durability: {
+        cursorFor: () => undefined,
+        rememberCursor: () => {},
+        sawRumor: () => false,
+        rememberRumor: () => {},
+        // Hex wrote none of it — the parent is the operator's own message.
+        isOwnRumor: () => false,
+        // But it opened a run for that thread, and that is what decides.
+        threadIsOurs: (id) => id === root,
+        saveMembership: () => {},
+      },
+    });
+    const [next] = await firstValueFrom(
+      transport.start().pipe(
+        rxFilter((m) => m.text === "oh yea i meant that one 5A"),
+        take(1),
+        toArray(),
+      ),
+    );
+    expect(next?.threadRoot).toBe(root);
+    expect(next?.addressesSelf).toBe(true);
+  });
+
   it("treats a reply to its own message as addressed to it", async () => {
     const opening = await memberMessage("hex, hello");
     relay = await startMockRelay({ kind: "normal", events: [opening.wrap] });
@@ -310,13 +389,11 @@ describe("ConcordTransport.reply", () => {
       },
     });
     const [next] = await firstValueFrom(
-      transport
-        .start()
-        .pipe(
-          rxFilter((message) => message.text === "and what about relays?"),
-          take(1),
-          toArray(),
-        ),
+      transport.start().pipe(
+        rxFilter((message) => message.text === "and what about relays?"),
+        take(1),
+        toArray(),
+      ),
     );
     expect(next?.replyToId).toBe(answerId);
     expect(next?.addressesSelf).toBe(true);

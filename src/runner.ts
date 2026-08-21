@@ -23,6 +23,7 @@ import {
 import {
   DEFAULT_POLICY,
   decide,
+  whyIgnored,
   type Disposition,
   type LaneState,
   type PolicyRule,
@@ -278,15 +279,19 @@ export class Runner {
 
     const key = this.laneForMessage(inbound);
     const lane = this.lane(key);
+    const event = canonicalEvent(queued.event, "message");
+    const laneState = this.state(lane);
     const disposition = decide(
-      canonicalEvent(queued.event, "message"),
-      this.state(lane),
+      event,
+      laneState,
       this.options.policy ?? DEFAULT_POLICY,
     );
 
     switch (disposition) {
       case "ignore":
-        this.log(`[hex] ${short(inbound.author)} not answered: no rule`);
+        this.log(
+          `[hex] ${short(inbound.author)} not answered: ${whyIgnored(event, laneState)}`,
+        );
         this.options.queue.finish(queued.seq, "ignored");
         return;
       case "steer":

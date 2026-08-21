@@ -305,6 +305,20 @@ const SUBJECT_TAGS = new Set(["a", "e", "p", "r", "i"]);
  * fourth position is a thread pointer, which is a different relationship again.
  * What is left is what the sender said this is about.
  */
+/**
+ * Does this error mean the session itself will not take work, ever again?
+ *
+ * A 4xx is the runtime saying the request was wrong, and for a send there is
+ * only one thing that can be wrong about it: the session. A 5xx or a dropped
+ * socket is the opposite — the session is fine and the call should be allowed
+ * to fail normally, because retrying into a NEW session would fork the run for
+ * what a moment's outage would have healed.
+ */
+export function refusesWork(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /\b4\d\d\b/.test(text);
+}
+
 function subjectsOf(inbound: Inbound, addressed: string[] = []): string[][] {
   const tags = (inbound.event as { tags?: string[][] } | undefined)?.tags ?? [];
   const exclude = new Set(addressed);
@@ -1569,12 +1583,26 @@ export class EveServer {
      * onto something, and that is the reader saying "about this"; a message with
      * no thread is a new subject. Hex does not have to guess, and does not get to.
      */
+    /*
+     * Which run, though, is a question about the THREAD — not about who is
+     * speaking. Resolving it from (peer, room) meant any reply in a room
+     * resumed whatever that person last had open there: a reply to an
+     * unrelated message walked into an hour-old session, and once that session
+     * went bad every later reply in the room went to the same dead run.
+     */
+    const root = inbound.threadRoot ?? inbound.replyToId;
+    const threaded = root
+      ? this.options.transcript.store.threadSession(root)
+      : undefined;
+
     let conversation = inbound.replyToId
-      ? (this.conversations.get(key) ?? this.resume(key))
+      ? threaded !== undefined
+        ? (this.bySession(threaded, key) ?? this.resume(key))
+        : undefined
       : undefined;
     if (!conversation && inbound.replyToId)
       this.log(
-        `[hex] ${short(peer)} replied to something with no session behind it — starting one`,
+        `[hex] ${short(peer)} replied in a thread with no session behind it — starting one`,
       );
     if (!inbound.replyToId) this.conversations.delete(peer);
 
@@ -1683,6 +1711,16 @@ export class EveServer {
         sessionId,
         Math.floor(Date.now() / 1000),
       );
+      /*
+       * And bind the thread, which is what the next reply will arrive naming.
+       * A message that starts a thread IS its root, so when the protocol names
+       * no root the message's own id is the one every later reply will carry.
+       */
+      this.options.transcript.store.rememberThread(
+        inbound.threadRoot ?? inbound.replyToId ?? inbound.id,
+        sessionId,
+        Math.floor(Date.now() / 1000),
+      );
       this.log(`[hex] ${short(peer)} → eve session ${sessionId}`);
       boundary = { last: -1, finished: new Set() };
 
@@ -1709,10 +1747,57 @@ export class EveServer {
        */
       boundary = await this.drain(conversation);
       if (host) this.options.tools?.bridge.bind(conversation.sessionId, host);
-      await this.sendMessage(conversation.sessionId, inbound.text);
-      this.log(
-        `[hex] ${short(peer)} → continuing eve session ${conversation.sessionId}`,
-      );
+      try {
+        await this.sendMessage(conversation.sessionId, inbound.text);
+        this.log(
+          `[hex] ${short(peer)} → continuing eve session ${conversation.sessionId}`,
+        );
+      } catch (error: unknown) {
+        /**
+         * A session the runtime will not take work for is not a turn that
+         * failed — it is a binding that has gone stale, and the message is
+         * still owed.
+         *
+         * The ack has already been sent by now, so giving up here leaves the
+         * room showing "seen" and then nothing, forever: the binding stays,
+         * and every later reply in that thread walks into the same refusal.
+         * Watched happen — a 409 on a session from hours earlier swallowed a
+         * question and would have swallowed every one after it.
+         */
+        if (!refusesWork(error)) throw error;
+        this.log(
+          `[hex] eve refuses session ${conversation.sessionId}: ${message(error)} — starting a fresh one`,
+        );
+        this.forget(key, peer, conversation.sessionId);
+
+        const fresh = await this.createSession(
+          inbound.text,
+          await this.grounding(
+            peer,
+            subjectsOf(inbound, addressed),
+            channelOf(inbound),
+            inbound.room,
+          ),
+        );
+        const transcript = new EveTranscript(this.transcriptOptions(), fresh);
+        transcript.subjects = subjectsOf(inbound, addressed);
+        conversation = { sessionId: fresh, transcript, finished: new Set() };
+        this.conversations.set(key, conversation);
+        this.options.transcript.store.rememberConversation(
+          peer,
+          roomKey(inbound.room),
+          fresh,
+          Math.floor(Date.now() / 1000),
+        );
+        this.options.transcript.store.rememberThread(
+          inbound.threadRoot ?? inbound.replyToId ?? inbound.id,
+          fresh,
+          Math.floor(Date.now() / 1000),
+        );
+        boundary = { last: -1, finished: new Set() };
+        if (host) this.options.tools?.bridge.bind(fresh, host);
+        this.log(`[hex] ${short(peer)} → eve session ${fresh}`);
+      }
     }
 
     const asked: Asked[] = [];
@@ -2266,6 +2351,27 @@ export class EveServer {
   }
 
   /**
+   * The live conversation for a session a thread already named.
+   *
+   * `resume` answers "what was this person last doing in this room"; this
+   * answers "carry on with THAT run". Same object either way — an in-memory one
+   * when this process opened it, rebuilt from the session id when it did not.
+   */
+  private bySession(sessionId: string, key?: string): Conversation | undefined {
+    for (const existing of this.conversations.values())
+      if (existing.sessionId === sessionId) return existing;
+
+    const conversation: Conversation = {
+      sessionId,
+      transcript: new EveTranscript(this.transcriptOptions(), sessionId),
+      finished: new Set(),
+    };
+    if (key) this.conversations.set(key, conversation);
+    this.log(`[hex] → resumed eve session ${sessionId} from its thread`);
+    return conversation;
+  }
+
+  /**
    * Open a session, with whatever the runtime should know before it reads the
    * message.
    *
@@ -2284,6 +2390,19 @@ export class EveServer {
       message: text,
       context: clientContext,
     });
+  }
+
+  /**
+   * Drop every binding that points at a session, so nothing resumes it again.
+   *
+   * Both maps and both tables: an in-memory conversation, the stored
+   * (peer, room) row, and every thread bound to it. Leaving any one behind is
+   * enough to walk back into the dead session on the next message.
+   */
+  private forget(key: string, peer: string, sessionId: string): void {
+    this.conversations.delete(key);
+    this.conversations.delete(peer);
+    this.options.transcript.store.forgetThread(sessionId);
   }
 
   private async sendMessage(sessionId: string, text: string): Promise<void> {

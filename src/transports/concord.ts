@@ -131,6 +131,15 @@ export interface ConcordDurability {
   rememberRumor(rumorId: string, own: boolean, at: number): void;
   /** Did Hex write this rumor? Answered across restarts, unlike the memory set. */
   isOwnRumor(rumorId: string): boolean;
+  /**
+   * Is this thread one Hex is already in — does its root have a session?
+   *
+   * What makes a threaded conversation a conversation. Without it, every
+   * message after the first has to repeat the mention, because the parent of a
+   * reply typed into a thread is usually the person's OWN opening message, not
+   * anything Hex wrote.
+   */
+  threadIsOurs?(rootId: string): boolean;
   /** A membership changed — a rotation was adopted. Persist it. */
   saveMembership(membership: Membership): void;
 }
@@ -199,6 +208,20 @@ export function replyTargetOf(opened: OpenedEvent): string | undefined {
   if (opened.kind === KIND_COMMENT)
     return opened.tags.find((tag) => tag[0] === "e" && tag[1])?.[1];
   return opened.tags.find((tag) => tag[0] === "q" && tag[1])?.[1];
+}
+
+/**
+ * The thread a rumor hangs under: NIP-22's uppercase `E`, the thread ROOT.
+ *
+ * `replyTargetOf` reads the lowercase `e` — the immediate parent — which is
+ * what threading needs and what "is this about my last message" must NOT be
+ * built on. A reply typed into a thread names the root as its parent when the
+ * root is what it replies to, and names something deeper otherwise; only the
+ * root is common to every message in the thread. A kind 9 has no thread.
+ */
+export function threadRootOf(opened: OpenedEvent): string | undefined {
+  if (opened.kind !== KIND_COMMENT) return undefined;
+  return opened.tags.find((tag) => tag[0] === "E" && tag[1])?.[1];
 }
 
 export class ConcordTransport implements Transport {
@@ -420,13 +443,19 @@ export class ConcordTransport implements Transport {
     const stored = this.options.durability?.cursorFor(relay, streamPk);
     if (stored === undefined)
       return Math.max(0, this.options.since - FRESH_LOOKBACK_SECONDS);
-    return Math.max(stored - CURSOR_OVERLAP_SECONDS, now - MAX_CURSOR_AGE_SECONDS);
+    return Math.max(
+      stored - CURSOR_OVERLAP_SECONDS,
+      now - MAX_CURSOR_AGE_SECONDS,
+    );
   }
 
   private roomFor(binding: ChatStreamBinding): Room {
     return {
       transport: "concord",
-      id: concordRoomId(binding.membership.communityIdHex, binding.channel.idHex),
+      id: concordRoomId(
+        binding.membership.communityIdHex,
+        binding.channel.idHex,
+      ),
       label: `${binding.channel.name} (${binding.membership.name})`,
     };
   }
@@ -475,6 +504,7 @@ export class ConcordTransport implements Transport {
     this.remember(opened.rumorId, false);
 
     const replyToId = replyTargetOf(opened);
+    const threadRoot = threadRootOf(opened);
     const inbound: Inbound = {
       id: opened.rumorId,
       author: opened.author,
@@ -483,6 +513,7 @@ export class ConcordTransport implements Transport {
       room: this.roomFor(binding),
       addressesSelf: false,
       ...(replyToId ? { replyToId } : {}),
+      ...(threadRoot ? { threadRoot } : {}),
       /**
        * The rumor, in event's clothing.
        *
@@ -503,16 +534,33 @@ export class ConcordTransport implements Transport {
       },
     };
 
+    /**
+     * Three ways a message continues something rather than starting it: it
+     * replies to a rumor Hex wrote, in this run or an earlier one, or it hangs
+     * under a thread Hex already has a session for.
+     *
+     * The third is the one that makes threads usable. Reply to a thread whose
+     * root was the operator's own mention and the parent is THEIR message, not
+     * Hex's — so the first two tests both say no, and every follow-up would
+     * need the mention typed again.
+     */
+    const root = inbound.threadRoot ?? inbound.replyToId;
     const continuesConversation =
-      inbound.replyToId !== undefined &&
-      (this.ownRumorIds.has(inbound.replyToId) ||
-        (this.options.durability?.isOwnRumor(inbound.replyToId) ?? false));
+      (inbound.replyToId !== undefined &&
+        (this.ownRumorIds.has(inbound.replyToId) ||
+          (this.options.durability?.isOwnRumor(inbound.replyToId) ?? false))) ||
+      (root !== undefined &&
+        (this.options.durability?.threadIsOurs?.(root) ?? false));
 
     return {
       ...inbound,
       addressesSelf:
         continuesConversation ||
-        addressesSelfInGroup(inbound, this.options.pubkey, this.options.mentions),
+        addressesSelfInGroup(
+          inbound,
+          this.options.pubkey,
+          this.options.mentions,
+        ),
     };
   }
 
@@ -786,7 +834,9 @@ export class ConcordTransport implements Transport {
   } {
     const parsed = parseConcordRoomId(room.id);
     if (!parsed)
-      throw new Error(`${room.id} is not a Concord room id (community:channel)`);
+      throw new Error(
+        `${room.id} is not a Concord room id (community:channel)`,
+      );
     const membership = this.membershipFor(parsed.communityIdHex);
     if (!membership)
       throw new Error(
@@ -801,7 +851,9 @@ export class ConcordTransport implements Transport {
       );
     const stream = currentStream(membership, channel);
     if (!stream)
-      throw new Error(`${channel.name} has no readable epoch — nothing to send under`);
+      throw new Error(
+        `${channel.name} has no readable epoch — nothing to send under`,
+      );
     return { membership, channel, stream };
   }
 
@@ -851,7 +903,11 @@ export class ConcordTransport implements Transport {
     rumor: Rumor,
     group: GroupKey,
     relayUrls: string[],
-  ): Promise<{ delivered: string[]; undeliverable: string[]; refusals: string[] }> {
+  ): Promise<{
+    delivered: string[];
+    undeliverable: string[];
+    refusals: string[];
+  }> {
     const seal = await sealRumor(
       rumor,
       KIND_SEAL_ENCRYPTED,
@@ -883,7 +939,11 @@ export class ConcordTransport implements Transport {
    * Threading it under an arbitrary message would put an unprompted remark in
    * somebody else's conversation.
    */
-  async post(room: Room, text: string, extraTags: string[][] = []): Promise<string> {
+  async post(
+    room: Room,
+    text: string,
+    extraTags: string[][] = [],
+  ): Promise<string> {
     return this.send(room, KIND_MESSAGE, text, extraTags);
   }
 
@@ -1054,17 +1114,13 @@ export class ConcordTransport implements Transport {
     const streams = channelStreams(membership, channel);
     if (streams.length === 0) return [];
 
-    const events = await requestEvents(
-      this.relays,
-      membership.relays,
-      [
-        {
-          kinds: [KIND_WRAP],
-          authors: streams.map((stream) => stream.group.pk),
-          limit,
-        },
-      ],
-    );
+    const events = await requestEvents(this.relays, membership.relays, [
+      {
+        kinds: [KIND_WRAP],
+        authors: streams.map((stream) => stream.group.pk),
+        limit,
+      },
+    ]);
 
     const byPk = new Map(streams.map((stream) => [stream.group.pk, stream]));
     const out: Inbound[] = [];

@@ -42,6 +42,16 @@ export interface Inbound {
    * how its protocol threads.
    */
   replyToId?: string;
+  /**
+   * The root of the thread this message hangs under, when its protocol says.
+   *
+   * Distinct from `replyToId` and load-bearing: a thread is one subject, and it
+   * is the root — not the parent — that every message in the thread agrees on.
+   * A reply two levels deep names a parent nobody else names; it names the same
+   * root as the first reply did. NIP-22 carries it in the uppercase E tag.
+   * Undefined for protocols with no thread, and for a message that starts one.
+   */
+  threadRoot?: string;
   /** The raw event, for verification and for whatever context a runtime wants. */
   event: NostrEvent;
 }

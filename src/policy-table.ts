@@ -225,3 +225,22 @@ export function decide(
   for (const rule of table) if (matchesRule(rule, event, lane)) return rule.do;
   return "ignore";
 }
+
+/**
+ * Why nothing matched — in the words of the thing that did not match.
+ *
+ * "no rule" is true and useless: it says the table fell through without saying
+ * what about the event made every rule decline, which turned a five-second
+ * question into a database query. Reported only when the answer is "ignore",
+ * and only ever for a log line — nothing branches on this.
+ */
+export function whyIgnored(
+  event: CanonicalEvent,
+  lane: LaneState = IDLE_LANE,
+): string {
+  const payload = event.payload as { addressesSelf?: boolean } | undefined;
+  if (event.type === "message" && payload?.addressesSelf === false)
+    return "not addressed";
+  if (lane.inTurn) return "no rule for a message arriving mid-turn";
+  return "no rule";
+}

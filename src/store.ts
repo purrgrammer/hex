@@ -241,6 +241,23 @@ CREATE TABLE IF NOT EXISTS conversations (
 );
 
 /*
+ * Which session a thread belongs to.
+ *
+ * The conversations table keys on (peer, room), which answers "what was this
+ * person last talking to me about in here" — the wrong question for a reply. A
+ * reply names a thread, and a thread is one subject; two threads in one room
+ * are two subjects and must not share a run. Keyed on the thread ROOT because
+ * that is the one id every message in a thread agrees on: NIP-22 puts it in the
+ * uppercase E tag, and a reply to the root carries the root as its parent.
+ */
+CREATE TABLE IF NOT EXISTS threads (
+  root_id    TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS threads_session ON threads (session_id);
+
+/*
  * Questions Hex asked in a room, and what answering one resolves.
  *
  * Durable, not in memory, and for once the reason is the whole point of the
@@ -759,7 +776,9 @@ export class HexStore {
     // `raw` arrived after `inbound_events` did, and a row without it cannot be
     // answered after a restart.
     const inbound = (
-      db.prepare(`PRAGMA table_info(inbound_events)`).all() as { name: string }[]
+      db.prepare(`PRAGMA table_info(inbound_events)`).all() as {
+        name: string;
+      }[]
     ).map((column) => column.name);
     if (inbound.length > 0 && !inbound.includes("raw"))
       db.exec(`ALTER TABLE inbound_events ADD COLUMN raw TEXT`);
@@ -1709,6 +1728,50 @@ export class HexStore {
            session_id = excluded.session_id, last_at = excluded.last_at`,
       )
       .run(peer, room, sessionId, at);
+  }
+
+  /**
+   * Bind a thread to the session that answers it.
+   *
+   * Written when a run opens, so the next reply in that thread finds it. The
+   * root, not the message: every later reply names the root, but only the first
+   * one names the opening message.
+   */
+  rememberThread(
+    rootId: string,
+    sessionId: string,
+    at = Math.floor(Date.now() / 1000),
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO threads (root_id, session_id, at) VALUES (?, ?, ?)
+         ON CONFLICT(root_id) DO UPDATE SET session_id = excluded.session_id,
+                                            at = excluded.at`,
+      )
+      .run(rootId, sessionId, at);
+  }
+
+  /** The session a thread belongs to, if Hex is in that thread at all. */
+  threadSession(rootId: string): string | undefined {
+    const row = this.db
+      .prepare(`SELECT session_id FROM threads WHERE root_id = ?`)
+      .get(rootId) as { session_id: string } | undefined;
+    return row?.session_id;
+  }
+
+  /**
+   * Is this thread one Hex is in? Satisfies the transport's durability hook.
+   *
+   * A binding exists only where a run was opened for that thread, so this is
+   * "Hex is talking here", not "Hex saw this".
+   */
+  threadIsOurs(rootId: string): boolean {
+    return this.threadSession(rootId) !== undefined;
+  }
+
+  /** Forget a thread's binding — its session is gone and must not be resumed. */
+  forgetThread(sessionId: string): void {
+    this.db.prepare(`DELETE FROM threads WHERE session_id = ?`).run(sessionId);
   }
 
   /**
