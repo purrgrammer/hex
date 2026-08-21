@@ -1594,16 +1594,29 @@ async function main(): Promise<void> {
           process.once("SIGTERM", () => shutdown("SIGTERM"));
         });
 
+        /**
+         * Teardown runs to the end even when part of it throws.
+         *
+         * The lease used to be released after `server.close()` with nothing
+         * guarding it, so a shutdown that failed partway left a live claim
+         * behind a dead pid — and the next `hex serve` was refused for the rest
+         * of the TTL by a process that no longer existed. Observed twice. The
+         * claim is the one thing that outlives this process, so freeing it is
+         * the one step that cannot be skipped.
+         */
         subscription.unsubscribe();
         ingest.stop();
-        // Every followed session keeps whatever status Eve last reported: the
-        // follower is leaving, the sessions are not over.
-        await server.close();
-        bridge?.stop();
-        transport.stop();
-        lease.release();
-        store.close();
-        await resolved.close();
+        try {
+          // Every followed session keeps whatever status Eve last reported: the
+          // follower is leaving, the sessions are not over.
+          await server.close();
+          bridge?.stop();
+          transport.stop();
+        } finally {
+          lease.release();
+          store.close();
+          await resolved.close();
+        }
         return;
       }
 
