@@ -44,6 +44,8 @@ const STORE_PBT = `${TESTS}/store.property.test.ts`;
 const POLICY_PBT = `${TESTS}/policy.property.test.ts`;
 const RUNNER_PBT = `${TESTS}/runner.property.test.ts`;
 const QUIESCENCE_PBT = `${TESTS}/quiescence.property.test.ts`;
+const TRANSPORTS = `${TESTS}/thread-transports.test.ts`;
+const ROOM_TOOLS = `${TESTS}/room-tools.test.ts`;
 
 type Status = "covered" | "partial" | "gap";
 
@@ -148,8 +150,9 @@ const COVERAGE: Coverage[] = [
     statement:
       "a reply in a thread hex is running addresses hex, mention or not",
     status: "covered",
-    owner: "thread-session.test.ts + concord-transport.test.ts",
-    ownerFiles: [THREAD, CONCORD],
+    owner:
+      "thread-session.test.ts, concord-transport.test.ts, and thread-transports.test.ts for the NIP-29 case it was reported in",
+    ownerFiles: [THREAD, CONCORD, TRANSPORTS],
   },
   {
     id: "I13",
@@ -159,6 +162,15 @@ const COVERAGE: Coverage[] = [
     owner:
       "policy.property.test.ts compares the whole payload, thread-session.test.ts pins the case that prompted it, and the type manifest in ingest.ts refuses to compile without it",
     ownerFiles: [POLICY_PBT, THREAD],
+  },
+  {
+    id: "I14",
+    statement:
+      "reply resolution reads each protocol's own tag shape, and binds every id a later reply could name",
+    status: "covered",
+    owner:
+      "thread-transports.test.ts for the three shapes, room-tools.test.ts for the answer a room sees — the one the spool never touches",
+    ownerFiles: [TRANSPORTS, ROOM_TOOLS],
   },
 ];
 
@@ -196,7 +208,7 @@ describe("the invariant coverage map", () => {
 
   it("names every invariant the plan set out", () => {
     const ids = new Set(COVERAGE.map((c) => c.id));
-    for (let i = 1; i <= 13; i++) expect(ids.has(`I${i}`)).toBe(true);
+    for (let i = 1; i <= 14; i++) expect(ids.has(`I${i}`)).toBe(true);
   });
 
   it("makes every gap say why", () => {

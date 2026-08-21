@@ -589,3 +589,68 @@ describe("publishing from inside a room", () => {
     expect(result.output).toBe("PUBLISHED");
   });
 });
+/**
+ * An answer a room can see is an answer somebody will reply to.
+ *
+ * `chat.respond` publishes through the transport directly and never touches the
+ * spool, which is where the same binding is made for a spooled reply — so this
+ * was the one message with no thread behind it, and it is the message a person
+ * is most likely to answer. In a group that is the whole conversation: a kind 9
+ * names no root, so the parent is the only handle there is.
+ *
+ * Found by driving it, not by reading it: the question bound, the answer did
+ * not, and a reply to the answer would have opened a second run.
+ */
+describe("what a run says out loud", () => {
+  it("reports the published id, so a reply to it comes back here", async () => {
+    const said: string[] = [];
+    const tools = new RoomTools({
+      transport: transport({ reply: async () => "published-1" }),
+      incoming: INBOUND,
+      rememberSaid: (id) => said.push(id),
+    });
+
+    const result = await tools.call({
+      name: RESPOND_TOOL,
+      arguments: { text: "here you go" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(said).toEqual(["published-1"]);
+  });
+
+  it("says nothing when the relay would not take it", async () => {
+    const said: string[] = [];
+    const tools = new RoomTools({
+      transport: transport({
+        reply: async () => {
+          throw new Error("relay said no");
+        },
+      }),
+      incoming: INBOUND,
+      rememberSaid: (id) => said.push(id),
+    });
+
+    const result = await tools.call({
+      name: RESPOND_TOOL,
+      arguments: { text: "here you go" },
+    });
+
+    // A thread bound to a message nobody received is a thread that points at
+    // nothing — worse than none, because a later reply would resolve to it.
+    expect(result.ok).toBe(false);
+    expect(said).toEqual([]);
+  });
+
+  it("publishes without one, for a host that was built with no store", async () => {
+    const tools = new RoomTools({
+      transport: transport({ reply: async () => "published-2" }),
+      incoming: INBOUND,
+    });
+    const result = await tools.call({
+      name: RESPOND_TOOL,
+      arguments: { text: "here you go" },
+    });
+    expect(result.ok).toBe(true);
+  });
+});
