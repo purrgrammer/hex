@@ -462,7 +462,7 @@ describe("Runner", () => {
   });
 
   describe("the hourly rate limit", () => {
-    it("counts per room, and only the replies that landed", async () => {
+    it("counts per room, off the queue rather than off memory", async () => {
       const bus = target();
       const clock = { at: 1000 };
       const { ingest } = runner(bus, {
@@ -491,16 +491,44 @@ describe("Runner", () => {
       expect(store.inboundOutcome(later)).toBe("handled");
     });
 
-    it("does not spend the limit on a turn that said nothing", async () => {
+    it("spends the limit on a turn that failed, because it cost the same", async () => {
+      /**
+       * This used to be the opposite, and the opposite was a hole: the meter
+       * counted replies that LANDED, so anything that made a turn end without
+       * publishing was free. A turn is what costs money — the tokens are spent
+       * whether or not the answer reaches the room — so a turn is what it
+       * counts.
+       */
       const bus = target();
       const { ingest } = runner(bus, { repliesPerRoomPerHour: 1 });
       ingest.accept(inbound({ id: "m1", room: GROUP }));
       await tick();
-      // A failed turn published nothing, so it did not spend the allowance.
       await bus.fail("turn m1");
+
       const next = ingest.accept(inbound({ id: "m2", room: GROUP }))!;
       await tick();
-      expect(store.inboundOutcome(next)).toBe("handled");
+      expect(store.inboundOutcome(next)).toBe("dropped:rate-limited");
+    });
+
+    it("survives a restart, because the meter is not in this process", async () => {
+      /**
+       * The old counter was a Map of timestamps, so every restart handed the
+       * room a fresh hour. A daemon that restarts eight times in an afternoon
+       * had no rate limit at all — and restarting is the ordinary case here,
+       * not the exceptional one.
+       */
+      const bus = target();
+      const first = runner(bus, { repliesPerRoomPerHour: 1 });
+      first.ingest.accept(inbound({ id: "m1", room: GROUP }));
+      await tick();
+      await bus.finish("turn m1");
+
+      // A whole new Runner and Ingestor over the same store: what the last
+      // process spent is still spent.
+      const second = runner(bus, { repliesPerRoomPerHour: 1 });
+      const next = second.ingest.accept(inbound({ id: "m2", room: GROUP }))!;
+      await tick();
+      expect(store.inboundOutcome(next)).toBe("dropped:rate-limited");
     });
   });
 

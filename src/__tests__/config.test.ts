@@ -165,8 +165,9 @@ describe("parseConfig", () => {
       ],
     });
     const [transport] = config.transports;
-    expect(transport?.type === "concord" ? transport.communities : undefined)
-      .toMatchObject([{ id: community, channels: [{ id: channel }] }]);
+    expect(
+      transport?.type === "concord" ? transport.communities : undefined,
+    ).toMatchObject([{ id: community, channels: [{ id: channel }] }]);
     expect(
       transport?.type === "concord" ? transport.acceptInvitesFrom : undefined,
     ).toEqual([inviter]);
@@ -420,5 +421,30 @@ describe("policy rules", () => {
         ],
       }),
     ).toThrow(/where\.addressed must be a boolean/);
+  });
+});
+
+/**
+ * A limit nobody set is still a limit somebody pays for.
+ *
+ * `maxConcurrentTurns` used to default to "no cap", and no cap is one flood
+ * away from a model run per speaker: lanes are per (peer, room), so fifty
+ * people mentioning Hex at once is fifty simultaneous sessions. Nothing is
+ * dropped by capping — the excess waits in its lane — so the cost of a default
+ * is latency and the cost of no default is unbounded spend.
+ */
+describe("what a config that says nothing about limits means", () => {
+  it("caps concurrent turns rather than leaving them unbounded", () => {
+    const limits = parseConfig(minimal).limits;
+    expect(limits.maxConcurrentTurns).toBeGreaterThan(0);
+    expect(limits.repliesPerRoomPerHour).toBeGreaterThan(0);
+  });
+
+  it("still lets an operator raise it", () => {
+    const raised = parseConfig({
+      ...minimal,
+      limits: { maxConcurrentTurns: 32 },
+    }).limits;
+    expect(raised.maxConcurrentTurns).toBe(32);
   });
 });

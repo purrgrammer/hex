@@ -1317,6 +1317,29 @@ export class HexStore {
     });
   }
 
+  /**
+   * Turns started in this room inside the window.
+   *
+   * The rate limit's meter, and durable on purpose: it used to be a list of
+   * timestamps in memory, so every restart handed the room a fresh hour — and
+   * a daemon that restarts eight times in an afternoon has no rate limit at
+   * all. Counted from the queue, which is where the decision to spend a turn
+   * is already written down.
+   *
+   * `handled` is stamped when a turn STARTS, so a turn that failed or answered
+   * nothing still counts. The cost is the turn, not the reply.
+   */
+  turnsInRoomSince(transport: string, room: string, since: number): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM inbound_events
+          WHERE transport = ? AND room = ? AND type = 'message'
+            AND outcome = 'handled' AND done_at >= ?`,
+      )
+      .get(transport, room, since) as { n: number } | undefined;
+    return Number(row?.n ?? 0);
+  }
+
   /** Which generation holds a row, if any — for the operator, and for tests. */
   inboundClaim(seq: number): number | undefined {
     const row = this.db

@@ -321,6 +321,18 @@ export class ConfigError extends Error {
 
 const DEFAULT_REPLIES_PER_HOUR = 20;
 
+/**
+ * How many turns may run at once when the config does not say.
+ *
+ * "No cap" was the old default, and no cap is one flood away from a model run
+ * per speaker: lanes are per (peer, room), so fifty people mentioning Hex at
+ * once is fifty simultaneous sessions and fifty bills. Nothing is dropped by
+ * capping — the excess waits in its lane and starts as capacity frees — so the
+ * cost of a default that is too low is latency, and the cost of no default is
+ * unbounded spend.
+ */
+const DEFAULT_MAX_CONCURRENT_TURNS = 4;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -969,7 +981,10 @@ export function parseConfig(input: unknown): HexConfig {
   const limitsRaw = raw.limits;
   const limits =
     limitsRaw === undefined
-      ? { repliesPerRoomPerHour: DEFAULT_REPLIES_PER_HOUR }
+      ? {
+          repliesPerRoomPerHour: DEFAULT_REPLIES_PER_HOUR,
+          maxConcurrentTurns: DEFAULT_MAX_CONCURRENT_TURNS,
+        }
       : (() => {
           const record = requireRecord(limitsRaw, "limits");
           rejectUnknown(
@@ -985,11 +1000,9 @@ export function parseConfig(input: unknown): HexConfig {
                     record.repliesPerRoomPerHour,
                     "limits.repliesPerRoomPerHour",
                   ),
-            // Absent stays absent: undefined is "no cap", and a default here
-            // would be a limit nobody asked for.
             maxConcurrentTurns:
               record.maxConcurrentTurns === undefined
-                ? undefined
+                ? DEFAULT_MAX_CONCURRENT_TURNS
                 : requirePositiveInt(
                     record.maxConcurrentTurns,
                     "limits.maxConcurrentTurns",

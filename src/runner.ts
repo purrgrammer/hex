@@ -54,7 +54,7 @@ export interface RunnerTarget {
 
 /** What the runner needs of the queue: the settle half of it. */
 export interface RunnerQueue {
-  finish(seq: number, outcome: string): void;
+  finish(seq: number, outcome: string, at?: number): void;
 }
 
 export interface RunnerOptions {
@@ -182,8 +182,6 @@ export function laneForMessage(inbound: Inbound, store: HexStore): string {
 
 export class Runner {
   private readonly lanes = new Map<string, Lane>();
-  /** Room key -> the seconds at which a reply landed inside this hour. */
-  private readonly replies = new Map<string, number[]>();
   private turns = 0;
 
   constructor(private readonly options: RunnerOptions) {}
@@ -205,7 +203,7 @@ export class Runner {
     if (queued.type !== "message" && queued.type !== "control") {
       // Reactions, joins and timers have no handler yet. The row says so.
       this.log(`[hex] queued ${queued.type} ${queued.seq} has no handler yet`);
-      this.options.queue.finish(queued.seq, "ignored");
+      this.options.queue.finish(queued.seq, "ignored", this.now());
       return;
     }
     /**
@@ -289,7 +287,7 @@ export class Runner {
       this.log(
         `[hex] queued message ${queued.seq} already has an answer owed — not run again`,
       );
-      this.options.queue.finish(queued.seq, "handled");
+      this.options.queue.finish(queued.seq, "handled", this.now());
       return;
     }
     const inbound = queued.carrier;
@@ -298,18 +296,18 @@ export class Runner {
       // only the transport's own object can. An answer that WAS composed is
       // owed by the spool above, not by this row.
       this.log(`[hex] queued message ${queued.seq} has no carrier — dropped`);
-      this.options.queue.finish(queued.seq, "dropped:restart");
+      this.options.queue.finish(queued.seq, "dropped:restart", this.now());
       return;
     }
     if (inbound.author === this.options.selfPubkey) {
       // Hex's own reply, back through its own subscription.
-      this.options.queue.finish(queued.seq, "ignored");
+      this.options.queue.finish(queued.seq, "ignored", this.now());
       return;
     }
     const grace = this.options.graceSecs ?? DEFAULT_GRACE_SECS;
     if (inbound.createdAt < this.options.startedAt - grace) {
       this.log(`[hex] ${short(inbound.author)} not answered: before-start`);
-      this.options.queue.finish(queued.seq, "dropped:before-start");
+      this.options.queue.finish(queued.seq, "dropped:before-start", this.now());
       return;
     }
 
@@ -328,7 +326,7 @@ export class Runner {
         this.log(
           `[hex] ${short(inbound.author)} not answered: ${whyIgnored(event, laneState)}`,
         );
-        this.options.queue.finish(queued.seq, "ignored");
+        this.options.queue.finish(queued.seq, "ignored", this.now());
         return;
       case "steer":
         if (lane.running) {
@@ -367,7 +365,7 @@ export class Runner {
     );
     if (disposition === "ignore") {
       this.log(`[hex] a ${instruction.command} matched no rule — ignored`);
-      this.options.queue.finish(queued.seq, "ignored");
+      this.options.queue.finish(queued.seq, "ignored", this.now());
       return;
     }
     if (lane.running) {
@@ -409,7 +407,7 @@ export class Runner {
       this.log(
         `[hex] queued event ${row.seq} fell out of a full lane — dropped`,
       );
-      this.options.queue.finish(row.seq, "dropped:overflow");
+      this.options.queue.finish(row.seq, "dropped:overflow", this.now());
     }
   }
 
@@ -442,13 +440,13 @@ export class Runner {
   ): void {
     const inbound = queued.carrier;
     if (!inbound) {
-      this.options.queue.finish(queued.seq, "dropped:restart");
+      this.options.queue.finish(queued.seq, "dropped:restart", this.now());
       return;
     }
     const room = roomKey(inbound.room);
-    if (this.landed(room).length >= this.options.repliesPerRoomPerHour) {
+    if (this.spent(inbound) >= this.options.repliesPerRoomPerHour) {
       this.log(`[hex] ${short(inbound.author)} not answered: rate-limited`);
-      this.options.queue.finish(queued.seq, "dropped:rate-limited");
+      this.options.queue.finish(queued.seq, "dropped:rate-limited", this.now());
       return;
     }
 
@@ -456,7 +454,7 @@ export class Runner {
     this.turns += 1;
     // Settled at the start, not at the end: a turn is fire-and-forget and the
     // row records that the event was acted on, not what the answer said.
-    this.options.queue.finish(queued.seq, "handled");
+    this.options.queue.finish(queued.seq, "handled", this.now());
     this.log(
       `[hex] ${short(inbound.author)} asked: ${inbound.text.slice(0, 80)}`,
     );
@@ -465,10 +463,10 @@ export class Runner {
       ? this.handover(abandoned, inbound)
       : this.options.target.runTurn(inbound);
     const done = run.then(
-      () => this.ending(key, queued.seq, room, true),
+      () => this.ending(key, queued.seq, room),
       (error: unknown) => {
         this.log(`[hex] the turn failed: ${message(error)}`);
-        this.ending(key, queued.seq, room, false);
+        this.ending(key, queued.seq, room);
       },
     );
     /**
@@ -533,20 +531,14 @@ export class Runner {
   /**
    * One dispatch ended. Free the lane if it still holds it, then pump.
    *
-   * `room` and `published` are a turn's; a control spends no rate limit. Only
-   * the holder frees the lane — see `begin`.
+   * `room` marks this as a turn rather than a control. Only the holder frees
+   * the lane — see `begin`.
    */
-  private ending(
-    key: string,
-    seq: number,
-    room?: string,
-    published?: boolean,
-  ): void {
-    if (room !== undefined) {
-      this.turns = Math.max(0, this.turns - 1);
-      // A reply that never landed does not spend the rate limit.
-      if (published) this.landed(room).push(this.now());
-    }
+  private ending(key: string, seq: number, room?: string): void {
+    // `room` marks this as a turn rather than a control; only a turn holds a
+    // slot. What it spent is already on the queue row, so nothing is counted
+    // here — and a turn that failed spent the same money as one that answered.
+    if (room !== undefined) this.turns = Math.max(0, this.turns - 1);
     const lane = this.lanes.get(key);
     if (lane?.running?.seq !== seq) {
       this.pump();
@@ -556,13 +548,21 @@ export class Runner {
     this.pump();
   }
 
-  private landed(room: string): number[] {
-    const cutoff = this.now() - HOUR_SECS;
-    const kept = (this.replies.get(room) ?? []).filter(
-      (stamp) => stamp > cutoff,
+  /**
+   * What this room has spent in the last hour, read off the queue.
+   *
+   * Durable rather than remembered: a list of timestamps in memory handed the
+   * room a fresh hour on every restart, and a daemon that restarts eight times
+   * in an afternoon has no rate limit at all. The queue already records the
+   * decision to spend a turn, so it is the honest meter — and it counts a turn
+   * that failed or answered nothing, because the cost is the turn.
+   */
+  private spent(inbound: Inbound): number {
+    return this.options.store.turnsInRoomSince(
+      inbound.room.transport,
+      inbound.room.id,
+      this.now() - HOUR_SECS,
     );
-    this.replies.set(room, kept);
-    return kept;
   }
 }
 

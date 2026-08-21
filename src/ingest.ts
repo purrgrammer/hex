@@ -294,7 +294,7 @@ const DEFAULT_POLL_MS = 5_000;
  * using the same copy of it.
  */
 export interface Settleable {
-  finish(seq: number, outcome: string): void;
+  finish(seq: number, outcome: string, at?: number): void;
 }
 
 /**
@@ -456,8 +456,13 @@ export class Ingestor {
   }
 
   /** Settle a row. Not calling this leaves the event owed until a restart. */
-  finish(seq: number, outcome: string): void {
-    this.options.store.finishInbound(seq, outcome);
+  finish(seq: number, outcome: string, at?: number): void {
+    /*
+     * `at` because the settling stamp is also the rate limit's meter, and the
+     * runner holds the clock that meter is read against. Two clocks either side
+     * of one number is how a window becomes unreachable.
+     */
+    this.options.store.finishInbound(seq, outcome, at);
     this.inFlight.delete(seq);
   }
 
