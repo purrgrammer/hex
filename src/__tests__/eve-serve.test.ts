@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +12,17 @@ import type { RumorSink } from "../eve/transcript.js";
 import type { Rumor } from "../nostr/types.js";
 import type { Inbound } from "../transports/types.js";
 import { HexStore, agentHome } from "../store.js";
+
+/** One lease per store: every transcript save is fenced on its generation. */
+const generations = new WeakMap<HexStore, number>();
+function fenceFor(store: HexStore): { generation: number } {
+  let generation = generations.get(store);
+  if (generation === undefined) {
+    generation = store.acquireWriterLease({ takeover: true }).generation;
+    generations.set(store, generation);
+  }
+  return { generation };
+}
 
 const AGENT = "9".repeat(64);
 const PEER = "1".repeat(64);
@@ -276,6 +288,21 @@ describe("EveServer", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+/**
+ * Rewind a session's cursor the way a kill does: the row on disk lags because
+ * the batched save never happened. `saveTranscript` now refuses to walk a
+ * cursor backwards — which is the point — so the lagging row is written raw.
+ */
+function rewindOnDisk(sessionId: string, streamIndex: number) {
+  const raw = new DatabaseSync(agentHome(home, AGENT).db);
+  raw
+    .prepare(
+      `UPDATE transcripts SET status = 'active', stream_index = ? WHERE session_id = ?`,
+    )
+    .run(streamIndex, sessionId);
+  raw.close();
+}
+
   function server(
     eve: ReturnType<typeof fakeEve>,
     bus: ReturnType<typeof transport>,
@@ -301,6 +328,7 @@ describe("EveServer", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: sinkImpl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -380,6 +408,7 @@ describe("EveServer", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: impl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -825,8 +854,7 @@ describe("EveServer", () => {
     await first.handle(inbound("msg-1", "first"));
 
     // Rewind the cursor to mid-turn and reopen the head, the way a kill does.
-    const record = store.transcriptFor(eve.session)!;
-    store.saveTranscript({ ...record, status: "active", streamIndex: 3 });
+    rewindOnDisk(eve.session, 3);
 
     const out = sink();
     const resumed = server(eve, transport(), out.impl);
@@ -913,7 +941,7 @@ describe("EveServer", () => {
     const server_ = server(eve, transport(), sink().impl);
     await server_.handle(inbound("msg-1", "first"));
     const record = store.transcriptFor(eve.session)!;
-    store.saveTranscript({ ...record, status: "aborted" });
+    store.saveTranscript({ ...record, status: "aborted" }, fenceFor(store));
     const before = eve.posts.length;
 
     const base = {
@@ -993,6 +1021,7 @@ describe("EveServer", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: sink().impl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -1009,8 +1038,7 @@ describe("EveServer", () => {
     });
 
     // Reopen the run the way a kill does, then catch it up in a new process.
-    const record = store.transcriptFor(eve.session)!;
-    store.saveTranscript({ ...record, status: "active", streamIndex: 3 });
+    rewindOnDisk(eve.session, 3);
     bound.length = 0;
     await new EveServer(options()).catchUp();
 
@@ -1043,6 +1071,7 @@ describe("EveServer", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: sink().impl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -1094,6 +1123,7 @@ describe("EveServer", () => {
           slug: "hex",
           recipients: [PEER],
           store,
+          fence: fenceFor(store),
           sink: sink().impl,
           setTimer: () => 0,
           clearTimer: () => {},
@@ -1118,6 +1148,7 @@ describe("EveServer", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: sink().impl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -1477,6 +1508,7 @@ describe("EveServer", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: out.impl,
         setTimer: () => 0,
         clearTimer: () => {},

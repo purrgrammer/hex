@@ -25,6 +25,17 @@ import type { Rumor } from "../nostr/types.js";
 import type { Inbound } from "../transports/types.js";
 import { HexStore, agentHome } from "../store.js";
 
+/** One lease per store: every transcript save is fenced on its generation. */
+const generations = new WeakMap<HexStore, number>();
+function fenceFor(store: HexStore): { generation: number } {
+  let generation = generations.get(store);
+  if (generation === undefined) {
+    generation = store.acquireWriterLease({ takeover: true }).generation;
+    generations.set(store, generation);
+  }
+  return { generation };
+}
+
 const AGENT = "9".repeat(64);
 const PEER = "1".repeat(64);
 const HOST = "http://127.0.0.1:2000";
@@ -167,6 +178,7 @@ describe("a follow that stops before its turn does", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: sinkImpl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -252,6 +264,7 @@ describe("the periodic sweep", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: sink().impl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -274,19 +287,19 @@ describe("the periodic sweep", () => {
   });
 
   it("reads a session claiming work and leaves a resting one alone", async () => {
-    store.saveTranscript(record("wrun_RESTING", "idle") as never);
+    store.saveTranscript(record("wrun_RESTING", "idle") as never, fenceFor(store));
     const idleOnly = droppingEve();
     await serverFor(idleOnly).catchUp({ claimingWork: true });
     expect(idleOnly.reads).toEqual([]);
 
-    store.saveTranscript(record("wrun_CLAIMING", "active") as never);
+    store.saveTranscript(record("wrun_CLAIMING", "active") as never, fenceFor(store));
     const working = droppingEve();
     await serverFor(working).catchUp({ claimingWork: true });
     expect(working.reads.length).toBe(1);
   });
 
   it("still reads every open session at startup", async () => {
-    store.saveTranscript(record("wrun_RESTING", "idle") as never);
+    store.saveTranscript(record("wrun_RESTING", "idle") as never, fenceFor(store));
     const eve = droppingEve();
     await serverFor(eve).catchUp();
     expect(eve.reads.length).toBe(1);
@@ -376,6 +389,7 @@ describe("what counts as already being read", () => {
         slug: "hex",
         recipients: [PEER],
         store,
+        fence: fenceFor(store),
         sink: impl,
         setTimer: () => 0,
         clearTimer: () => {},

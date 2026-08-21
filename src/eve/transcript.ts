@@ -120,6 +120,14 @@ export interface EveTranscriptOptions {
   /** Who receives the transcript. The operator, usually exactly one. */
   recipients: string[];
   store: HexStore;
+  /**
+   * The writer-lease generation this process holds.
+   *
+   * Every save is fenced on it: a process whose lease was taken over gets
+   * `FencedWriteError` instead of silently forking the chain the new holder
+   * believes it owns.
+   */
+  fence: { generation: number };
   sink: RumorSink;
   /**
    * Where a group run's events also go. Absent means they only ever wrap.
@@ -267,7 +275,7 @@ export class EveTranscript {
 
   set channel(value: { transport: string; id?: string } | undefined) {
     this.record.channel = value;
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
   }
 
   /**
@@ -289,7 +297,7 @@ export class EveTranscript {
 
   set subjects(value: string[][] | undefined) {
     this.record.subjects = value?.length ? value : undefined;
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
   }
 
   /** Wrapped to the operator, or wrapped AND carried in the room it happened in. */
@@ -300,7 +308,7 @@ export class EveTranscript {
   set carriage(value: "wrapped" | "group" | "concord") {
     this.record.carriage =
       value === "group" || value === "concord" ? value : undefined;
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
   }
 
   /**
@@ -316,7 +324,7 @@ export class EveTranscript {
 
   set group(value: string | undefined) {
     this.record.group = value;
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
   }
 
   /** The relay hosting that group. The group copy goes nowhere else. */
@@ -326,7 +334,7 @@ export class EveTranscript {
 
   set groupRelay(value: string | undefined) {
     this.record.groupRelay = value;
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
   }
 
   /**
@@ -518,7 +526,7 @@ export class EveTranscript {
     );
     if (!sent) return;
     this.record.described = true;
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
   }
 
   /**
@@ -1318,7 +1326,7 @@ export class EveTranscript {
       this.record.streamIndex = this.atIndex;
       if (this.atIndex - this.savedIndex >= SAVE_EVERY) {
         this.savedIndex = this.atIndex;
-        this.options.store.saveTranscript(this.record);
+        this.options.store.saveTranscript(this.record, this.options.fence);
       }
     }
   }
@@ -1467,7 +1475,7 @@ export class EveTranscript {
     // over — a delta arriving after `done` describes work already reported.
     await this.deltaTail;
     // Whatever the batch had not written yet.
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
     if (this.deltaDropped > 0)
       this.log(
         `[hex] ${this.deltaDropped} delta(s) dropped keeping up with the stream; every one is repeated in its turn`,
@@ -1610,7 +1618,7 @@ export class EveTranscript {
     // Session totals are accumulated at the step that reported them; a turn
     // carries its own `usage` tag and adds nothing here, or every step that
     // published something would be counted twice.
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
   }
 
   private async status(status: SessionStatus): Promise<void> {
@@ -1650,7 +1658,7 @@ export class EveTranscript {
   private lastHead?: string;
 
   private async head(title?: string): Promise<void> {
-    this.options.store.saveTranscript(this.record);
+    this.options.store.saveTranscript(this.record, this.options.fence);
     const usage: Usage = {
       input: this.record.inTokens,
       output: this.record.outTokens,
@@ -1797,7 +1805,7 @@ export class EveTranscript {
       this.frozen = false;
       // Read this far, and everything up to here is on a relay.
       this.record.streamIndex = this.atIndex;
-      this.options.store.saveTranscript(this.record);
+      this.options.store.saveTranscript(this.record, this.options.fence);
       await this.sendGroup(rumor, what, ephemeral);
       return true;
     } catch (error) {

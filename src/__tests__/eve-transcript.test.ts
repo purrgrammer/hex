@@ -9,6 +9,17 @@ import type { EveEnvelope } from "../eve/types.js";
 import type { Rumor } from "../nostr/types.js";
 import { HexStore, agentHome } from "../store.js";
 
+/** One lease per store: every transcript save is fenced on its generation. */
+const generations = new WeakMap<HexStore, number>();
+function fenceFor(store: HexStore): { generation: number } {
+  let generation = generations.get(store);
+  if (generation === undefined) {
+    generation = store.acquireWriterLease({ takeover: true }).generation;
+    generations.set(store, generation);
+  }
+  return { generation };
+}
+
 const AGENT = "9".repeat(64);
 const OPERATOR = "1".repeat(64);
 const SESSION = "ses_01KYJBZA88B4M9XN3RTC5FDGHJ";
@@ -164,6 +175,7 @@ describe("EveTranscript", () => {
         slug: "hex",
         recipients: [OPERATOR],
         store,
+        fence: fenceFor(store),
         sink: impl,
         setTimer: () => 0,
         clearTimer: () => {},
@@ -303,7 +315,9 @@ describe("EveTranscript", () => {
     ]) {
       const store = HexStore.open(agentHome(home, AGENT).db);
       const { impl, sent } = sink();
-      const pub = publisher(store, impl);
+      // A session of its own per ordering: replaying index 1 on the previous
+      // iteration's session is a cursor rewind the fence now refuses.
+      const pub = publisher(store, impl, `${SESSION}_${order[0]}`);
 
       await pub.handle({ type: "session.started", data: {} }, 1);
       await pub.handle(

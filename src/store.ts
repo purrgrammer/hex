@@ -369,6 +369,26 @@ CREATE TABLE IF NOT EXISTS writer_lease (
   acquired_at INTEGER NOT NULL,
   expires_at  INTEGER NOT NULL
 );
+
+/*
+ * A publish that is in flight: reserved before the relay round-trip, deleted
+ * when the ledger records it or the attempt gives up.
+ *
+ * The ledger alone leaves a window as wide as the relay round-trip: two
+ * executions both read a ledger that mentions neither, both publish. The
+ * reservation is written in the SAME transaction as the duplicate check, so
+ * the second execution's check — in this process or another — sees it. Rows
+ * are stamped with the writer generation so a crashed holder's leftovers are
+ * recognisable as dead rather than blocking a subject forever.
+ */
+CREATE TABLE IF NOT EXISTS publish_reservations (
+  kind        INTEGER NOT NULL,
+  scope       TEXT NOT NULL,
+  subject     TEXT NOT NULL,
+  generation  INTEGER NOT NULL,
+  reserved_at INTEGER NOT NULL,
+  PRIMARY KEY (kind, scope, subject)
+);
 `;
 
 /**
@@ -412,6 +432,15 @@ export const WRITER_LEASE_TTL_SECONDS = 60;
 /** How often a holder should call `heartbeat()`. */
 export const WRITER_LEASE_HEARTBEAT_SECONDS = 15;
 
+/**
+ * How long a publish reservation stays credible.
+ *
+ * A relay round-trip is seconds; ten minutes is a process that died holding
+ * one. Old rows are pruned at open and skipped by the check, so a crash never
+ * permanently blocks a subject.
+ */
+const RESERVATION_HORIZON_SECONDS = 10 * 60;
+
 /** Who holds the writer lease, as the row remembers them. */
 export interface WriterLeaseHolder {
   generation: number;
@@ -441,6 +470,21 @@ export interface WriterLease {
   heartbeat(): boolean;
   /** Let it go on a clean shutdown, keeping the generation for the next holder. */
   release(): void;
+}
+
+/**
+ * Thrown when a write is refused by the fence.
+ *
+ * Either the writer's generation is no longer the lease's — another process
+ * took over — or the write would move a transcript's cursors backwards, which
+ * means another writer already moved them forward. Both are the same disease:
+ * two writers, one store; the only correct response is to stop writing.
+ */
+export class FencedWriteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FencedWriteError";
+  }
 }
 
 /** Thrown when the lease is held by a live process. Names the holder. */
@@ -536,7 +580,48 @@ export class HexStore {
       Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
     );
 
+    // Orphaned reservations: stamped by a generation that is no longer the
+    // lease's, or older than any honest relay round-trip. A crash between
+    // reserve and confirm must not block that subject forever.
+    db.prepare(
+      `DELETE FROM publish_reservations
+        WHERE reserved_at < ?
+           OR generation != COALESCE(
+                (SELECT generation FROM writer_lease WHERE id = 1), -1)`,
+    ).run(Math.floor(Date.now() / 1000) - RESERVATION_HORIZON_SECONDS);
+
     return new HexStore(db);
+  }
+
+  /** Whether this connection is inside `transaction()`. Nesting is refused. */
+  private inTransaction = false;
+
+  /**
+   * Run several statements as one atomic write.
+   *
+   * `BEGIN IMMEDIATE` so the write lock is taken up front — two processes
+   * cannot both read the same state and both act on it. Nesting THROWS rather
+   * than degrading to a savepoint: nothing here needs one, so a nested call is
+   * a design error, and hiding it is worse than refusing it.
+   */
+  transaction<T>(fn: () => T): T {
+    if (this.inTransaction)
+      throw new Error(
+        "nested transaction — nothing in this store needs savepoints, so this is a design error",
+      );
+    this.db.exec("BEGIN IMMEDIATE");
+    this.inTransaction = true;
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      // A connection left inside BEGIN IMMEDIATE wedges every later write.
+      this.db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      this.inTransaction = false;
+    }
   }
 
   // ── Writer lease ──────────────────────────────────────────────────────────
@@ -544,16 +629,21 @@ export class HexStore {
   /**
    * Take the exclusive right to write to this home, or say who has it.
    *
-   * The whole read-decide-write runs under BEGIN IMMEDIATE, so two processes
+   * The whole read-decide-write runs in one transaction, so two processes
    * racing for one file cannot both see "expired" and both take generation
    * N+1 — the loser blocks on the lock and then sees the winner's row.
+   *
+   * `takeover` seizes even a LIVE lease: the generation still bumps, so the
+   * displaced holder's next heartbeat reports lost and it exits — which is
+   * strictly safer than writing beside it unfenced.
    */
-  acquireWriterLease(options?: { ttlSecs?: number }): WriterLease {
+  acquireWriterLease(options?: {
+    ttlSecs?: number;
+    takeover?: boolean;
+  }): WriterLease {
     const ttl = options?.ttlSecs ?? WRITER_LEASE_TTL_SECONDS;
     const now = Math.floor(Date.now() / 1000);
-    this.db.exec("BEGIN IMMEDIATE");
-    let generation: number;
-    try {
+    const generation = this.transaction(() => {
       const row = this.db
         .prepare(
           `SELECT generation, pid, hostname, acquired_at, expires_at
@@ -568,7 +658,7 @@ export class HexStore {
             expires_at: number;
           }
         | undefined;
-      if (row && row.expires_at > now)
+      if (row && row.expires_at > now && !options?.takeover)
         throw new LeaseHeldError({
           generation: Number(row.generation),
           pid: Number(row.pid),
@@ -578,7 +668,7 @@ export class HexStore {
         });
       // Absent or expired: take over. The generation always moves forward,
       // even over an expired or released row — it never repeats.
-      generation = (row ? Number(row.generation) : 0) + 1;
+      const next = (row ? Number(row.generation) : 0) + 1;
       this.db
         .prepare(
           `INSERT INTO writer_lease (id, generation, pid, hostname, acquired_at, expires_at)
@@ -588,13 +678,9 @@ export class HexStore {
              hostname = excluded.hostname, acquired_at = excluded.acquired_at,
              expires_at = excluded.expires_at`,
         )
-        .run(generation, process.pid, osHostname(), now, now + ttl);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      // A connection left inside BEGIN IMMEDIATE wedges every later write.
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+        .run(next, process.pid, osHostname(), now, now + ttl);
+      return next;
+    });
 
     const db = this.db;
     return {
@@ -775,6 +861,22 @@ export class HexStore {
       .run(controlId, at);
   }
 
+  /**
+   * Check and record in one transaction: true means this caller was first.
+   *
+   * `wasObeyed` then `markObeyed` as two statements is a check-then-act; two
+   * deliveries interleaving between them both read "not yet". The check cannot
+   * span the awaited instruction itself — that stays `wasObeyed` up front and
+   * this at the point it landed.
+   */
+  obeyOnce(controlId: string, at = Math.floor(Date.now() / 1000)): boolean {
+    return this.transaction(() => {
+      if (this.wasObeyed(controlId)) return false;
+      this.markObeyed(controlId, at);
+      return true;
+    });
+  }
+
   /** What this agent published recently, in the scope and kind asked about. */
   publishedSince(kind: number, scope: string, since: number): PublishedEvent[] {
     return this.db
@@ -800,6 +902,112 @@ export class HexStore {
         event.sha256,
         event.at,
       );
+  }
+
+  // ── Publish reservations ──────────────────────────────────────────────────
+
+  /**
+   * The live reservation on this subject, if any.
+   *
+   * Live means stamped by the lease's CURRENT generation and fresher than the
+   * horizon — a dead process's leftovers are skipped, not honoured. Reads
+   * only; call it inside `transaction()` alongside the duplicate check.
+   */
+  liveReservation(
+    kind: number,
+    scope: string,
+    subject: string,
+  ): { generation: number; reservedAt: number } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT generation, reserved_at FROM publish_reservations
+          WHERE kind = ? AND scope = ? AND subject = ?
+            AND reserved_at > ?
+            AND generation = (SELECT generation FROM writer_lease WHERE id = 1)`,
+      )
+      .get(
+        kind,
+        scope,
+        subject,
+        Math.floor(Date.now() / 1000) - RESERVATION_HORIZON_SECONDS,
+      ) as { generation: number; reserved_at: number } | undefined;
+    if (!row) return undefined;
+    return {
+      generation: Number(row.generation),
+      reservedAt: Number(row.reserved_at),
+    };
+  }
+
+  /**
+   * Claim a subject before the relay round-trip.
+   *
+   * Upserts, because a dead reservation may still occupy the key — the caller
+   * checked `liveReservation` in the SAME transaction, so overwriting a dead
+   * one is taking over, not racing. No transaction of its own for that reason.
+   */
+  reservePublish(entry: {
+    kind: number;
+    scope: string;
+    subject: string;
+    generation: number;
+    at?: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO publish_reservations (kind, scope, subject, generation, reserved_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(kind, scope, subject) DO UPDATE SET
+           generation = excluded.generation, reserved_at = excluded.reserved_at`,
+      )
+      .run(
+        entry.kind,
+        entry.scope,
+        entry.subject,
+        entry.generation,
+        entry.at ?? Math.floor(Date.now() / 1000),
+      );
+  }
+
+  /** Give a subject back: the publish failed, was refused, or was a dry run. */
+  releasePublish(
+    kind: number,
+    scope: string,
+    subject: string,
+    generation: number,
+  ): void {
+    this.db
+      .prepare(
+        `DELETE FROM publish_reservations
+          WHERE kind = ? AND scope = ? AND subject = ? AND generation = ?`,
+      )
+      .run(kind, scope, subject, generation);
+  }
+
+  /**
+   * A relay took it: retire the reservation and write the ledger row as one.
+   *
+   * One transaction, because the gap between them is the gap this table
+   * exists to close — a reservation deleted before the ledger row lands is a
+   * window in which another execution's check sees neither.
+   */
+  confirmPublish(
+    reservation: {
+      kind: number;
+      scope: string;
+      subject: string;
+      generation: number;
+    },
+    event: PublishedEvent,
+  ): void {
+    this.transaction(() => {
+      this.releasePublish(
+        reservation.kind,
+        reservation.scope,
+        reservation.subject,
+        reservation.generation,
+      );
+      this.rememberPublished(event);
+    });
   }
 
   /**
@@ -962,11 +1170,34 @@ export class HexStore {
       .filter((t): t is StoredTranscript => !!t);
   }
 
-  /** Write both cursors. Called after every publish, so a crash loses one event. */
-  saveTranscript(transcript: StoredTranscript): void {
-    this.db
-      .prepare(
-        `INSERT INTO transcripts (
+  /**
+   * Write both cursors. Called after every publish, so a crash loses one event.
+   *
+   * Fenced: the caller states the generation it believes it holds, and the
+   * write happens only if the lease agrees — checked INSIDE the transaction,
+   * so a takeover between check and write is impossible. The upsert also
+   * refuses to move `seq` or `stream_index` backwards: a transcript object
+   * reads its row once at construction, so a stale one saving over a newer
+   * row is the read-once race, and it forks the chain silently. Now it throws.
+   */
+  saveTranscript(
+    transcript: StoredTranscript,
+    fence: { generation: number },
+  ): void {
+    this.transaction(() => {
+      const live = this.db
+        .prepare(`SELECT generation FROM writer_lease WHERE id = 1`)
+        .get() as { generation: number } | undefined;
+      if (!live || Number(live.generation) !== fence.generation)
+        throw new FencedWriteError(
+          `refusing to write transcript ${transcript.sessionId}: this writer ` +
+            `holds generation ${fence.generation}, but the lease is at ` +
+            `${live ? `generation ${Number(live.generation)}` : "no generation at all"} — ` +
+            `another process owns this home now`,
+        );
+      const { changes } = this.db
+        .prepare(
+          `INSERT INTO transcripts (
            session_id, nostr_id, seq, prev, turn, status, trigger, stream_index,
            started_at, ended_at, in_tokens, out_tokens, cache_read, cache_write,
            cost, pending, said_turn, title, channel, described, subjects,
@@ -982,36 +1213,50 @@ export class HexStore {
            said_turn = excluded.said_turn, title = excluded.title,
            channel = excluded.channel, described = excluded.described,
            subjects = excluded.subjects, carriage = excluded.carriage,
-           grp = excluded.grp, grp_relay = excluded.grp_relay`,
-      )
-      .run(
-        transcript.sessionId,
-        transcript.nostrId,
-        transcript.seq,
-        transcript.prev ?? null,
-        transcript.turn,
-        transcript.status,
-        transcript.trigger ?? null,
-        transcript.streamIndex,
-        transcript.startedAt,
-        transcript.endedAt ?? null,
-        transcript.inTokens,
-        transcript.outTokens,
-        transcript.cacheRead,
-        transcript.cacheWrite,
-        transcript.cost ?? null,
-        transcript.pending?.length ? JSON.stringify(transcript.pending) : null,
-        transcript.saidTurn ?? null,
-        transcript.title ?? null,
-        transcript.channel ? JSON.stringify(transcript.channel) : null,
-        transcript.described ? 1 : null,
-        transcript.subjects?.length
-          ? JSON.stringify(transcript.subjects)
-          : null,
-        transcript.carriage ?? null,
-        transcript.group ?? null,
-        transcript.groupRelay ?? null,
-      );
+           grp = excluded.grp, grp_relay = excluded.grp_relay
+         WHERE excluded.seq >= transcripts.seq
+           AND excluded.stream_index >= transcripts.stream_index`,
+        )
+        .run(
+          transcript.sessionId,
+          transcript.nostrId,
+          transcript.seq,
+          transcript.prev ?? null,
+          transcript.turn,
+          transcript.status,
+          transcript.trigger ?? null,
+          transcript.streamIndex,
+          transcript.startedAt,
+          transcript.endedAt ?? null,
+          transcript.inTokens,
+          transcript.outTokens,
+          transcript.cacheRead,
+          transcript.cacheWrite,
+          transcript.cost ?? null,
+          transcript.pending?.length
+            ? JSON.stringify(transcript.pending)
+            : null,
+          transcript.saidTurn ?? null,
+          transcript.title ?? null,
+          transcript.channel ? JSON.stringify(transcript.channel) : null,
+          transcript.described ? 1 : null,
+          transcript.subjects?.length
+            ? JSON.stringify(transcript.subjects)
+            : null,
+          transcript.carriage ?? null,
+          transcript.group ?? null,
+          transcript.groupRelay ?? null,
+        );
+      // The insert always changes a row; a conflict that changed nothing is
+      // the monotonic guard refusing to walk a cursor backwards.
+      if (changes === 0)
+        throw new FencedWriteError(
+          `refusing to move transcript ${transcript.sessionId} backwards ` +
+            `(to seq ${transcript.seq}, stream_index ${transcript.streamIndex}): ` +
+            `the stored row is already ahead, so another writer moved it — ` +
+            `this copy of the transcript is stale`,
+        );
+    });
   }
 }
 

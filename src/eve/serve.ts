@@ -932,7 +932,7 @@ export class EveServer {
     // The one verb with no session behind it yet — it is how one begins.
     if (control.command === "start") {
       await this.start(control);
-      store.markObeyed(control.id);
+      store.obeyOnce(control.id);
       return;
     }
 
@@ -1224,7 +1224,7 @@ export class EveServer {
 
     // It landed. A redelivered copy is now refused for good rather than for as
     // long as this process happens to live.
-    store.markObeyed(control.id);
+    store.obeyOnce(control.id);
 
     if (!conversation) return;
 

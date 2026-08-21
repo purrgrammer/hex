@@ -404,3 +404,114 @@ describe("two executions publishing at the same time", () => {
     }
   });
 });
+
+/**
+ * The durable half: the check and the claim in one transaction, so the window
+ * as wide as the relay round-trip is closed against OTHER processes too — the
+ * in-memory queue above only serialises executions that share a process.
+ */
+describe("reservations across processes", () => {
+  it("refuses a subject another process is publishing right now", async () => {
+    const relay = await startMockRelay({ kind: "normal" });
+    const home = mkdtempSync(join(tmpdir(), "hex-reserve-race-"));
+    try {
+      // Process one: mid-publish, holding the reservation, not yet confirmed.
+      const first = HexStore.open(join(home, "data.db"));
+      const lease = first.acquireWriterLease();
+      const subject = "Filed while the other execution is still in flight";
+      first.transaction(() =>
+        first.reservePublish({
+          kind: 1621,
+          scope: REPO,
+          subject: normaliseSubject(subject),
+          generation: lease.generation,
+        }),
+      );
+
+      // Process two: its check runs in its own transaction and sees the claim.
+      const second = new PublishTools({
+        signer: signerFromSecret(secret),
+        pubkey,
+        relays: createRelays(),
+        publishRelays: [relay.url],
+        ledger: HexStore.open(join(home, "data.db")),
+      });
+      const refused = await second.call(PUBLISH_TOOL, issue(subject));
+
+      expect(refused.ok).toBe(false);
+      expect(refused.output).toContain("right now");
+      expect(relay.received).toHaveLength(0);
+      // The claim itself was not clobbered.
+      expect(
+        first.liveReservation(1621, REPO, normaliseSubject(subject)),
+      ).toBeDefined();
+    } finally {
+      await relay.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("releases the reservation when the publish never lands", async () => {
+    const home = mkdtempSync(join(tmpdir(), "hex-reserve-release-"));
+    try {
+      const store = HexStore.open(join(home, "data.db"));
+      const lease = store.acquireWriterLease();
+      const publishing = new PublishTools({
+        signer: signerFromSecret(secret),
+        pubkey,
+        relays: createRelays(),
+        publishRelays: [],
+        ledger: store,
+        generation: lease.generation,
+      });
+
+      const subject = "A proposal no relay ever took";
+      const failed = await publishing.call(PUBLISH_TOOL, issue(subject));
+      expect(failed.output).toBe("no relay to publish to");
+
+      // The subject was given back, not held for ten minutes: the same
+      // attempt again reaches the same refusal instead of "in flight".
+      expect(
+        store.liveReservation(1621, REPO, normaliseSubject(subject)),
+      ).toBeUndefined();
+      const again = await publishing.call(PUBLISH_TOOL, issue(subject));
+      expect(again.output).toBe("no relay to publish to");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("a landed publish leaves a ledger row and no reservation", async () => {
+    const relay = await startMockRelay({ kind: "normal" });
+    const home = mkdtempSync(join(tmpdir(), "hex-reserve-confirm-"));
+    try {
+      const store = HexStore.open(join(home, "data.db"));
+      const lease = store.acquireWriterLease();
+      const publishing = new PublishTools({
+        signer: signerFromSecret(secret),
+        pubkey,
+        relays: createRelays(),
+        publishRelays: [relay.url],
+        ledger: store,
+        generation: lease.generation,
+      });
+
+      const subject = "Filed exactly once, durably";
+      const landed = await publishing.call(PUBLISH_TOOL, issue(subject));
+      expect(landed.ok).toBe(true);
+
+      expect(
+        store.liveReservation(1621, REPO, normaliseSubject(subject)),
+      ).toBeUndefined();
+      expect(store.publishedSince(1621, REPO, 0)).toHaveLength(1);
+
+      const twin = await publishing.call(PUBLISH_TOOL, issue(subject));
+      expect(twin.ok).toBe(false);
+      expect(twin.output).toContain("already published");
+      expect(relay.received).toHaveLength(1);
+    } finally {
+      await relay.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

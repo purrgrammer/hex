@@ -62,6 +62,49 @@ export interface PublishLedger {
     sha256: string;
     at: number;
   }): void;
+  /**
+   * The durable half, when the ledger is a real store.
+   *
+   * All five or none: the duplicate check, the live-reservation check and the
+   * reservation insert run in ONE transaction, so a second execution — in this
+   * process or another — sees the claim inside its own transaction instead of
+   * a ledger that mentions neither. Absent (an in-memory fake, a run with no
+   * home), the check degrades to read-then-publish, which is today's behavior.
+   */
+  transaction?<T>(fn: () => T): T;
+  liveReservation?(
+    kind: number,
+    scope: string,
+    subject: string,
+  ): { generation: number; reservedAt: number } | undefined;
+  reservePublish?(entry: {
+    kind: number;
+    scope: string;
+    subject: string;
+    generation: number;
+  }): void;
+  releasePublish?(
+    kind: number,
+    scope: string,
+    subject: string,
+    generation: number,
+  ): void;
+  confirmPublish?(
+    reservation: {
+      kind: number;
+      scope: string;
+      subject: string;
+      generation: number;
+    },
+    event: {
+      id: string;
+      kind: number;
+      scope: string;
+      subject: string;
+      sha256: string;
+      at: number;
+    },
+  ): void;
 }
 
 /** What this needs of a signer: the one method, however the key is held. */
@@ -112,9 +155,36 @@ const DEFAULT_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 /** Words too common to tell two subjects apart. */
 const NOISE = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has",
-  "have", "in", "is", "it", "its", "no", "not", "of", "on", "or", "that", "the",
-  "there", "this", "to", "was", "were", "with",
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "for",
+  "from",
+  "has",
+  "have",
+  "in",
+  "is",
+  "it",
+  "its",
+  "no",
+  "not",
+  "of",
+  "on",
+  "or",
+  "that",
+  "the",
+  "there",
+  "this",
+  "to",
+  "was",
+  "were",
+  "with",
 ]);
 
 /**
@@ -212,6 +282,14 @@ export interface PublishToolsOptions {
   ledger?: PublishLedger;
   /** How far back a duplicate is still a duplicate. Default six hours. */
   duplicateWindowMs?: number;
+  /**
+   * The writer-lease generation this process holds, stamped on reservations.
+   *
+   * A reservation is only honoured while its generation is the lease's
+   * current one, so a crashed holder's leftovers expire with its lease
+   * instead of blocking a subject forever.
+   */
+  generation?: number;
   /** Guarded kinds the operator has explicitly allowed. */
   allowKinds?: number[];
   perHour?: number;
@@ -456,74 +534,136 @@ export class PublishTools {
     const template = { value };
 
     /**
-     * Already filed?
+     * Already filed, or being filed RIGHT NOW?
      *
      * Checked before the rate limit, and a hit does not spend the hourly
      * budget: refusing to repeat work is not work. Checked for signing too,
      * for the reason at the top of this file: a signed event is one relay call
      * from being published by whoever holds it, so a tool that signs what
      * publish refuses is the loophole that note warns about.
+     *
+     * For a publish through a durable ledger, the duplicate check and a
+     * reservation insert run in ONE transaction: between here and the ledger
+     * record there is a row every other process's check sees inside its own
+     * transaction, which is what closes the window as wide as the relay
+     * round-trip. Signing reserves nothing — it publishes nothing.
      */
-    const already = this.duplicate(template.value);
-    if (already) return { ok: false, output: already };
-
-    if (name === SIGN_TOOL) {
-      const event = await this.sign(template.value);
-      return { ok: true, output: JSON.stringify({ signed: event }) };
+    const ledger = this.options.ledger;
+    let reservation:
+      | { kind: number; scope: string; subject: string; generation: number }
+      | undefined;
+    if (
+      name === PUBLISH_TOOL &&
+      ledger?.transaction &&
+      ledger.liveReservation &&
+      ledger.reservePublish &&
+      ledger.releasePublish &&
+      ledger.confirmPublish &&
+      ONE_PER_THING.includes(template.value.kind)
+    ) {
+      const claim = {
+        kind: template.value.kind,
+        scope: PublishTools.scopeOf(template.value),
+        subject: normaliseSubject(PublishTools.subjectOf(template.value)),
+        generation: this.options.generation ?? 0,
+      };
+      const refused = ledger.transaction(() => {
+        const already = this.duplicate(template.value);
+        if (already) return already;
+        if (ledger.liveReservation!(claim.kind, claim.scope, claim.subject))
+          return (
+            "another execution of this turn is publishing this exact " +
+            "proposal right now, and nothing was published. Do not compose " +
+            "it again."
+          );
+        ledger.reservePublish!(claim);
+        return undefined;
+      });
+      if (refused) return { ok: false, output: refused };
+      reservation = claim;
+    } else {
+      const already = this.duplicate(template.value);
+      if (already) return { ok: false, output: already };
     }
 
-    const rate = this.withinRate();
-    if (rate) return { ok: false, output: rate };
+    let confirmed = false;
+    try {
+      if (name === SIGN_TOOL) {
+        const event = await this.sign(template.value);
+        return { ok: true, output: JSON.stringify({ signed: event }) };
+      }
 
-    const named = Array.isArray(args.relays)
-      ? args.relays.filter(
-          (url): url is string =>
-            typeof url === "string" &&
-            (url.startsWith("wss://") || url.startsWith("ws://")),
-        )
-      : [];
-    const relays = named.length > 0 ? named : this.options.publishRelays;
-    if (relays.length === 0)
-      return { ok: false, output: "no relay to publish to" };
+      const rate = this.withinRate();
+      if (rate) return { ok: false, output: rate };
 
-    const event = await this.sign(template.value);
+      const named = Array.isArray(args.relays)
+        ? args.relays.filter(
+            (url): url is string =>
+              typeof url === "string" &&
+              (url.startsWith("wss://") || url.startsWith("ws://")),
+          )
+        : [];
+      const relays = named.length > 0 ? named : this.options.publishRelays;
+      if (relays.length === 0)
+        return { ok: false, output: "no relay to publish to" };
 
-    if (this.options.dryRun) {
-      this.options.log?.(
-        `[hex] would publish kind ${event.kind}: ${event.content.slice(0, 120)}`,
-      );
+      const event = await this.sign(template.value);
+
+      if (this.options.dryRun) {
+        this.options.log?.(
+          `[hex] would publish kind ${event.kind}: ${event.content.slice(0, 120)}`,
+        );
+        return {
+          ok: true,
+          output: JSON.stringify({
+            id: event.id,
+            dryRun: true,
+            note: "nothing was published",
+          }),
+        };
+      }
+
+      const outcomes = await publishTo(this.options.relays, relays, event);
+      const accepted = outcomes.filter((outcome) => outcome.ok);
+      // Counted only when it landed: a publish nobody took has not spent the
+      // agent's hourly budget, because it has not been seen.
+      if (accepted.length > 0) {
+        this.published.push(this.now());
+        // Reservation retired and ledger row written as one, so no other
+        // execution's check ever sees neither.
+        if (reservation) {
+          this.options.ledger!.confirmPublish!(
+            reservation,
+            PublishTools.entryFor(event, this.now()),
+          );
+          confirmed = true;
+        } else this.record(event);
+      }
+
       return {
-        ok: true,
+        // A relay that refused is not a tool that failed, but it is not a success
+        // either — the caller is told the truth and decides.
+        ok: accepted.length > 0,
         output: JSON.stringify({
           id: event.id,
-          dryRun: true,
-          note: "nothing was published",
+          nevent: undefined,
+          accepted: accepted.map((outcome) => outcome.relay),
+          refused: outcomes
+            .filter((outcome) => !outcome.ok)
+            .map((outcome) => ({ relay: outcome.relay, why: outcome.message })),
         }),
       };
+    } finally {
+      // Every path that did not land — refused, rate limited, dry run, or a
+      // throw — gives the subject back rather than holding it ten minutes.
+      if (reservation && !confirmed)
+        this.options.ledger!.releasePublish!(
+          reservation.kind,
+          reservation.scope,
+          reservation.subject,
+          reservation.generation,
+        );
     }
-
-    const outcomes = await publishTo(this.options.relays, relays, event);
-    const accepted = outcomes.filter((outcome) => outcome.ok);
-    // Counted only when it landed: a publish nobody took has not spent the
-    // agent's hourly budget, because it has not been seen.
-    if (accepted.length > 0) {
-      this.published.push(this.now());
-      this.record(event);
-    }
-
-    return {
-      // A relay that refused is not a tool that failed, but it is not a success
-      // either — the caller is told the truth and decides.
-      ok: accepted.length > 0,
-      output: JSON.stringify({
-        id: event.id,
-        nevent: undefined,
-        accepted: accepted.map((outcome) => outcome.relay),
-        refused: outcomes
-          .filter((outcome) => !outcome.ok)
-          .map((outcome) => ({ relay: outcome.relay, why: outcome.message })),
-      }),
-    };
   }
 
   /**
@@ -562,7 +702,8 @@ export class PublishTools {
     });
 
     const retracted = result.targets.filter((target) => !target.refused);
-    if (result.outcomes.some((outcome) => outcome.ok)) this.published.push(this.now());
+    if (result.outcomes.some((outcome) => outcome.ok))
+      this.published.push(this.now());
 
     return {
       ok: retracted.length > 0,
@@ -641,17 +782,24 @@ export class PublishTools {
     );
   }
 
-  /** Remember one, so the next execution of this turn sees it. */
-  private record(event: NostrEvent): void {
-    if (!this.options.ledger || !ONE_PER_THING.includes(event.kind)) return;
-    this.options.ledger.rememberPublished({
+  /** The ledger row a published event becomes. */
+  private static entryFor(event: NostrEvent, nowMs: number) {
+    return {
       id: event.id,
       kind: event.kind,
       scope: PublishTools.scopeOf(event),
       subject: normaliseSubject(PublishTools.subjectOf(event)),
       sha256: createHash("sha256").update(event.content, "utf8").digest("hex"),
-      at: Math.floor(this.now() / 1000),
-    });
+      at: Math.floor(nowMs / 1000),
+    };
+  }
+
+  /** Remember one, so the next execution of this turn sees it. */
+  private record(event: NostrEvent): void {
+    if (!this.options.ledger || !ONE_PER_THING.includes(event.kind)) return;
+    this.options.ledger.rememberPublished(
+      PublishTools.entryFor(event, this.now()),
+    );
   }
 
   private withinRate(): string | undefined {

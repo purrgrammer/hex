@@ -480,11 +480,20 @@ async function main(): Promise<void> {
               "it is dead.",
           );
 
+        /**
+         * Writing heads needs the lease: every save is fenced on its
+         * generation. Takeover under --force is the safe version of forcing —
+         * if the "dead" serve is actually alive, its next heartbeat reports
+         * lost and it exits, instead of the two forking a chain side by side.
+         */
+        const lease = store.acquireWriterLease({ takeover: values.force });
+
         const targets = values.all
           ? store.openTranscripts().map((record) => record.sessionId)
           : named;
         if (targets.length === 0) {
           console.log("nothing open to stop");
+          lease.release();
           store.close();
           await resolved.close();
           return;
@@ -530,6 +539,7 @@ async function main(): Promise<void> {
               slug: transcriptConfig.slug,
               recipients: transcriptConfig.to,
               store,
+              fence: { generation: lease.generation },
               sink: dms,
               log: (line) => console.log(line),
             },
@@ -542,6 +552,7 @@ async function main(): Promise<void> {
         }
 
         await resolved.close();
+        lease.release();
         store.close();
         return;
       }
@@ -944,6 +955,7 @@ async function main(): Promise<void> {
             slug: transcriptConfig.slug,
             recipients: transcriptConfig.to,
             store,
+            fence: { generation: lease.generation },
             sink,
             deltas: transcriptConfig.deltas,
             deltaRelays: config.relays.dm,
@@ -1211,6 +1223,8 @@ async function main(): Promise<void> {
                 publishRelays: config.relays.publish,
                 readRelays: config.relays.read,
                 ledger: store,
+                // Reservations are honoured only under the live generation.
+                generation: lease.generation,
                 allowKinds: publishConfig.kinds,
                 perHour: publishConfig.perHour,
                 dryRun: publishConfig.dryRun,
@@ -1393,6 +1407,7 @@ async function main(): Promise<void> {
             slug: transcriptConfig.slug,
             recipients: transcriptConfig.to,
             store,
+            fence: { generation: lease.generation },
             // Always the gift-wrap door: the operator's copy exists whatever
             // else happens, because it is the one this agent's own reader
             // depends on.

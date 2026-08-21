@@ -18,6 +18,17 @@ import { EveTranscript, type RumorSink } from "../eve/transcript.js";
 import type { EveEnvelope } from "../eve/types.js";
 import { HexStore, agentHome } from "../store.js";
 
+/** One lease per store: every transcript save is fenced on its generation. */
+const generations = new WeakMap<HexStore, number>();
+function fenceFor(store: HexStore): { generation: number } {
+  let generation = generations.get(store);
+  if (generation === undefined) {
+    generation = store.acquireWriterLease({ takeover: true }).generation;
+    generations.set(store, generation);
+  }
+  return { generation };
+}
+
 const AGENT = "9".repeat(64);
 const OPERATOR = "1".repeat(64);
 
@@ -61,6 +72,7 @@ describe("a turn that ends twice", () => {
         slug: "hex",
         recipients: [OPERATOR],
         store,
+        fence: fenceFor(store),
         sink: quiet,
         setTimer: () => 0,
         clearTimer: () => {},
