@@ -1093,7 +1093,10 @@ export class HexStore {
     }));
   }
 
-  /** Settle one row. `outcome` is `handled`, `ignored`, or `dropped:<reason>`. */
+  /**
+   * Settle one row. `outcome` is `handled`, `duplicate`, `refused`, `ignored`,
+   * or `dropped:<reason>`. A row left unsettled is still owed work.
+   */
   finishInbound(
     seq: number,
     outcome: string,
@@ -1131,8 +1134,9 @@ export class HexStore {
    * Record that one was carried out.
    *
    * Called only AFTER the instruction landed. A command that failed because the
-   * runtime was down should be retried by the next relay's redelivery, not
-   * dropped forever, and the scope checks are what make redelivering a command
+   * runtime was down should be retried by the redelivery of its still-pending
+   * queue row at the next start — a relay's own redelivery is gone, stopped by
+   * `inbound_seen` — and the scope checks are what make redelivering a command
    * that DID land harmless.
    */
   markObeyed(controlId: string, at = Math.floor(Date.now() / 1000)): void {

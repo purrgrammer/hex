@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nip19 } from "nostr-tools";
 
 import { EveServer } from "../eve/serve.js";
+import { Ingestor, settleControl, type ControlPayload } from "../ingest.js";
 import { EveRuntime } from "../runtime/eve.js";
 import type { RumorSink } from "../eve/transcript.js";
 import type { Rumor } from "../nostr/types.js";
@@ -1583,5 +1584,109 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     await server(eve, bus, out.impl, true).handle(inbound("msg-1", "hello"));
 
     expect(bus.replies[0]?.text).toContain("the model refused");
+  });
+
+  /**
+   * The queue is the retry now, so its row has to say what really happened.
+   *
+   * `inbound_seen` keeps a rumor id for thirty days and NIP-17's replay window
+   * is two, so a relay will never offer the same wrap again: an instruction
+   * whose row was settled "handled" because the CALL returned — not because the
+   * runtime took it — is lost for good. The operator pressed stop, hex said it
+   * could not, and nothing ever tried again.
+   */
+  describe("a control that came through the queue", () => {
+    /** The daemon's glue, exactly: `settleControl` decides what the row says. */
+    function controlQueue(hex: EveServer) {
+      const acting: Promise<void>[] = [];
+      const ingest: Ingestor = new Ingestor({
+        store,
+        dispatch: ({ seq, type, event }) => {
+          if (type !== "control") return;
+          const { instruction } = event.payload as ControlPayload;
+          acting.push(
+            hex.control(instruction).then((outcome) => {
+              settleControl(ingest, seq, outcome);
+            }),
+          );
+        },
+      });
+      return { ingest, done: () => Promise.all(acting) };
+    }
+
+    const stopFor = (nostrId: string) => ({
+      id: "c-stop",
+      operator: PEER,
+      agent: AGENT,
+      session: nostrId,
+      command: "cancel" as const,
+    });
+
+    it("stays owed when the runtime was down, and lands at the next start", async () => {
+      const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN, true);
+      const first = server(eve, transport(), sink().impl);
+      await first.handle(inbound("msg-1", "first"));
+      const stop = stopFor(store.transcriptFor(eve.session)!.nostrId);
+
+      eve.failNext = true;
+      const down = controlQueue(first);
+      const seq = down.ingest.acceptControl(stop)!;
+      await down.done();
+
+      expect(store.wasObeyed("c-stop")).toBe(false);
+      // Unsettled is the whole point: this row is the only retry left.
+      expect(store.inboundOutcome(seq)).toBeUndefined();
+      expect(store.pendingInbound().map((row) => row.seq)).toContain(seq);
+
+      // A second process over the same home. The payload comes back out of
+      // sqlite, which is the round-trip the live path never exercises.
+      const retry = server(eve, transport(), sink().impl);
+      const back = controlQueue(retry);
+      const before = eve.posts.length;
+      back.ingest.start();
+      await back.done();
+      back.ingest.stop();
+
+      expect(eve.posts.length).toBe(before + 1);
+      expect(store.wasObeyed("c-stop")).toBe(true);
+      expect(store.inboundOutcome(seq)).toBe("handled");
+    });
+
+    it("settles an instruction that can never land, rather than owing it forever", async () => {
+      const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+      const hex = server(eve, transport(), sink().impl);
+      await hex.handle(inbound("msg-1", "first"));
+
+      const queue = controlQueue(hex);
+      const seq = queue.ingest.acceptControl({
+        id: "c-respond",
+        operator: PEER,
+        agent: AGENT,
+        session: store.transcriptFor(eve.session)!.nostrId,
+        command: "respond",
+      })!;
+      await queue.done();
+
+      // Nothing names what to answer, so no redelivery can help.
+      expect(store.inboundOutcome(seq)).toBe("refused");
+      expect(store.wasObeyed("c-respond")).toBe(false);
+    });
+
+    it("settles a row for an instruction a previous run already obeyed", async () => {
+      const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
+      const hex = server(eve, transport(), sink().impl);
+      await hex.handle(inbound("msg-1", "first"));
+      const stop = stopFor(store.transcriptFor(eve.session)!.nostrId);
+      // The crash gap: obeyed on disk, its row never settled.
+      store.markObeyed(stop.id);
+      const before = eve.posts.length;
+
+      const queue = controlQueue(hex);
+      const seq = queue.ingest.acceptControl(stop)!;
+      await queue.done();
+
+      expect(eve.posts.length).toBe(before);
+      expect(store.inboundOutcome(seq)).toBe("duplicate");
+    });
   });
 });

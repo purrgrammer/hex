@@ -44,6 +44,20 @@ import type { HexStore, StoredTranscript } from "../store.js";
 import { roomKey } from "../transports/types.js";
 import type { Inbound, Room } from "../transports/types.js";
 
+/**
+ * What became of one instruction, said to whoever owns its queue row.
+ *
+ * `unavailable` is the one that matters: the instruction is still OWED, because
+ * nothing was marked obeyed and the durable dedupe means no relay will ever
+ * deliver it again. Every other value is final — the obeyed ledger holds this
+ * id, or it never can.
+ */
+export type ControlOutcome =
+  | "handled"
+  | "duplicate"
+  | "refused"
+  | "unavailable";
+
 /** What this needs of a transport: answer a message, and acknowledge one. */
 export interface ServeTransport {
   reply(to: Inbound, text: string, tags?: string[][]): Promise<string>;
@@ -397,7 +411,7 @@ export class EveServer {
    * in the room. What they share is the stream — two readers of one session
    * publish one session's turns twice — so controls queue among themselves.
    */
-  private readonly instructions = new Map<string, Promise<void>>();
+  private readonly instructions = new Map<string, Promise<ControlOutcome>>();
 
   /** The periodic settle, while this server is up. */
   private sweeping?: ReturnType<typeof setInterval>;
@@ -918,22 +932,24 @@ export class EveServer {
    * whole window again and an in-memory guard has forgotten all of it. Watched
    * happen: a restart re-pressed a stop from an hour earlier.
    *
-   * Marked only once the instruction LANDS. One that failed because the runtime
-   * was down should be retried by the next redelivery rather than dropped
-   * forever, and the scope checks below are what make redelivering one that did
-   * land harmless. The residual is a crash between the two, which replays a
-   * command once — a no-op against a settled target for every verb but `steer`.
+   * Marked only once the instruction LANDS, and the returned `ControlOutcome`
+   * says which happened: `unavailable` means nothing was marked and the caller
+   * must leave the instruction owed, because the queue's durable dedupe is what
+   * a relay's redelivery used to be and it never delivers the same wrap twice.
+   * The scope checks below are what make redelivering one that DID land
+   * harmless. The residual is a crash between the two, which replays a command
+   * once — a no-op against a settled target for every verb but `steer`.
    */
-  async control(control: SessionControl): Promise<void> {
-    if (!this.obeyed.admit(control.id)) return;
+  async control(control: SessionControl): Promise<ControlOutcome> {
+    if (!this.obeyed.admit(control.id)) return "duplicate";
     const store = this.options.transcript.store;
-    if (store.wasObeyed(control.id)) return;
+    if (store.wasObeyed(control.id)) return "duplicate";
 
     // The one verb with no session behind it yet — it is how one begins.
     if (control.command === "start") {
       await this.start(control);
       store.obeyOnce(control.id);
-      return;
+      return "handled";
     }
 
     /**
@@ -950,7 +966,9 @@ export class EveServer {
       this.log(
         `[hex] a ${control.command} names a session this agent did not publish`,
       );
-      return;
+      // Still owed, not refused: the `start` that publishes this session may be
+      // the row queued just ahead of this one, and its turn has not run yet.
+      return "unavailable";
     }
 
     /**
@@ -967,7 +985,7 @@ export class EveServer {
     const previous = this.instructions.get(record.sessionId);
     const run = (async () => {
       await previous?.catch(() => {});
-      await this.obey(control, record, store);
+      return this.obey(control, record, store);
     })();
     this.instructions.set(record.sessionId, run);
     return run;
@@ -978,7 +996,7 @@ export class EveServer {
     control: SessionControl,
     record: StoredTranscript,
     store: HexStore,
-  ): Promise<void> {
+  ): Promise<ControlOutcome> {
     const say = (what: string) =>
       this.log(`[hex] ${short(control.operator)} → ${what}`);
 
@@ -1001,7 +1019,7 @@ export class EveServer {
       this.log(
         `[hex] a ${control.command} for a run that already ${record.status} — ignored`,
       );
-      return;
+      return "unavailable";
     }
 
     /**
@@ -1081,7 +1099,7 @@ export class EveServer {
             this.log(
               "[hex] a respond with no request id names nothing to answer",
             );
-            return;
+            return "refused";
           }
           /**
            * The request has to still be open, and the check runs HERE.
@@ -1112,7 +1130,9 @@ export class EveServer {
             this.log(
               `[hex] ${control.request} is not a question ${record.sessionId} is waiting on — ignored`,
             );
-            return;
+            // Owed rather than refused, for the same reason the check runs after
+            // the drain: the pending set it reads is a mirror that catches up.
+            return "unavailable";
           }
           await this.options.runtime.respond(record.sessionId, [
             {
@@ -1137,7 +1157,7 @@ export class EveServer {
         case "steer": {
           if (!control.text) {
             this.log("[hex] a steer with no message would say nothing");
-            return;
+            return "refused";
           }
           /**
            * Queue behind the running turn unless told otherwise.
@@ -1175,19 +1195,23 @@ export class EveServer {
          * a status that never changes is the only clue otherwise.
          */
         case "compact":
-          if (!this.options.runtime.compact)
-            return this.log(
+          if (!this.options.runtime.compact) {
+            this.log(
               `[hex] ${this.options.runtime.name} cannot compact a context`,
             );
+            return "refused";
+          }
           await this.options.runtime.compact(record.sessionId);
           say("compacted the context");
           break;
 
         case "clear":
-          if (!this.options.runtime.clear)
-            return this.log(
+          if (!this.options.runtime.clear) {
+            this.log(
               `[hex] ${this.options.runtime.name} cannot clear a context`,
             );
+            return "refused";
+          }
           await this.options.runtime.clear(record.sessionId);
           say("cleared the context");
           break;
@@ -1201,10 +1225,12 @@ export class EveServer {
          * would otherwise see a run that simply stopped mid-sentence.
          */
         case "reset":
-          if (!this.options.runtime.reset)
-            return this.log(
+          if (!this.options.runtime.reset) {
+            this.log(
               `[hex] ${this.options.runtime.name} cannot retire a session`,
             );
+            return "refused";
+          }
           await this.options.runtime.reset(record.sessionId, control.text);
           await this.retire(record.sessionId);
           say("retired the session");
@@ -1216,17 +1242,17 @@ export class EveServer {
       this.log(
         `[hex] could not ${control.command} ${record.sessionId}: ${message(error)}`,
       );
-      // Deliberately NOT marked: the next relay's redelivery is this
-      // instruction's retry, and a runtime that was down a second ago may not
-      // be down now.
-      return;
+      // Deliberately NOT marked: the instruction is still owed, so its queue
+      // row stays pending and the next start redelivers it — a runtime that was
+      // down a second ago may not be down now.
+      return "unavailable";
     }
 
     // It landed. A redelivered copy is now refused for good rather than for as
     // long as this process happens to live.
     store.obeyOnce(control.id);
 
-    if (!conversation) return;
+    if (!conversation) return "handled";
 
     /**
      * A verb that does not start a turn still CHANGES something.
@@ -1268,10 +1294,10 @@ export class EveServer {
             `${control.command} closed ${closed} question(s) nobody can answer now`,
           );
       }
-      return;
+      return "handled";
     }
 
-    if (!boundary) return;
+    if (!boundary) return "handled";
     /**
      * Follow it to the end, and say nothing at the end of it.
      *
@@ -1283,6 +1309,7 @@ export class EveServer {
     const asked: Asked[] = [];
     await this.follow(conversation, control.operator, boundary, asked);
     await this.reconcile(conversation, answered);
+    return "handled";
   }
 
   /**

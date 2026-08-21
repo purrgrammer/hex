@@ -13,6 +13,7 @@
  * hex's events being mishandled by an older one.
  */
 
+import type { ControlOutcome } from "./eve/serve.js";
 import type { SessionControl } from "./nostr/decode-control.js";
 import type { HexStore, QueuedInbound } from "./store.js";
 import type { Inbound, TransportName } from "./transports/types.js";
@@ -187,6 +188,36 @@ export interface IngestorOptions {
 
 const DEFAULT_POLL_MS = 5_000;
 
+/**
+ * How long a control stays owed before it is given up on.
+ *
+ * NIP-17's two-day timestamp window, because that window IS the redelivery this
+ * replaces: an unobeyed instruction used to be retried for exactly as long as a
+ * restart's inbox read still reached it, and no longer. Without a bound, one
+ * that can never land — a stop for a run that already ended, a session this
+ * agent never published — is re-dispatched at every start forever.
+ */
+const CONTROL_OWED_SECONDS = 2 * 24 * 60 * 60;
+
+/**
+ * Settle a control's row from what the server made of it, or leave it owed.
+ *
+ * The one rule the queue and the obeyed ledger have to agree on, in one place
+ * because both callers of it — the daemon and its tests — get it wrong the same
+ * way otherwise: settling on "the call returned" marks an instruction handled
+ * that the runtime refused, and `inbound_seen` then means no relay ever offers
+ * it again. Returns whether the row was settled.
+ */
+export function settleControl(
+  ingest: Ingestor,
+  seq: number,
+  outcome: ControlOutcome,
+): boolean {
+  if (outcome === "unavailable") return false;
+  ingest.finish(seq, outcome);
+  return true;
+}
+
 export class Ingestor {
   /** Rows handed to `dispatch` and not yet settled. Never dispatched twice. */
   private readonly inFlight = new Set<number>();
@@ -235,11 +266,21 @@ export class Ingestor {
    * writer that has not been fenced is the duplicate-publish bug. A pending
    * CONTROL is redelivered, because a relay used to redeliver it and the
    * `obeyed` ledger makes a second delivery a no-op — dropping it would lose a
-   * stop button pressed while the runtime was down.
+   * stop button pressed while the runtime was down. Past `CONTROL_OWED_SECONDS`
+   * it is given up on, or one that can never land is retried at every start for
+   * the life of the home.
    */
   start(): void {
+    const owedSince = now() - CONTROL_OWED_SECONDS;
     for (const row of this.options.store.pendingInbound()) {
-      if (row.type === "control") continue;
+      if (row.type === "control") {
+        if (row.observedAt >= owedSince) continue;
+        this.log(
+          `[hex] control ${row.seq} was never carried out and is too old to try — dropped`,
+        );
+        this.options.store.finishInbound(row.seq, "dropped:expired");
+        continue;
+      }
       this.log(
         `[hex] queued ${row.type} ${row.seq} was left behind by an earlier run — dropped`,
       );

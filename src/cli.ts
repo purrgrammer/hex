@@ -59,7 +59,7 @@ import { BlossomTools } from "./tools/blossom-tools.js";
 import { GitTools } from "./tools/git-tools.js";
 import { NgitTools } from "./tools/ngit-tools.js";
 import { ReplyGate } from "./policy.js";
-import { Ingestor, type ControlPayload } from "./ingest.js";
+import { Ingestor, settleControl, type ControlPayload } from "./ingest.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -1559,11 +1559,19 @@ async function main(): Promise<void> {
               const { instruction } = event.payload as ControlPayload;
               void server
                 .control(instruction)
-                .then(() => ingest.finish(seq, "handled"))
+                .then((outcome) => {
+                  // Settled only when the instruction is finished with. One
+                  // that never landed is left PENDING deliberately: the row is
+                  // the only thing that can bring it back, now that the queue's
+                  // dedupe stops a relay ever redelivering the wrap. The next
+                  // start is its retry.
+                  if (!settleControl(ingest, seq, outcome))
+                    console.log(
+                      `[hex] the ${instruction.command} did not land — still owed`,
+                    );
+                })
                 .catch((error: unknown) => {
-                  // Left pending deliberately: an instruction that could not
-                  // land is still owed, and the next start redelivers it. That
-                  // is what a relay's redelivery used to do.
+                  // Same rule for a rejection: still owed, still pending.
                   console.log(
                     `[hex] the control failed: ${error instanceof Error ? error.message : String(error)}`,
                   );

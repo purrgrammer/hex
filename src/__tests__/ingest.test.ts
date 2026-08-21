@@ -17,6 +17,7 @@ import {
   Ingestor,
   controlEvent,
   messageEvent,
+  settleControl,
   type HexEventType,
   type MessagePayload,
   type QueuedEvent,
@@ -222,6 +223,54 @@ describe("what a dead process left behind", () => {
 
     expect(store.pendingInbound().map((row) => row.seq)).toEqual([seq]);
     expect(store.inboundOutcome(seq)).toBeUndefined();
+  });
+
+  it("gives up on a control too old for any redelivery to have helped", () => {
+    /**
+     * The bound the relay used to provide. An instruction that can never land —
+     * a stop for a run that already ended, a session this agent never published
+     * — would otherwise be handed to `dispatch` at every start for the life of
+     * the home.
+     */
+    const stale = Math.floor(Date.now() / 1000) - 3 * 24 * 60 * 60;
+    const seq = store.enqueueInbound(
+      controlEvent(instruction("8".repeat(64)), stale),
+    )!;
+    const fresh = store.enqueueInbound(
+      controlEvent(instruction("9".repeat(64))),
+    )!;
+
+    const { ingest, seen } = recording();
+    ingest.start();
+    ingest.stop();
+
+    expect(store.inboundOutcome(seq)).toBe("dropped:expired");
+    expect(seen.map((queued) => queued.seq)).toEqual([fresh]);
+  });
+});
+
+describe("settling a control's row", () => {
+  it("leaves the row pending when the instruction never landed", () => {
+    const seq = store.enqueueInbound(
+      controlEvent(instruction("a1".padEnd(64, "0"))),
+    )!;
+    const ingest = new Ingestor({ store, dispatch: () => {} });
+
+    expect(settleControl(ingest, seq, "unavailable")).toBe(false);
+    expect(store.inboundOutcome(seq)).toBeUndefined();
+    expect(store.pendingInbound().map((row) => row.seq)).toEqual([seq]);
+  });
+
+  it("settles it under every other outcome", () => {
+    const ingest = new Ingestor({ store, dispatch: () => {} });
+    for (const outcome of ["handled", "duplicate", "refused"] as const) {
+      const seq = store.enqueueInbound(
+        controlEvent(instruction(`${outcome}`.padEnd(64, "0"))),
+      )!;
+      expect(settleControl(ingest, seq, outcome)).toBe(true);
+      expect(store.inboundOutcome(seq)).toBe(outcome);
+    }
+    expect(store.pendingInbound()).toHaveLength(0);
   });
 });
 
