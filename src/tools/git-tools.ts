@@ -24,6 +24,7 @@
  */
 
 import type { Filter, NostrEvent } from "nostr-tools";
+import { nip19 } from "nostr-tools";
 
 import { publishTo, requestEvents, type HexRelays } from "../relays.js";
 import type { EventSigner } from "./publish.js";
@@ -566,6 +567,16 @@ function describeThread(event: NostrEvent, state: string) {
     state,
     title: subject ?? firstLine?.slice(0, 120) ?? "(no title)",
     author: event.pubkey,
+    // The forms a person can be shown. Without them a caller wanting to name
+    // this thread in a room has to encode bech32 itself, which it cannot do —
+    // the checksum is not predictable, and an invented pointer resolves to
+    // nothing. Same rule as `describeEvent` in knowledge.ts.
+    npub: nip19.npubEncode(event.pubkey),
+    nevent: nip19.neventEncode({
+      id: event.id,
+      kind: event.kind,
+      author: event.pubkey,
+    }),
     created_at: event.created_at,
     labels: [
       ...tagValues(event, "t"),
