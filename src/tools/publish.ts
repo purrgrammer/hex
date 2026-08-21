@@ -33,6 +33,7 @@ import { createHash } from "node:crypto";
 
 import { finalizeEvent } from "nostr-tools/pure";
 import type { EventTemplate, NostrEvent } from "nostr-tools";
+import { nip19 } from "nostr-tools";
 
 import { publishTo, type HexRelays } from "../relays.js";
 import { retract } from "../retract.js";
@@ -646,7 +647,10 @@ export class PublishTools {
         ok: accepted.length > 0,
         output: JSON.stringify({
           id: event.id,
-          nevent: undefined,
+          ...pointerFor(
+            event,
+            accepted.map((outcome) => outcome.relay),
+          ),
           accepted: accepted.map((outcome) => outcome.relay),
           refused: outcomes
             .filter((outcome) => !outcome.ok)
@@ -908,5 +912,48 @@ export class PublishTools {
 export function signerFromSecret(secret: Uint8Array): EventSigner {
   return {
     signEvent: async (template) => finalizeEvent(template, secret),
+  };
+}
+
+/**
+ * The bech32 pointer a human can actually follow, computed here because the
+ * caller cannot compute it.
+ *
+ * This field used to be `nevent: undefined` — advertised, always absent, and
+ * dropped by JSON.stringify. A model that needed something to paste into a room
+ * did the only thing left and wrote the bech32 itself, which cannot be done by
+ * predicting characters: one delivered patch was announced with an nevent whose
+ * checksum did not verify, pointing at nothing.
+ *
+ * The kind rides along deliberately — the same rule the clients here follow, so
+ * a reader can dispatch on it without fetching first — and so do the relays
+ * that actually took the event, which is the only honest hint about where it
+ * can be found. An addressable event gets an `naddr` as well, since its address
+ * outlives this particular copy.
+ */
+export function pointerFor(
+  event: NostrEvent,
+  relays: string[],
+): { nevent: string; naddr?: string } {
+  const hints = relays.slice(0, 3);
+  const nevent = nip19.neventEncode({
+    id: event.id,
+    kind: event.kind,
+    author: event.pubkey,
+    ...(hints.length > 0 ? { relays: hints } : {}),
+  });
+
+  const addressable = event.kind >= 30000 && event.kind < 40000;
+  if (!addressable) return { nevent };
+
+  const identifier = event.tags.find((tag) => tag[0] === "d")?.[1] ?? "";
+  return {
+    nevent,
+    naddr: nip19.naddrEncode({
+      kind: event.kind,
+      pubkey: event.pubkey,
+      identifier,
+      ...(hints.length > 0 ? { relays: hints } : {}),
+    }),
   };
 }
