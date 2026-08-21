@@ -447,10 +447,22 @@ export class EveServer {
    * A session that really is still running simply drains to its current lull and
    * stays `active`, which is then true.
    */
-  async catchUp(): Promise<void> {
+  async catchUp(options?: {
+    /**
+     * Only settle heads that CLAIM to be working.
+     *
+     * What the periodic sweep passes. A head at `idle` or `awaiting-input` is
+     * resting and saying so — true whether or not anyone is reading it — while
+     * `active` is a claim that stops being true the moment the reading stops.
+     * Without this the sweep re-read every open session every few minutes
+     * forever, which is a self-inflicted load with nothing to find.
+     */
+    claimingWork?: boolean;
+  }): Promise<void> {
     const open = this.options.transcript.store
       .openTranscripts()
-      .filter((record) => !this.following(record.sessionId));
+      .filter((record) => !this.following(record.sessionId))
+      .filter((record) => !options?.claimingWork || record.status === "active");
     if (open.length === 0) return;
     this.log(
       `[hex] catching up ${open.length} session(s) nobody was following`,
@@ -2051,7 +2063,7 @@ export class EveServer {
     const every = this.options.sweepMs ?? DEFAULT_SWEEP_MS;
     if (every <= 0 || this.sweeping) return;
     this.sweeping = setInterval(() => {
-      void this.catchUp().catch((error: unknown) =>
+      void this.catchUp({ claimingWork: true }).catch((error: unknown) =>
         this.log(`[hex] the sweep did not finish: ${message(error)}`),
       );
     }, every);

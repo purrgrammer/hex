@@ -222,3 +222,73 @@ describe("a follow that stops before its turn does", () => {
     expect(eve.reads.length).toBeGreaterThanOrEqual(before);
   });
 });
+
+/**
+ * The sweep has to be free to run every few minutes, which means it must find
+ * nothing almost every time. A head at `idle` is resting and saying so; only
+ * `active` is a claim that stops being true when the reading stops.
+ */
+describe("the periodic sweep", () => {
+  let home: string;
+  let store: HexStore;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "eve-sweep-"));
+    store = HexStore.open(agentHome(home, AGENT).db);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function serverFor(eve: ReturnType<typeof droppingEve>) {
+    return new EveServer({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
+      transport: transport() as never,
+      drainQuietMs: 50,
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: sink().impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+  }
+
+  const record = (sessionId: string, status: string) => ({
+    sessionId,
+    nostrId: sessionId.padEnd(64, "0").slice(0, 64),
+    seq: 1,
+    turn: 1,
+    status,
+    streamIndex: 0,
+    startedAt: 1,
+    inTokens: 0,
+    outTokens: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  });
+
+  it("reads a session claiming work and leaves a resting one alone", async () => {
+    store.saveTranscript(record("wrun_RESTING", "idle") as never);
+    const idleOnly = droppingEve();
+    await serverFor(idleOnly).catchUp({ claimingWork: true });
+    expect(idleOnly.reads).toEqual([]);
+
+    store.saveTranscript(record("wrun_CLAIMING", "active") as never);
+    const working = droppingEve();
+    await serverFor(working).catchUp({ claimingWork: true });
+    expect(working.reads.length).toBe(1);
+  });
+
+  it("still reads every open session at startup", async () => {
+    store.saveTranscript(record("wrun_RESTING", "idle") as never);
+    const eve = droppingEve();
+    await serverFor(eve).catchUp();
+    expect(eve.reads.length).toBe(1);
+  });
+});
