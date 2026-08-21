@@ -26,21 +26,11 @@ They are rumors, carried as NIP-59 gift wraps to whoever is meant to read them. 
 
 Envelopes are reused unchanged: `kind:1059` wrap with a `kind:13` seal (NIP-59), and `kind:21059` for a delta so the wrap is dropped with its payload.
 
+Relays index single-letter tags only, which is why the `indexable` column below is almost entirely `no`. Nothing here needs it: a reader holding a wrap already holds the session, and an indexable counter would leak a run's progress to a relay that can read nothing else.
+
 ### Kind allocation
 
-The numbers are a family with `kind:777` (spells) and `kind:30777` (spellbooks). Checks performed before freezing them:
-
-| Registry | Result |
-| --- | --- |
-| Upstream event-kind table (`nostr-protocol/nips` `README.md`, commit `656cecc7c0a815b6a2b218d3b5d6f078b3f4dbab`) | `1777`, `1779`, `21777`, `31777` and `31779` all unassigned; nothing assigned in `1770`-`1789`, `21770`-`21779` or `31770`-`31789`. |
-| nostrbook.dev (`https://nostrbook.dev/kinds/<n>`) | All HTTP 404 — no entry. |
-
-`1778` is deliberately unused. It held a coarse stored "milestone" until that
-turned out to restate what the turn beside it already said; what it alone could
-carry moved onto the head's `status`. Burned rather than recycled, so a reader
-that once saw one never mistakes a later kind for it.
-
-Both registries are advisory and neither reserves numbers, so an unregistered kind may still be in use by an unpublished client.
+The numbers are a family with `kind:777` (spells) and `kind:30777` (spellbooks). None is assigned in the upstream event-kind table or on nostrbook.dev. Both registries are advisory and neither reserves numbers, so an unregistered kind may still be in use by an unpublished client.
 
 ## Agent Definition — `kind:31779`
 
@@ -69,12 +59,11 @@ kilobytes; the head points at it through `agent`.
 | `name`    | `<string>` | no | yes |
 | `picture` | `<url>` | no | no |
 | `about`   | `<string>` | no | no |
-| `tool`    | `<tool-name>`, `<description>`, `<parameters>` | yes | no |
+| `tool`    | `<tool-name>`, `<description>`, `<parameters>` | no | no |
 | `try`     | `<starter prompt>` | no | no |
 | `model`   | `<model-id>`, `<context-window>` | no | no |
 | `p`       | `<pubkey>` — a recipient this copy was sealed for | yes | no |
 | `repo`    | `<name>`, `<url>`, `<path>`, `<description>` | no | no |
-| `alt`     | `<string>` ([NIP-31](31.md)) | no | yes |
 
 `repo` says what the agent has checked out and WHERE — the path inside its own
 sandbox. The path is the load-bearing element: a client offering "start a run on
@@ -95,7 +84,7 @@ names one recipient by design and a reader holding one copy cannot tell whether
 anyone else got it. They say who the snapshot was meant for, not who may read it
 — a definition is not an access list.
 
-`tool` is indexable, so `{"#tool":["nostr.req"]}` finds every agent that can do a thing. Trailing elements are dropped when absent: a bare tool is a two-element tag, a fully described one is four. `<parameters>` is the tool's schema — usually JSON Schema — as a JSON string, which is the price of the content being prose rather than a document. A reader that cannot parse it treats the tool as having no schema rather than discarding the tool.
+Relays index single-letter tags only, so `tool` is not queryable — it describes a definition a reader already holds. Trailing elements are dropped when absent: a bare tool is a two-element tag, a fully described one is four. `<parameters>` is the tool's schema — usually JSON Schema — as a JSON string, which is the price of the content being prose rather than a document. A reader that cannot parse it treats the tool as having no schema rather than discarding the tool.
 
 ```json
 {
@@ -109,8 +98,7 @@ anyone else got it. They say who the snapshot was meant for, not who may read it
     ["about", "Answers questions about Nostr REQs."],
     ["tool", "nostr.req", "Query relays", "{\"type\":\"object\",\"properties\":{\"kinds\":{\"type\":\"array\"}}}"],
     ["try", "what kinds does this relay serve?"],
-    ["repo", "grimoire", "https://github.com/purrgrammer/grimoire", "/workspace/grimoire", "The Nostr explorer this agent assists with"],
-    ["alt", "Hex — a Nostr agent answering REQ questions"]
+    ["repo", "grimoire", "https://github.com/purrgrammer/grimoire", "/workspace/grimoire", "The Nostr explorer this agent assists with"]
   ]
 }
 ```
@@ -137,11 +125,9 @@ One run's current state. `content` is a human-readable summary and MAY be empty.
 | `input`    | `<request-id>` — one per request the run is blocked on | no | no |
 | `transport` | `nip-17`\|`nip-29`\|`nip-59`\|… — the protocol this run is happening on | no | no |
 | `channel`  | the room, in that protocol's own notation | no | no |
-| `delta-relay` | `<relay>` — where this session's `21777`s are published | no | no |
 | `agent`    | `31779:<pubkey>:<d>` — the definition or snapshot describing this run | no | no |
-| `alt`      | `<string>` | no | yes |
 
-The last three statuses are terminal; `awaiting-input` and `payment-required` are [NIP-90](90.md)'s values verbatim.
+`done`, `error` and `aborted` are terminal. `awaiting-input` means a question is open; `payment-required` means a sign-in the agent cannot perform for itself.
 
 A third element on `cost` marks a figure that was **worked out** from token counts
 and list prices rather than billed by a provider — plenty of providers report no
@@ -162,11 +148,6 @@ Neither is indexable, deliberately. A single-letter tag would let a relay group
 every session an agent ever ran with one person — precisely the association the
 gift wrap exists to withhold — and no reader needs to query by it, since a reader
 holding the head already holds the session.
-
-`delta-relay` exists because deltas ride `kind:21059`, which a recipient's DM
-inbox relay is entitled to refuse — and in practice they do. A publisher that
-sends deltas anywhere other than the recipient's own inbox MUST say where, or the
-reader watches a status that never moves while the run goes perfectly.
 
 `last-seq` and `turns` are two different numbers and neither substitutes for the
 other. `last-seq` counts published events, and one exchange is routinely four or
@@ -269,8 +250,7 @@ so the head's terminal status is its whole record.
 | `model` | `<model-id>`, `<provider>`; assistant only | no | no |
 | `usage` | `<in>`, `<out>`, `<cache-read>`, `<cache-write>` | no | no |
 | `cost`  | `<amount>`, `<currency>`, `estimated` | no | no |
-| `tool`  | one per distinct tool in `content` | yes | no |
-| `alt`   | plain-text rendering — what a client that cannot parse the parts shows | no | yes |
+| `tool`  | one per distinct tool in `content` | no | no |
 
 ```json
 {
@@ -287,8 +267,7 @@ so the head's terminal status is its whole record.
     ["model", "claude-opus-5", "anthropic"],
     ["usage", "18432", "921", "16000", "2432"],
     ["cost", "0.084", "USD"],
-    ["tool", "Bash"],
-    ["alt", "Assistant: found it. Calling Bash."]
+    ["tool", "Bash"]
   ]
 }
 ```
@@ -314,7 +293,6 @@ wrapped and no relay can see any of it, and the verb set grows.
 | `option`  | the chosen option's id, when the question offered any | no | no |
 | `policy`  | `queue`\|`steer` — what a message sent mid-turn does | no | no |
 | `a`/`e`/`p`/`r`/`i` | what the run is to be ABOUT, as on a head | yes | no |
-| `alt`     | `<string>` | no | yes |
 
 `content` is free text: the answer for a `respond`, the message for a `steer`,
 empty otherwise. Prose goes in `content` — the one place this family always puts
@@ -330,8 +308,7 @@ it.
     ["p", "9e1f…agent"],
     ["command", "respond"],
     ["request", "req_01J8…"],
-    ["option", "approve"],
-    ["alt", "Session control: respond"]
+    ["option", "approve"]
   ]
 }
 ```
@@ -408,11 +385,8 @@ A `start` carries three things a message cannot:
   agent MUST reject anything else, because a client-chosen name is a name in a
   space the agent shares with every other client.
 - **Subjects as pointers.** `a`, `e`, `p`, `r` and `i` tags say what the run is
-  about, and the agent puts them in front of the model as resolved context. This
-  replaces the older advice to name the repository in the message as words, which
-  was a workaround for having no field and produced exactly the failure it was
-  meant to avoid: a sentence the model may or may not act on, in text the
-  operator did not write.
+  about, and the agent puts them in front of the model as resolved context. A
+  pointer, not a sentence in the message hoping the model notices.
 - **The opening instruction**, in `content`, which becomes the run's first `user`
   turn as if it had been sent.
 
@@ -437,9 +411,8 @@ itself rather than waiting to be told.
 
 A run that stops to ask a question is neither working nor finished, and this is
 the part a client is most likely to get wrong — because a runtime's own boundary
-events usually cannot tell the difference. In the implementation this NIP is
-written from, a parked turn emits exactly what a completed turn emits, with
-identical payloads. **A publisher MUST NOT infer that a session ended from a
+events usually cannot tell the difference. A runtime's own boundary events routinely cannot: a parked turn can emit exactly
+what a completed turn emits, with identical payloads. **A publisher MUST NOT infer that a session ended from a
 runtime's end-of-turn signal alone.**
 
 What separates them is the head's `input` tags, and nothing else. A request is
@@ -529,9 +502,9 @@ The choice is made once, when the session opens. There is one chain and one
 `last-seq`, so a group copy that begins at turn twelve is a transcript with a
 hole nobody can fill.
 
-Note for implementers: a NIP-29 relay accepts a fixed set of kinds, and at the
-time of writing the common implementations do not include these. Until they do,
-an agent's group copy is refused and its transcript reaches the operator only.
+Note for implementers: a NIP-29 relay accepts a fixed set of kinds, and the
+common implementations do not include these, so an agent's group copy is refused
+and its transcript reaches the operator only.
 An agent SHOULD stop the group copy at the first refusal rather than skipping the
 event and carrying on — a chain that is visibly short is readable, one with a
 hole in it is not — and MUST NOT let that refusal stop the wrapped copy.
@@ -562,9 +535,9 @@ A turn that quietly lost half its content reads as a whole one, which is worse t
 
 ## What a Minimal Client Must Implement
 
-Read: subscribe `{"kinds":[1059],"#p":[<self>]}`, decrypt the wrap, decrypt the seal, check the seal's author against the rumor's, then check the rumor's author against its `a` address. Sort turns by `seq`, render `alt` when `content` will not parse, and compare what you hold against the head's `last-seq`. Treat a head carrying `input` tags as waiting rather than finished. Deltas and `21059` are optional.
+Read: subscribe `{"kinds":[1059],"#p":[<self>]}`, decrypt the wrap, decrypt the seal, check the seal's author against the rumor's, then check the rumor's author against its `a` address. Sort turns by `seq` and compare what you hold against the head's `last-seq`. Treat a head carrying `input` tags as waiting rather than finished. Deltas and `21059` are optional.
 
-Publish: a persistent key with a `kind:0`, one `31777` head kept current, and one `1777` per message carrying `a`/`seq`/`prev`/`turn`/`role`/`p`/`alt`. Definitions, deltas and blob refs are all optional. A publisher that can be blocked MUST keep its open requests on the head, durably.
+Publish: a persistent key with a `kind:0`, one `31777` head kept current, and one `1777` per message carrying `a`/`seq`/`prev`/`turn`/`role`/`p`. Definitions, deltas and blob refs are all optional. A publisher that can be blocked MUST keep its open requests on the head, durably.
 
 Control is optional to send and **mandatory to authorise**: an agent that reads
 `1779` at all MUST check the author against its own head's `operator` before

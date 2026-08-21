@@ -1,7 +1,7 @@
 {
   "name": "nostr-hex",
   "version": "0.1.0",
-  "description": "Hex \u2014 a transport-agnostic agent for Nostr groups. NIP-29 today, NIP-17 and Concord next.",
+  "description": "Hex \u2014 an agent that lives on Nostr. Reaches over NIP-17, NIP-29 and Concord; publishes every run as a signed transcript.",
   "type": "module",
   "license": "MIT",
   "author": "Alejandro G\u00f3mez",
