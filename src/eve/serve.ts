@@ -30,7 +30,7 @@
 
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
 import { asRecord, payload, stringField } from "./types.js";
-import { sessionAddress } from "../nostr/encode.js";
+import { sessionAddress, sessionPointer } from "../nostr/encode.js";
 import { TERMINAL_STATUSES } from "../nostr/types.js";
 import type { Runtime } from "../runtime/types.js";
 import {
@@ -311,6 +311,17 @@ function channelOf(inbound: Inbound): { transport: string; id?: string } {
     return { transport: room.transport, id: `${host}'${room.id}` };
   }
   return { transport: room.transport, id: room.id };
+}
+
+/**
+ * A model's prompt as a person should read it.
+ *
+ * Runtimes hand back prompts that were built as JSON and never unescaped, so
+ * `\n` arrives as two literal characters and the room is shown a source string
+ * instead of a message. Display only — nothing is answered by this text.
+ */
+function readable(prompt: string): string {
+  return prompt.replace(/\\n/g, "\n").trim();
 }
 
 /** A question a run stopped on, reduced to what a chat message needs. */
@@ -1515,13 +1526,15 @@ export class EveServer {
     inbound: Inbound,
     asked: Asked[],
   ): Promise<void> {
-    const address = sessionAddress(
+    const address = sessionPointer(
       this.options.transcript.agentPubkey,
       conversation.transcript.nostrId,
     );
 
     for (const question of asked) {
-      const lines = [question.prompt || "I need an answer before I can go on."];
+      const lines = [
+        readable(question.prompt) || "I need an answer before I can go on.",
+      ];
       if (question.options.length > 0)
         lines.push(
           "",

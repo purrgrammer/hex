@@ -6,7 +6,7 @@
  * uses is the channel's business, not the encoding's.
  */
 
-import { getEventHash } from "nostr-tools";
+import { getEventHash, nip19 } from "nostr-tools";
 
 import {
   KIND_AGENT_DEFINITION,
@@ -49,6 +49,27 @@ function toolTag(tool: AgentToolSpec): string[] {
 /** The address every event in a session points at. */
 export function sessionAddress(agent: string, session: string): string {
   return `${KIND_SESSION_HEAD}:${agent}:${session}`;
+}
+
+/**
+ * The same address, written the way a chat client can open it.
+ *
+ * `31777:<agent>:<session>` is what a TAG carries; it is also 130 characters of
+ * colon-separated hex that no client linkifies, so a pointer posted into a room
+ * as the bare coordinate is unopenable — which defeats the only reason it is
+ * posted. NIP-21 `nostr:naddr1…` is the form clients resolve.
+ */
+export function sessionPointer(
+  agent: string,
+  session: string,
+  relays?: string[],
+): string {
+  return `nostr:${nip19.naddrEncode({
+    kind: KIND_SESSION_HEAD,
+    pubkey: agent,
+    identifier: session,
+    ...(relays?.length ? { relays } : {}),
+  })}`;
 }
 
 /** The address of an agent's definition. */

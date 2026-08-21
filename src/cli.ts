@@ -30,6 +30,7 @@ import { KIND_FILE_MESSAGE, Nip17Transport } from "./transports/nip17.js";
 import { Nip29Transport } from "./transports/nip29.js";
 import { ConcordTransport } from "./transports/concord.js";
 import { resolveMemberships } from "./concord/join.js";
+import { channelStreams, currentRoot } from "./concord/membership.js";
 import { TransportRouter } from "./transports/router.js";
 import { fileMessageTags, imetaTag, upload, type Uploaded } from "./blossom.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
@@ -55,6 +56,8 @@ Usage:
   hex check    [config]            validate config and dial every relay
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
   hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
+  hex concord  [config]            accept any waiting invite and print the
+                                   communities, channels and stream addresses
   hex send     [config] <target> "message" [--transport <name>]
                [--attach <path>] [--no-encrypt]
                                    say something unprompted. <target> is an npub
@@ -337,6 +340,73 @@ async function main(): Promise<void> {
         await resolved.close();
         if (outcomes.some((outcome) => outcome.action === "failed"))
           process.exitCode = 1;
+        return;
+      }
+
+      /**
+       * What Concord communities Hex is in, and where they are read.
+       *
+       * The parallel of `hex check` for a protocol whose rooms have no public
+       * address: nothing about a community is visible on a relay, so without
+       * this the only way to find out whether an invite landed is to start the
+       * daemon and wait to see whether it ever answers.
+       */
+      case "concord": {
+        const concord = config.transports.find(
+          (
+            candidate,
+          ): candidate is Extract<TransportConfig, { type: "concord" }> =>
+            candidate.type === "concord",
+        );
+        if (!concord) fail("no concord transport is configured");
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const home = agentHome(
+          config.state.home
+            ? expandHome(config.state.home, loaded.baseDir)
+            : DEFAULT_HOME,
+          resolved.pubkey,
+        );
+        const store = HexStore.open(home.db);
+        const memberships = await resolveMemberships({
+          relays,
+          signer: resolved.signer,
+          pubkey: resolved.pubkey,
+          config: {
+            communities: concord!.communities,
+            acceptInvitesFrom: concord!.acceptInvitesFrom,
+          },
+          store,
+          inboxRelays: config.relays.dm,
+          log: (line) => console.log(line),
+        });
+
+        if (memberships.length === 0)
+          console.log("no community keys are held — nothing to read yet");
+        for (const membership of memberships) {
+          console.log(
+            `${membership.name}  ${membership.communityIdHex.slice(0, 12)}…  root epoch ${
+              currentRoot(membership)?.epoch ?? "?"
+            }`,
+          );
+          for (const relay of membership.relays) console.log(`  relay ${relay}`);
+          for (const channel of membership.channels) {
+            const streams = channelStreams(membership, channel);
+            console.log(
+              `  ${channel.isPrivate ? "private" : "public "} ${channel.name}  ${channel.idHex.slice(0, 12)}…`,
+            );
+            for (const stream of streams)
+              console.log(
+                `    epoch ${stream.epoch} reads ${stream.group.pk.slice(0, 16)}…`,
+              );
+          }
+        }
+
+        store.close();
+        await resolved.close();
         return;
       }
 
@@ -832,7 +902,13 @@ async function main(): Promise<void> {
             console.log(
               "[hex] concord: no community keys are held yet — waiting for an invite",
             );
-          else
+          else {
+            for (const membership of memberships)
+              console.log(
+                `concord ${membership.name} — ${membership.channels
+                  .map((channel) => channel.name)
+                  .join(", ")}`,
+              );
             communities = new ConcordTransport({
               signer: resolved.signer,
               pubkey: resolved.pubkey,
@@ -842,6 +918,7 @@ async function main(): Promise<void> {
               durability: store,
               log: (line) => console.log(line),
             });
+          }
         }
 
         /**

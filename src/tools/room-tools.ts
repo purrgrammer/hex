@@ -247,7 +247,11 @@ export class RoomTools implements ToolHost {
         description:
           "Say something in the room, as a reply to the message you were given. " +
           "This is the only way to be heard; anything you write outside this tool " +
-          "is private thinking. PLAIN TEXT ONLY — no markdown. A chat message is " +
+          "is private thinking. Answering the message you were given IS the task, " +
+          "and it needs nobody's approval: never ask permission to post your " +
+          "reply and never put a draft to the room for confirmation. Ask only " +
+          "when you cannot go on without a decision that is genuinely not yours. " +
+          "PLAIN TEXT ONLY — no markdown. A chat message is " +
           "not a document: asterisks, backticks and heading marks arrive as " +
           "literal characters in most Nostr clients.",
         parameters: {

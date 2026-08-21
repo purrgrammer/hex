@@ -155,8 +155,11 @@ export async function readDirectInvites(
     // from that person. Checked here rather than at the call site so no later
     // call site can forget.
     if (!options.from.includes(unwrapped.sender)) {
+      // The whole key, not a prefix: an operator who decides this invite was
+      // fine has to be able to copy the pubkey into `acceptInvitesFrom`, and a
+      // truncated one is a fact they cannot act on.
       options.log?.(
-        `[hex] concord: an invite from ${unwrapped.sender.slice(0, 8)}… was ignored — not an allowed inviter`,
+        `[hex] concord: an invite from ${unwrapped.sender} was ignored — not in acceptInvitesFrom`,
       );
       continue;
     }

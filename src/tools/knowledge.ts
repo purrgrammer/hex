@@ -532,8 +532,8 @@ export class KnowledgeTools {
             transport === "nip-59"
               ? "Asked for privately over a gift wrap. There is no room: your transcript is how this is read, and there is nobody to send a chat message to."
               : about?.public
-                ? "A PUBLIC room. Anything you say here is readable by anyone, permanently. Say it with a chat tool; text you write outside one is private thinking."
-                : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking.",
+                ? "A PUBLIC room. Anything you say here is readable by anyone, permanently. Say it with a chat tool; text you write outside one is private thinking. Posting your answer is what you are here for and is already authorised — do not ask whether to post it."
+                : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking. Posting your answer is what you are here for and is already authorised — do not ask whether to post it.",
         }),
       );
     }

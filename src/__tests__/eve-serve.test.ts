@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { nip19 } from "nostr-tools";
 
 import { EveServer } from "../eve/serve.js";
 import { EveRuntime } from "../runtime/eve.js";
@@ -439,7 +440,14 @@ describe("EveServer", () => {
     const question = bus.replies.at(-1)!;
     expect(question.text).toContain("Which relay should I publish it to?");
     expect(question.text).toContain("nos.lol");
-    expect(question.text).toContain(`31777:${AGENT}:`);
+    // As a NIP-21 pointer, not the bare coordinate: a client has to be able to
+    // open it, which is the only reason it is in the message at all.
+    const pointer = question.text.match(/nostr:(naddr1[0-9a-z]+)/)?.[1];
+    expect(pointer).toBeDefined();
+    expect(nip19.decode(pointer!).data).toMatchObject({
+      kind: 31777,
+      pubkey: AGENT,
+    });
 
     // A reply to THAT message resolves the request rather than steering.
     await hex.handle(inbound("m2", "nos.lol", "reply-id"));
