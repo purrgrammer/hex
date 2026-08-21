@@ -454,7 +454,9 @@ describe("EveServer", () => {
           bind: (sessionId: string) => bound.push(sessionId),
           release: () => {},
         } as never,
-        host: () => ({}) as never,
+        // A host with no tools is still a host: `list` is how grounding asks
+        // what this turn may call.
+        host: () => ({ list: () => [] }) as never,
       },
       transcript: {
         agentPubkey: AGENT,
@@ -1069,7 +1071,7 @@ describe("EveServer", () => {
       bridge: { bind: () => {}, release: () => {} } as never,
       host: (incoming?: Inbound) => {
         bound.push({ session: "", room: incoming?.room });
-        return {} as never;
+        return { list: () => [] } as never;
       },
     };
 

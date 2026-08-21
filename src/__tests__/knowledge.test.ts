@@ -461,3 +461,45 @@ describe("nostr.req takes a tag the way the schema asks for it", () => {
     expect(viaMap.filter["#t"]).toEqual(["nostr"]);
   });
 });
+
+/**
+ * A run is told what it may call, because the set is not the same every turn.
+ *
+ * A control-plane run is offered no `chat.*` — there is no room to speak into —
+ * and a room run has `chat.respond` as its only way to be heard. Neither is
+ * discoverable from the message, and a model that finds out by calling
+ * something spends a turn learning what it was entitled to know.
+ *
+ * The line each tool contributes is the tool's own, so the prose in the prompt
+ * cannot drift from the schema the runtime was handed.
+ */
+describe("grounding a run in what it may call", () => {
+  const spec = (name: string, prompt: string) =>
+    ({ name, description: prompt, parameters: {}, prompt }) as never;
+
+  const ground = async (tools?: unknown[]) => {
+    const tool = new KnowledgeTools({
+      relays: relays!,
+      readRelays: [],
+      fetchImpl: fakeFetch({}),
+    });
+    return (await tool.ground({ tools: tools as never })).join("\n");
+  };
+
+  it("names every tool the turn was handed", async () => {
+    const blocks = await ground([
+      spec("chat.respond", "Say something in the room."),
+      spec("nostr.help", "Read a NIP."),
+    ]);
+    expect(blocks).toContain("chat.respond");
+    expect(blocks).toContain("nostr.help");
+    expect(blocks).toContain("Say something in the room.");
+  });
+
+  it("says nothing at all when the turn has none", async () => {
+    // Better than an empty list: a block claiming zero tools reads as a
+    // statement, and the absence of the section is the honest shape.
+    expect(await ground([])).not.toContain("<tools>");
+    expect(await ground(undefined)).not.toContain("<tools>");
+  });
+});

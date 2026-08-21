@@ -15,6 +15,7 @@ import { nip19 } from "nostr-tools";
 import type { Filter, NostrEvent } from "nostr-tools";
 import { requestEvents, type HexRelays } from "../relays.js";
 import {
+  describeTools,
   HELP_TOOL,
   HELP_TOOL_LEGACY,
   REQ_TOOL,
@@ -487,6 +488,16 @@ export class KnowledgeTools {
     /** Who is asking. */
     operator?: string;
     subjects?: string[][];
+    /**
+     * The tools THIS turn has, which is not the same set every turn.
+     *
+     * A run started over the control plane is offered no `chat.*` at all,
+     * because there is no room to speak into; a room run has `chat.respond` as
+     * its only way to be heard. Neither fact is discoverable from the message,
+     * and a model that has to find out by calling something is a model that
+     * spends a turn learning what it was already entitled to know.
+     */
+    tools?: ToolSpec[];
   }): Promise<string[]> {
     const blocks: string[] = [];
 
@@ -534,6 +545,17 @@ export class KnowledgeTools {
               : about?.public
                 ? "A PUBLIC room. Anything you say here is readable by anyone, permanently. Say it with a chat tool; text you write outside one is private thinking. Answering with the chat tool is what you are here for and needs no approval — but that authority is the chat tool's alone, and never `nostr.publish`, which writes to the open network and not to this room."
                 : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking. Answering with the chat tool is what you are here for and needs no approval — but that authority is the chat tool's alone. `nostr.publish` does not speak here: it writes PLAINTEXT to public relays, and answering this room through it would publish what this room said.",
+        }),
+      );
+    }
+
+    if (input.tools?.length) {
+      blocks.push(
+        block("tools", {
+          available: input.tools.map((tool) => tool.name),
+          // Written by the tool itself, so the prose cannot drift from the
+          // schema the runtime was handed.
+          guide: describeTools(input.tools),
         }),
       );
     }

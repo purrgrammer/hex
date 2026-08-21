@@ -40,6 +40,7 @@ import {
   wireName,
   type ToolHost,
   type ToolServer,
+  type ToolSpec,
 } from "../tools/types.js";
 import type { SessionControl } from "../nostr/decode-control.js";
 import type { HexStore, StoredTranscript } from "../store.js";
@@ -158,6 +159,8 @@ export interface ServeOptions {
       /** What the transport says the room is. */
       about?: Record<string, unknown>;
     };
+    /** What this turn may call — not the same set every turn. */
+    tools?: ToolSpec[];
     operator?: string;
     subjects?: string[][];
   }) => Promise<string[]>;
@@ -937,6 +940,15 @@ export class EveServer {
     channel?: { transport: string; id?: string },
     /** The room the request came from, when one did. */
     room?: Inbound["room"],
+    /**
+     * The tools this run is being handed, so it is told what it has.
+     *
+     * The set is not the same every turn — a control-plane run is offered no
+     * `chat.*` because there is no room to speak into — and a model that has to
+     * discover that by calling something spends a turn learning what it was
+     * entitled to know.
+     */
+    tools?: ToolSpec[],
   ): Promise<string[] | undefined> {
     if (!this.options.ground) return undefined;
     try {
@@ -958,6 +970,7 @@ export class EveServer {
         // cached prefix across every run this agent will ever do.
         target: this.options.transcript.agentPubkey,
         channel: channel && { ...channel, ...(about ? { about } : {}) },
+        tools,
         operator,
         subjects,
       });
@@ -1010,10 +1023,13 @@ export class EveServer {
     try {
       const sessionId = await this.createSession(
         control.text,
-        await this.grounding(peer, control.subjects ?? [], {
-          transport: "nip-59",
-          id: peer,
-        }),
+        await this.grounding(
+          peer,
+          control.subjects ?? [],
+          { transport: "nip-59", id: peer },
+          undefined,
+          this.options.tools?.host().list(),
+        ),
       );
       const transcript = new EveTranscript(
         this.transcriptOptions(),
@@ -1686,6 +1702,7 @@ export class EveServer {
           subjectsOf(inbound, addressed),
           channelOf(inbound),
           inbound.room,
+          host?.list(),
         ),
       );
       const transcript = new EveTranscript(this.transcriptOptions(), sessionId);
@@ -1808,6 +1825,7 @@ export class EveServer {
             subjectsOf(inbound, addressed),
             channelOf(inbound),
             inbound.room,
+            host?.list(),
           ),
         );
         const transcript = new EveTranscript(this.transcriptOptions(), fresh);
