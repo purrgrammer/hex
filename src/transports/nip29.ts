@@ -373,6 +373,7 @@ export class Nip29Transport implements Transport {
     to: Inbound,
     text: string,
     extraTags: string[][] = [],
+    options?: { createdAt?: number },
   ): Promise<string> {
     if (!to.room.relay) throw new Error("a NIP-29 room needs its relay");
     const relay = to.room.relay;
@@ -390,6 +391,10 @@ export class Nip29Transport implements Transport {
         ["q", to.id, relay, to.author],
         ...extraTags,
       ])
+      // Stamped by the caller when it has a stable one: a retry that carries
+      // the same timestamp is the same event id, and the relay that already
+      // took the first copy drops the second instead of showing it.
+      .created(options?.createdAt ?? Math.floor(Date.now() / 1000))
       .sign(this.options.signer);
 
     const outcomes = await publishTo(
@@ -415,11 +420,16 @@ export class Nip29Transport implements Transport {
    * relay will not accept it as part of the group. Published to the group's relay
    * alone, same as the reply.
    */
-  async react(to: Inbound, emoji: string): Promise<string> {
+  async react(
+    to: Inbound,
+    emoji: string,
+    options?: { createdAt?: number },
+  ): Promise<string> {
     if (!to.room.relay) throw new Error("a NIP-29 room needs its relay");
     const roomId = to.room.id;
     const event = await ReactionFactory.create(to.event, emoji)
       .modifyPublicTags((tags) => [...tags, ["h", roomId]])
+      .created(options?.createdAt ?? Math.floor(Date.now() / 1000))
       .sign(this.options.signer);
 
     const outcomes = await publishTo(

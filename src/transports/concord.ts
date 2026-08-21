@@ -873,9 +873,13 @@ export class ConcordTransport implements Transport {
     kind: number,
     content: string,
     tags: string[][],
+    createdAt?: number,
   ): Promise<string> {
     const { membership, channel, stream } = this.bindingFor(room);
-    const ms = Date.now();
+    // A retry stamped from the spool row is the same rumor id, and a rumor id
+    // is what every member dedupes on — so a redelivery is invisible rather
+    // than Hex saying the same thing twice.
+    const ms = createdAt !== undefined ? createdAt * 1000 : Date.now();
     const rumor = buildRumor({
       kind,
       content,
@@ -961,6 +965,7 @@ export class ConcordTransport implements Transport {
     to: Inbound,
     text: string,
     extraTags: string[][] = [],
+    options?: { createdAt?: number },
   ): Promise<string> {
     const tags: string[][] = [];
     const inherited = to.event.tags.filter(
@@ -977,7 +982,13 @@ export class ConcordTransport implements Transport {
     tags.push(["e", to.id, "", to.author]);
     tags.push(["p", to.author]);
 
-    return this.send(to.room, KIND_COMMENT, text, [...tags, ...extraTags]);
+    return this.send(
+      to.room,
+      KIND_COMMENT,
+      text,
+      [...tags, ...extraTags],
+      options?.createdAt,
+    );
   }
 
   /**
@@ -987,11 +998,21 @@ export class ConcordTransport implements Transport {
    * because the tag rides the encrypted rumor: it is recoverable to members and
    * invisible to the relay.
    */
-  async react(to: Inbound, emoji: string): Promise<string> {
-    return this.send(to.room, KIND_REACTION, emoji, [
-      ["e", to.id],
-      ["p", to.author],
-    ]);
+  async react(
+    to: Inbound,
+    emoji: string,
+    options?: { createdAt?: number },
+  ): Promise<string> {
+    return this.send(
+      to.room,
+      KIND_REACTION,
+      emoji,
+      [
+        ["e", to.id],
+        ["p", to.author],
+      ],
+      options?.createdAt,
+    );
   }
 
   // ── Carriage ──────────────────────────────────────────────────────────────

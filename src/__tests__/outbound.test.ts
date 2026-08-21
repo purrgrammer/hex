@@ -331,4 +331,136 @@ describe("Spool", () => {
     expect(lines.join("\n")).toContain("could not look for owed rows");
     store = HexStore.open(agentHome(home, AGENT).db);
   });
+  /**
+   * A retry has to be the same event, or the room reads it as Hex repeating
+   * itself.
+   *
+   * The common shape is not a relay refusing: it is a relay ACCEPTING and then
+   * dropping the socket before its OK arrives. From here that is indistinguishable
+   * from a failure, so the row is still owed and the next pass sends it again —
+   * and a fresh timestamp makes that a different event id, which the relay stores
+   * beside the first one. Stamped from the row instead, every attempt is the
+   * event the relay already has, and it drops the duplicate for us.
+   */
+  describe("sending the same owed row twice", () => {
+    it("stamps every attempt from the row, not from the clock", async () => {
+      const stamps: (number | undefined)[] = [];
+      let firstAttempt = true;
+      const spool = new Spool({
+        store,
+        generation,
+        transport: {
+          reply: async (_to, _text, _tags, options) => {
+            stamps.push(options?.createdAt);
+            // The relay took it and then the socket went away. Indistinguishable
+            // from a refusal, and the reason a retry exists at all.
+            if (firstAttempt) {
+              firstAttempt = false;
+              throw new Error("socket closed before the OK arrived");
+            }
+            return "published-1";
+          },
+        },
+        // No waiting: the retry is the subject, not the gap before it.
+        backoffMs: 0,
+        log: () => {},
+      });
+
+      await spool.reply(inbound(), "the answer");
+      await spool.drain();
+
+      expect(stamps).toHaveLength(2);
+      expect(stamps[0]).toBeDefined();
+      // The whole point: the same number, so the same id, so one message.
+      expect(stamps[1]).toBe(stamps[0]);
+      spool.stop();
+    });
+
+    it("stamps an ack the same way", async () => {
+      const stamps: (number | undefined)[] = [];
+      const spool = new Spool({
+        store,
+        generation,
+        transport: {
+          reply: async () => "unused",
+          react: async (_to, _emoji, options) => {
+            stamps.push(options?.createdAt);
+            return "reaction-1";
+          },
+        },
+        log: () => {},
+      });
+
+      await spool.react(inbound(), "👀");
+
+      expect(stamps[0]).toBeDefined();
+      spool.stop();
+    });
+  });
+
+  describe("an answer that ran out of attempts", () => {
+    it("is named at every start, not once in yesterday's log", async () => {
+      /*
+       * Two log arrays, deliberately.
+       *
+       * The first draft shared one, and the giving-up line the FIRST spool
+       * writes on its last attempt already says "given up on" — so the
+       * assertion passed with the startup report deleted. A test that reads the
+       * wrong process's log is a test of nothing.
+       */
+      const dying: string[] = [];
+      const restart: string[] = [];
+      const bus = transport({ failing: true });
+      const dead = new Spool({
+        store,
+        generation,
+        transport: bus.impl,
+        maxAttempts: 1,
+        backoffMs: 0,
+        log: (line) => dying.push(line),
+      });
+      await dead.reply(inbound("m1"), "the answer");
+      dead.stop();
+
+      expect(store.abandonedOutbound(1)).toHaveLength(1);
+
+      // A fresh process over the same store, which is the case that matters:
+      // nothing in memory remembers this row.
+      const next = new Spool({
+        store,
+        generation,
+        transport: bus.impl,
+        maxAttempts: 1,
+        backoffMs: 0,
+        log: (line) => restart.push(line),
+      });
+      await next.start();
+      next.stop();
+
+      expect(restart.some((line) => line.includes("given up on"))).toBe(true);
+    });
+
+    it("says nothing when there is nothing to say", async () => {
+      const lines: string[] = [];
+      const bus = transport();
+      const clean = new Spool({
+        store,
+        generation,
+        transport: bus.impl,
+        log: (line) => lines.push(line),
+      });
+      await clean.start();
+      clean.stop();
+      expect(lines.some((line) => line.includes("given up on"))).toBe(false);
+    });
+  });
 });
+
+/**
+ * A row nobody will try again is a row somebody should be told about.
+ *
+ * Past `maxAttempts` the spool stops retrying, which is right. It also stopped
+ * mentioning it, which is not: the row is never sent, never settled, and never
+ * pruned — pruning only takes rows that were delivered — so an answer somebody
+ * is waiting for disappears because a relay was down for an hour.
+ */

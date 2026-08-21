@@ -444,8 +444,20 @@ export class Nip17Transport implements Transport {
    * conversation key. Without the self-copy Hex cannot read back what it said —
    * its own inbox is the only record it has.
    */
-  async reply(to: Inbound, text: string, tags?: string[][]): Promise<string> {
-    return this.send(to.room.id, text, to.id, tags);
+  async reply(
+    to: Inbound,
+    text: string,
+    tags?: string[][],
+    options?: { createdAt?: number },
+  ): Promise<string> {
+    return this.send(
+      to.room.id,
+      text,
+      to.id,
+      tags,
+      KIND_PRIVATE_MESSAGE,
+      options?.createdAt,
+    );
   }
 
   /**
@@ -480,6 +492,15 @@ export class Nip17Transport implements Transport {
      * rumor whose id does not match its own content.
      */
     kind: number = KIND_PRIVATE_MESSAGE,
+    /**
+     * A stable stamp for the RUMOR, so a retry is the same rumor id.
+     *
+     * Only the rumor. The wraps around it keep their randomised timestamps,
+     * which is what NIP-59 asks for and what stops a relay correlating them —
+     * and it costs nothing here, because every recipient dedupes on the rumor
+     * id rather than on the envelope it arrived in.
+     */
+    createdAt?: number,
   ): Promise<string> {
     // Stamped, not signed: a rumor carries a pubkey and an id and no signature.
     // The id is computed here because the session store keys on it, and because
@@ -489,7 +510,12 @@ export class Nip17Transport implements Transport {
       this.options.signer,
     );
     const merged = tags.length > 0 ? [...stamped.tags, ...tags] : stamped.tags;
-    const unsigned = { ...stamped, kind, tags: participantsOnly(merged, peer) };
+    const unsigned = {
+      ...stamped,
+      kind,
+      tags: participantsOnly(merged, peer),
+      ...(createdAt !== undefined ? { created_at: createdAt } : {}),
+    };
     const rumor = { ...unsigned, id: getEventHash(unsigned) } as Rumor;
 
     const theirInbox = await this.inboxOf(peer);
@@ -536,10 +562,14 @@ export class Nip17Transport implements Transport {
    * deliberate: the recipient has the rumor, and nobody else can resolve the
    * pointer.
    */
-  async react(to: Inbound, emoji: string): Promise<string> {
+  async react(
+    to: Inbound,
+    emoji: string,
+    options?: { createdAt?: number },
+  ): Promise<string> {
     const peer = to.room.id;
 
-    const unsigned = await EventFactory.fromKind(KIND_REACTION)
+    const stampedReaction = await EventFactory.fromKind(KIND_REACTION)
       .content(emoji)
       .modifyPublicTags((tags) => [
         ...tags,
@@ -548,6 +578,10 @@ export class Nip17Transport implements Transport {
         ["k", String(KIND_PRIVATE_MESSAGE)],
       ])
       .stamp(this.options.signer);
+    const unsigned =
+      options?.createdAt !== undefined
+        ? { ...stampedReaction, created_at: options.createdAt }
+        : stampedReaction;
     const rumor = { ...unsigned, id: getEventHash(unsigned) } as Rumor;
 
     const theirInbox = await this.inboxOf(peer);

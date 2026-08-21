@@ -1410,6 +1410,22 @@ export class HexStore {
     );
   }
 
+  /**
+   * Rows that ran out of attempts and are still owed.
+   *
+   * A row past `maxAttempts` is excluded from `pendingOutbound`, which is what
+   * stops it retrying forever — and also what made it invisible: never sent,
+   * never settled, never mentioned again, and never pruned, because pruning
+   * only takes rows that were delivered. An answer somebody is waiting for
+   * should not disappear because a relay was down for an hour.
+   */
+  abandonedOutbound(maxAttempts: number, limit = 200): OutboundRow[] {
+    return this.readOutbound(
+      `WHERE sent_at IS NULL AND attempts >= ? ORDER BY id LIMIT ?`,
+      [maxAttempts, limit],
+    );
+  }
+
   /** One row that has not gone yet, whatever its attempts. */
   owedOutbound(id: number): OutboundRow | undefined {
     return this.readOutbound(`WHERE id = ? AND sent_at IS NULL`, [id])[0];

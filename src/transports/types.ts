@@ -101,7 +101,21 @@ export interface Transport {
    * what makes them readable — so a transport that dropped it would deliver a
    * broken image every time.
    */
-  reply(to: Inbound, text: string, tags?: string[][]): Promise<string>;
+  /**
+   * `options.createdAt` makes a RETRY byte-identical to the attempt before it.
+   *
+   * A relay that accepted the first copy and then dropped the socket before its
+   * OK arrived is reported as a failure, and the retry stamps a new timestamp,
+   * which is a new event id, which the room sees as Hex saying the same thing
+   * twice. Stamped from the spool row instead, every attempt is the same event
+   * and the relay dedupes it for us.
+   */
+  reply(
+    to: Inbound,
+    text: string,
+    tags?: string[][],
+    options?: { createdAt?: number },
+  ): Promise<string>;
   /**
    * Acknowledge that a message is being worked on.
    *
@@ -109,7 +123,11 @@ export interface Transport {
    * between "thinking" and "ignored you". Optional, because not every transport
    * has a reaction — a protocol without one simply has no ack.
    */
-  react?(to: Inbound, emoji: string): Promise<string>;
+  react?(
+    to: Inbound,
+    emoji: string,
+    options?: { createdAt?: number },
+  ): Promise<string>;
   stop(): void;
 }
 

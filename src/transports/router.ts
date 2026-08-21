@@ -59,8 +59,13 @@ export class TransportRouter implements Transport {
     return transport;
   }
 
-  async reply(to: Inbound, text: string, tags?: string[][]): Promise<string> {
-    return this.own(to).reply(to, text, tags);
+  async reply(
+    to: Inbound,
+    text: string,
+    tags?: string[][],
+    options?: { createdAt?: number },
+  ): Promise<string> {
+    return this.own(to).reply(to, text, tags, options);
   }
 
   /**
@@ -70,11 +75,15 @@ export class TransportRouter implements Transport {
    * would promise a reaction in a protocol that has none. Declared here because
    * at least one transport has it; the per-room check is below.
    */
-  async react(to: Inbound, emoji: string): Promise<string> {
+  async react(
+    to: Inbound,
+    emoji: string,
+    options?: { createdAt?: number },
+  ): Promise<string> {
     const transport = this.own(to);
     if (!transport.react)
       throw new Error(`${to.room.transport} has no reactions`);
-    return transport.react(to, emoji);
+    return transport.react(to, emoji, options);
   }
 
   async history(

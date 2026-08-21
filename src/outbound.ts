@@ -29,8 +29,17 @@ import type { Inbound } from "./transports/types.js";
 
 /** What the spool needs of a transport: answer a message, acknowledge one. */
 export interface SpoolTransport {
-  reply(to: Inbound, text: string, tags?: string[][]): Promise<string>;
-  react?(to: Inbound, emoji: string): Promise<string>;
+  reply(
+    to: Inbound,
+    text: string,
+    tags?: string[][],
+    options?: { createdAt?: number },
+  ): Promise<string>;
+  react?(
+    to: Inbound,
+    emoji: string,
+    options?: { createdAt?: number },
+  ): Promise<string>;
 }
 
 /** What it needs to deliver a gift wrap: the one door a rumor goes out of. */
@@ -219,6 +228,27 @@ export class Spool {
    * long as nobody wrote to it, which is exactly the case this exists for.
    */
   async start(): Promise<void> {
+    /*
+     * Say what was given up on before trying anything new.
+     *
+     * A row past `maxAttempts` stops being retried, which is right, and stopped
+     * being mentioned, which is not: it is never sent, never settled and never
+     * pruned, so an answer somebody is waiting for vanishes because a relay was
+     * down for an hour. Reported at every start, so it is a fact an operator
+     * can act on rather than one line in yesterday's log.
+     */
+    const abandoned = this.options.store.abandonedOutbound(this.maxAttempts);
+    if (abandoned.length > 0)
+      this.log(
+        `[hex] ${abandoned.length} message(s) were given up on and are still owed: ` +
+          abandoned
+            .slice(0, 5)
+            .map(
+              (row) =>
+                `${row.kind} for ${row.room.slice(0, 12)}… (${row.attempts} tries: ${row.lastError ?? "no reason recorded"})`,
+            )
+            .join("; "),
+      );
     await this.drain();
     this.arm();
   }
@@ -349,17 +379,29 @@ export class Spool {
     switch (row.kind) {
       case "reply": {
         const payload = row.payload as ReplyPayload;
+        /*
+         * Stamped from the ROW, so every attempt is the same event.
+         *
+         * A relay that took the first copy and then dropped the socket before
+         * its OK arrived is reported as a failure and retried — and a fresh
+         * timestamp makes that a new event id, which the room sees as Hex
+         * saying the same thing twice. The row's own created_at does not move,
+         * so the retry is the event the relay already has.
+         */
         return this.options.transport.reply(
           payload.to,
           payload.text,
           payload.tags,
+          { createdAt: row.createdAt },
         );
       }
       case "reaction": {
         const payload = row.payload as ReactionPayload;
         if (!this.options.transport.react)
           throw new Error("nothing here can react");
-        return this.options.transport.react(payload.to, payload.emoji);
+        return this.options.transport.react(payload.to, payload.emoji, {
+          createdAt: row.createdAt,
+        });
       }
       case "wrap": {
         const payload = row.payload as WrapPayload;
