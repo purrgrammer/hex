@@ -2,7 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import { pbtRuns } from "../../test/pbt-runs.js";
 import type { NostrEvent } from "nostr-tools";
 
 import { Ingestor } from "../ingest.js";
@@ -617,6 +620,89 @@ describe("Runner", () => {
       await tick();
       await bus.finish("control c8", "unavailable");
       expect(store.inboundOutcome(seq)).toBeUndefined();
+    });
+  });
+  /**
+   * Nothing is held once there is nothing to hold.
+   *
+   * Lanes are the one in-memory set a snapshot cannot check on its own: a lane
+   * exists only while a conversation is busy, and emptying it needs turns to
+   * actually END. So this drives generated histories — arrivals across several
+   * people and rooms, turns that succeed and turns that fail, with and without
+   * a concurrency cap — then finishes everything and looks.
+   *
+   * A lane that outlives its work is not a leak of memory, which nobody would
+   * notice. It found one on its first run: a rate-limited row created a lane
+   * that nothing ever released, so a room over its budget accumulated one per
+   * correspondent and never let go.
+   */
+  describe("at rest", () => {
+    const PEERS = ["1".repeat(64), "2".repeat(64), "3".repeat(64)];
+    const ROOMS = [GROUP, DM];
+    let runs = 0;
+
+    const arrival = fc.record({
+      peer: fc.nat({ max: PEERS.length - 1 }),
+      room: fc.nat({ max: ROOMS.length - 1 }),
+      /** Some turns end well and some do not; both have to free the lane. */
+      fails: fc.boolean(),
+    });
+
+    it("holds no lane, and leaves nothing owed", async () => {
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(arrival, { minLength: 1, maxLength: 12, size: "large" }),
+          fc.option(fc.nat({ max: 3 }), { nil: undefined }),
+          async (arrivals, cap) => {
+            /*
+             * A fresh id space per run. The store outlives one iteration and
+             * `(transport, id)` dedupe is durable, so reusing `m0` would make
+             * every run after the first enqueue nothing and pass for the wrong
+             * reason.
+             */
+            const era = `e${runs++}`;
+            const bus = target();
+            const { run, ingest } = runner(bus, {
+              // Both shapes: unbounded, and a cap low enough that messages wait
+              // in a lane rather than start — the state a leak hides in.
+              ...(cap !== undefined ? { maxConcurrentTurns: cap + 1 } : {}),
+            });
+
+            arrivals.forEach((next, index) =>
+              ingest.accept(
+                inbound({
+                  id: `${era}m${index}`,
+                  author: PEERS[next.peer],
+                  room: ROOMS[next.room],
+                }),
+              ),
+            );
+            await tick();
+
+            /*
+             * Drained one at a time rather than in a single pass: finishing a
+             * turn frees capacity, which starts one that was waiting, which is
+             * the only way a held lane ever empties.
+             */
+            for (let pass = 0; pass < 60; pass += 1) {
+              const [what] = bus.running();
+              if (!what) break;
+              const index = Number(what.replace(`turn ${era}m`, ""));
+              if (arrivals[index]?.fails) await bus.fail(what);
+              else await bus.finish(what);
+            }
+            await tick();
+
+            // invariant: I10 — nothing running, so nothing held.
+            expect(bus.running()).toEqual([]);
+            expect(run.laneCount).toBe(0);
+            expect(ingest.inFlightCount).toBe(0);
+            // And the queue agrees: every row reached an outcome.
+            expect(store.pendingInbound()).toEqual([]);
+          },
+        ),
+        { numRuns: pbtRuns(40) },
+      );
     });
   });
 });

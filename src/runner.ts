@@ -185,6 +185,19 @@ export class Runner {
   private readonly lanes = new Map<string, Lane>();
   private turns = 0;
 
+  /**
+   * How many lanes are still held.
+   *
+   * A test seam, and the only view of a map that is otherwise invisible. A lane
+   * is created on demand and deleted the moment it is idle with nothing
+   * waiting, so at rest this is zero — and a lane that outlives its work is a
+   * conversation the runner still thinks is busy, which serialises every later
+   * message behind a turn that already ended.
+   */
+  get laneCount(): number {
+    return this.lanes.size;
+  }
+
   constructor(private readonly options: RunnerOptions) {}
 
   private log(line: string): void {
@@ -439,15 +452,28 @@ export class Runner {
     queued: QueuedEvent,
     steer: boolean,
   ): void {
+    /*
+     * A dispatch that never starts still has to give the lane back.
+     *
+     * The lane is created before this point, and only `ending` releases one —
+     * so a row dropped here left a lane behind with nothing running and nothing
+     * waiting. Not lost work: the row is settled and the next message in that
+     * conversation reuses the lane. But a rate-limited room accumulated one per
+     * correspondent and never let go, which is the leak I10 names. `ending`
+     * without a room does the release and skips the turn accounting, which is
+     * right, because no turn was spent.
+     */
     const inbound = queued.carrier;
     if (!inbound) {
       this.options.queue.finish(queued.seq, "dropped:restart", this.now());
+      this.ending(key, queued.seq);
       return;
     }
     const room = roomKey(inbound.room);
     if (this.spent(inbound) >= this.options.repliesPerRoomPerHour) {
       this.log(`[hex] ${short(inbound.author)} not answered: rate-limited`);
       this.options.queue.finish(queued.seq, "dropped:rate-limited", this.now());
+      this.ending(key, queued.seq);
       return;
     }
 

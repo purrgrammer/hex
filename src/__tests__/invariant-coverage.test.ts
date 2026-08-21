@@ -136,10 +136,10 @@ const COVERAGE: Coverage[] = [
   {
     id: "I10",
     statement: "no in-memory set leaks: inFlight/sending/lanes empty at rest",
-    status: "partial",
+    status: "covered",
     owner:
-      "quiescence.property.test.ts covers the ingestor's inFlight and the spool's sending, including the fenced path that is the only way to reach send's own catch. The runner's lanes map is not covered: emptying it needs turns to finish, which needs the driven tier.",
-    ownerFiles: [QUIESCENCE_PBT],
+      "quiescence.property.test.ts for the ingestor's inFlight and the spool's sending, and runner.property/runner.test.ts for lanes — driven to rest over generated histories, which is what found the lane a rate-limited row never gave back",
+    ownerFiles: [QUIESCENCE_PBT, RUNNER, RUNNER_PBT],
   },
   {
     id: "I11",
