@@ -153,6 +153,25 @@ export interface RoomToolsOptions {
  */
 const DEFAULT_MAX_RESPONSES = 1;
 
+/**
+ * What a run in a room may still publish in the open: NIP-34's work product.
+ *
+ * A patch, an issue, a pull request and the statuses that close them are
+ * addressed to a repository rather than to the room, and they are public
+ * whoever files them — refusing these would leave an agent able to do the work
+ * and unable to hand it in. Everything a person would call "saying something"
+ * is deliberately absent. See `speakingInPublic`.
+ */
+const PUBLIC_WORK_KINDS: ReadonlySet<number> = new Set([
+  1617, // patch
+  1618, // pull request
+  1621, // issue
+  1630, // status: open
+  1631, // status: applied / merged
+  1632, // status: closed
+  1633, // status: draft
+]);
+
 /** How far back the conversation is read when the model names no number. */
 const DEFAULT_HISTORY = 20;
 /** Hard bound: the result is fed back as JSON and has to fit in a context. */
@@ -247,7 +266,11 @@ export class RoomTools implements ToolHost {
         description:
           "Say something in the room, as a reply to the message you were given. " +
           "This is the only way to be heard; anything you write outside this tool " +
-          "is private thinking. PLAIN TEXT ONLY — no markdown. A chat message is " +
+          "is private thinking. Answering the message you were given IS the task, " +
+          "and it needs nobody's approval: never ask permission to post your " +
+          "reply and never put a draft to the room for confirmation. Ask only " +
+          "when you cannot go on without a decision that is genuinely not yours. " +
+          "PLAIN TEXT ONLY — no markdown. A chat message is " +
           "not a document: asterisks, backticks and heading marks arrive as " +
           "literal characters in most Nostr clients.",
         parameters: {
@@ -391,8 +414,11 @@ export class RoomTools implements ToolHost {
 
     if (this.options.knowledge?.handles(name))
       return this.options.knowledge.call(name, call.arguments);
-    if (this.options.publish?.handles(name))
+    if (this.options.publish?.handles(name)) {
+      const refusal = this.speakingInPublic(name, call.arguments);
+      if (refusal) return { ok: false, output: refusal };
       return this.options.publish.call(name, call.arguments);
+    }
     if (this.options.blossom?.handles(name))
       return this.options.blossom.call({ name, arguments: call.arguments });
     if (this.options.git?.handles(name))
@@ -418,6 +444,45 @@ export class RoomTools implements ToolHost {
             .join(", ")}`,
         };
     }
+  }
+
+  /**
+   * Stop a run in a room from answering that room on the open network.
+   *
+   * Measured, not imagined. Asked a question in a PRIVATE Concord channel and
+   * told to "post it here", a run signed the answer as a bare kind 9 with no
+   * tags and published it to three public relays. It happened three times, and
+   * one of those events named a branch that had not been pushed. The reply had
+   * a door — `chat.respond`, which seals it to the channel — and the model took
+   * the other one, because `nostr.publish` will take any kind at all and the
+   * word "post" fits both.
+   *
+   * An ALLOWLIST rather than a list of forbidden kinds: one of the three was
+   * kind 9411, which is not a kind. A model that invents a number walks through
+   * any denylist, and there is no enumerating what it might invent next. So
+   * publishing from inside a room is narrowed to the work a room asks for —
+   * patches, issues, their statuses — and everything else is refused with the
+   * name of the tool that does what was actually wanted.
+   *
+   * Only when there IS a room. A control-plane run with nowhere to speak has no
+   * chat tool to be redirected to, and nothing here applies to it.
+   */
+  private speakingInPublic(
+    name: string,
+    args: Record<string, unknown>,
+  ): string | undefined {
+    if (!this.conversation) return undefined;
+    const kind = typeof args.kind === "number" ? Math.floor(args.kind) : NaN;
+    if (PUBLIC_WORK_KINDS.has(kind)) return undefined;
+    return (
+      `kind ${Number.isInteger(kind) ? kind : "?"} is not something to publish ` +
+      `from inside a conversation. ${RESPOND_TOOL} is how you say something ` +
+      `here — it goes to this room, and in a private one it stays encrypted to ` +
+      `its members. \`${name}\` writes PLAINTEXT to public relays under Hex's ` +
+      `own key, where it cannot be recalled, and answering a room through it ` +
+      `publishes what the room said. From a conversation it takes work product ` +
+      `only: ${[...PUBLIC_WORK_KINDS].join(", ")}.`
+    );
   }
 
   private async respond(args: Record<string, unknown>): Promise<ToolResult> {

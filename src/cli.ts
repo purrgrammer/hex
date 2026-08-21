@@ -31,6 +31,9 @@ import type { TransportConfig } from "./config.js";
 import type { Inbound } from "./transports/types.js";
 import { KIND_FILE_MESSAGE, Nip17Transport } from "./transports/nip17.js";
 import { Nip29Transport } from "./transports/nip29.js";
+import { ConcordTransport } from "./transports/concord.js";
+import { resolveMemberships } from "./concord/join.js";
+import { channelStreams, currentRoot } from "./concord/membership.js";
 import { TransportRouter } from "./transports/router.js";
 import { fileMessageTags, imetaTag, upload, type Uploaded } from "./blossom.js";
 import { HexStore, agentHome, expandHome, DEFAULT_HOME } from "./store.js";
@@ -56,6 +59,8 @@ Usage:
   hex check    [config]            validate config and dial every relay
   hex announce [config] [--dry-run]  publish kind 0 / 10002 / 10050 from config
   hex join     [config] [--auto] [--dry-run]  request to join NIP-29 groups
+  hex concord  [config]            accept any waiting invite and print the
+                                   communities, channels and stream addresses
   hex send     [config] <target> "message" [--transport <name>]
                [--attach <path>] [--no-encrypt]
                                    say something unprompted. <target> is an npub
@@ -538,6 +543,73 @@ async function main(): Promise<void> {
       }
 
       /**
+       * What Concord communities Hex is in, and where they are read.
+       *
+       * The parallel of `hex check` for a protocol whose rooms have no public
+       * address: nothing about a community is visible on a relay, so without
+       * this the only way to find out whether an invite landed is to start the
+       * daemon and wait to see whether it ever answers.
+       */
+      case "concord": {
+        const concord = config.transports.find(
+          (
+            candidate,
+          ): candidate is Extract<TransportConfig, { type: "concord" }> =>
+            candidate.type === "concord",
+        );
+        if (!concord) fail("no concord transport is configured");
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const home = agentHome(
+          config.state.home
+            ? expandHome(config.state.home, loaded.baseDir)
+            : DEFAULT_HOME,
+          resolved.pubkey,
+        );
+        const store = HexStore.open(home.db);
+        const memberships = await resolveMemberships({
+          relays,
+          signer: resolved.signer,
+          pubkey: resolved.pubkey,
+          config: {
+            communities: concord!.communities,
+            acceptInvitesFrom: concord!.acceptInvitesFrom,
+          },
+          store,
+          inboxRelays: config.relays.dm,
+          log: (line) => console.log(line),
+        });
+
+        if (memberships.length === 0)
+          console.log("no community keys are held — nothing to read yet");
+        for (const membership of memberships) {
+          console.log(
+            `${membership.name}  ${membership.communityIdHex.slice(0, 12)}…  root epoch ${
+              currentRoot(membership)?.epoch ?? "?"
+            }`,
+          );
+          for (const relay of membership.relays) console.log(`  relay ${relay}`);
+          for (const channel of membership.channels) {
+            const streams = channelStreams(membership, channel);
+            console.log(
+              `  ${channel.isPrivate ? "private" : "public "} ${channel.name}  ${channel.idHex.slice(0, 12)}…`,
+            );
+            for (const stream of streams)
+              console.log(
+                `    epoch ${stream.epoch} reads ${stream.group.pk.slice(0, 16)}…`,
+              );
+          }
+        }
+
+        store.close();
+        await resolved.close();
+        return;
+      }
+
+      /**
        * Speak first: a private message to someone, unprompted.
        *
        * For reporting on work rather than answering about it — a long task
@@ -998,6 +1070,57 @@ async function main(): Promise<void> {
           : undefined;
 
         /**
+         * Concord communities, if the config named any.
+         *
+         * Resolved before the stream opens, because a membership is KEYS: there
+         * is no address to subscribe to until an invite has been read, and an
+         * agent that started listening first would listen to nothing and say so
+         * to nobody.
+         */
+        const concordConfig = config.transports.find(
+          (
+            candidate,
+          ): candidate is Extract<TransportConfig, { type: "concord" }> =>
+            candidate.type === "concord",
+        );
+        let communities: ConcordTransport | undefined;
+        if (concordConfig) {
+          const memberships = await resolveMemberships({
+            relays,
+            signer: resolved.signer,
+            pubkey: resolved.pubkey,
+            config: {
+              communities: concordConfig.communities,
+              acceptInvitesFrom: concordConfig.acceptInvitesFrom,
+            },
+            store,
+            inboxRelays: config.relays.dm,
+            log: (line) => console.log(line),
+          });
+          if (memberships.length === 0)
+            console.log(
+              "[hex] concord: no community keys are held yet — waiting for an invite",
+            );
+          else {
+            for (const membership of memberships)
+              console.log(
+                `concord ${membership.name} — ${membership.channels
+                  .map((channel) => channel.name)
+                  .join(", ")}`,
+              );
+            communities = new ConcordTransport({
+              signer: resolved.signer,
+              pubkey: resolved.pubkey,
+              memberships,
+              mentions: config.mentions,
+              since: startedAt,
+              durability: store,
+              log: (line) => console.log(line),
+            });
+          }
+        }
+
+        /**
          * One inbound stream, and a reply that leaves by the door it came in.
          *
          * The transcript sink stays the NIP-17 transport regardless: a session
@@ -1005,7 +1128,12 @@ async function main(): Promise<void> {
          * that started it was private or in a group, because a transcript is
          * for the person who owns the agent and not for the room.
          */
-        const transport = rooms ? new TransportRouter([dms, rooms]) : dms;
+        const extras = [rooms, communities].filter(
+          (candidate): candidate is Nip29Transport | ConcordTransport =>
+            candidate !== undefined,
+        );
+        const transport =
+          extras.length > 0 ? new TransportRouter([dms, ...extras]) : dms;
 
         /**
          * Hex's own tools, if the config opened a bridge for them.
@@ -1244,6 +1372,24 @@ async function main(): Promise<void> {
                         .map((outcome) => outcome.relay),
                     };
                   },
+                }
+              : undefined,
+            /**
+             * And, for a run in a Concord channel, the same event on the
+             * channel's own stream.
+             *
+             * No relay list here and no signer here: the transport holds the
+             * membership, and the membership holds both the keys and the relays
+             * — they arrive in one invite and there is nowhere else to get
+             * either. Two calls because the binding tags have to be on the
+             * rumor before it is hashed, and only the transport knows them.
+             */
+            concord: communities
+              ? {
+                  bind: (rumor, room) =>
+                    communities!.bindTranscript(rumor, room),
+                  publish: (rumor, room) =>
+                    communities!.carryTranscript(rumor, room),
                 }
               : undefined,
             deltas: transcriptConfig.deltas,

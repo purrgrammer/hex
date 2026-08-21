@@ -6,7 +6,7 @@
  * uses is the channel's business, not the encoding's.
  */
 
-import { getEventHash } from "nostr-tools";
+import { getEventHash, nip19 } from "nostr-tools";
 
 import {
   KIND_AGENT_DEFINITION,
@@ -51,6 +51,27 @@ export function sessionAddress(agent: string, session: string): string {
   return `${KIND_SESSION_HEAD}:${agent}:${session}`;
 }
 
+/**
+ * The same address, written the way a chat client can open it.
+ *
+ * `31777:<agent>:<session>` is what a TAG carries; it is also 130 characters of
+ * colon-separated hex that no client linkifies, so a pointer posted into a room
+ * as the bare coordinate is unopenable — which defeats the only reason it is
+ * posted. NIP-21 `nostr:naddr1…` is the form clients resolve.
+ */
+export function sessionPointer(
+  agent: string,
+  session: string,
+  relays?: string[],
+): string {
+  return `nostr:${nip19.naddrEncode({
+    kind: KIND_SESSION_HEAD,
+    pubkey: agent,
+    identifier: session,
+    ...(relays?.length ? { relays } : {}),
+  })}`;
+}
+
 /** The address of an agent's definition. */
 export function definitionAddress(agent: string, slug: string): string {
   return `${KIND_AGENT_DEFINITION}:${agent}:${slug}`;
@@ -84,7 +105,20 @@ export function parseSessionAddress(
 export function inGroup(rumor: Rumor, group: string | undefined): Rumor {
   if (!group) return rumor;
   if (rumor.tags.some((tag) => tag[0] === "h")) return rumor;
-  return stamp({ ...rumor, tags: [...rumor.tags, ["h", group]] });
+  return withTags(rumor, [["h", group]]);
+}
+
+/**
+ * The same move for a room whose binding is not an `h` tag.
+ *
+ * A Concord channel binds with `channel` and `epoch` rather than `h`, and the
+ * transport is the only layer that knows which — but the re-hash is the same
+ * re-hash, and duplicating `getEventHash` in a transport is how the two drift.
+ * The caller owns idempotence: stamping twice is a different rumor.
+ */
+export function withTags(rumor: Rumor, tags: string[][]): Rumor {
+  if (tags.length === 0) return rumor;
+  return stamp({ ...rumor, tags: [...rumor.tags, ...tags] });
 }
 
 function stamp(rumor: UnsignedRumor): Rumor {

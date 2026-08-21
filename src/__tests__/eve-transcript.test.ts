@@ -1036,6 +1036,68 @@ describe("EveTranscript", () => {
     store.close();
   });
 
+  it("carries a Concord run on its channel, and never its deltas", async () => {
+    /**
+     * The same arrangement as a group run, with the channel key standing where
+     * the group relay stood: every member reads the run because every member
+     * holds the key, and the relay holds ciphertext it has no opinion about.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const { impl, sent } = sink();
+    const carried: { id: string; room: string }[] = [];
+    const ROOM = `${"a1".repeat(32)}:${"b2".repeat(32)}`;
+    const pub = publisher(store, impl, SESSION, {
+      concord: {
+        // Standing in for the transport's real binding, which is two tags and a
+        // re-hash; what matters here is that the stamp lands before the wrap.
+        bind: (rumor, room) =>
+          rumor.tags.some((tag) => tag[0] === "channel")
+            ? rumor
+            : {
+                ...rumor,
+                id: `${rumor.id.slice(0, 60)}beef`,
+                tags: [...rumor.tags, ["channel", room.split(":")[1]!]],
+              },
+        publish: async (rumor: { id: string }, room: string) => {
+          carried.push({ id: rumor.id, room });
+          return { delivered: ["wss://relay.example"], undeliverable: [] };
+        },
+      },
+    });
+    pub.carriage = "concord";
+    pub.group = ROOM;
+
+    let index = 0;
+    for (const event of RUN) await pub.handle(event, ++index);
+
+    const turns = sent.map((s) => s.rumor).filter((r) => r.kind === 1777);
+    expect(turns.length).toBeGreaterThan(0);
+    for (const rumor of turns) {
+      // One event, two doors — the binding is on the WRAPPED copy too, which is
+      // what makes the ids match and stops a reader holding both from counting
+      // one turn twice.
+      expect(rumor.tags.find((tag) => tag[0] === "channel")).toBeDefined();
+      expect(rumor.tags.some((tag) => tag[0] === "h")).toBe(false);
+      expect(carried.map((c) => c.id)).toContain(rumor.id);
+    }
+    expect(carried.every((c) => c.room === ROOM)).toBe(true);
+
+    // Deltas evaporate at the relay by design; streaming them onto a channel is
+    // a different question with a different answer.
+    const deltaIds = sent
+      .filter((s) => s.rumor.kind === 21777)
+      .map((s) => s.rumor.id);
+    expect(deltaIds.length).toBeGreaterThan(0);
+    for (const id of deltaIds) expect(carried.map((c) => c.id)).not.toContain(id);
+
+    // And the carriage survives the restart, or a resumed run would quietly
+    // fall back to wrapping and the channel's chain would stop mid-session.
+    const resumed = publisher(store, impl);
+    expect(resumed.carriage).toBe("concord");
+    expect(resumed.group).toBe(ROOM);
+    store.close();
+  });
+
   it("stops a group copy at the first refusal rather than leaving a hole", async () => {
     /**
      * There is one chain and one `last-seq`. A public copy missing an event in

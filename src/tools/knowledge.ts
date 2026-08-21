@@ -532,8 +532,8 @@ export class KnowledgeTools {
             transport === "nip-59"
               ? "Asked for privately over a gift wrap. There is no room: your transcript is how this is read, and there is nobody to send a chat message to."
               : about?.public
-                ? "A PUBLIC room. Anything you say here is readable by anyone, permanently. Say it with a chat tool; text you write outside one is private thinking."
-                : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking.",
+                ? "A PUBLIC room. Anything you say here is readable by anyone, permanently. Say it with a chat tool; text you write outside one is private thinking. Answering with the chat tool is what you are here for and needs no approval — but that authority is the chat tool's alone, and never `nostr.publish`, which writes to the open network and not to this room."
+                : "A conversation. Anything you want said out loud goes through a chat tool; text you write outside one is private thinking. Answering with the chat tool is what you are here for and needs no approval — but that authority is the chat tool's alone. `nostr.publish` does not speak here: it writes PLAINTEXT to public relays, and answering this room through it would publish what this room said.",
         }),
       );
     }

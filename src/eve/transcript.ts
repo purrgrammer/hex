@@ -91,6 +91,28 @@ export interface GroupSink {
   ): Promise<{ delivered: string[]; undeliverable: string[] }>;
 }
 
+/**
+ * The same door for a Concord channel, which has no `h` tag and no group relay.
+ *
+ * A NIP-29 group answers "who may read this" by asking its relay. A Concord
+ * channel answers it with a key: the copy is sealed and wrapped onto the
+ * channel's own stream, so every member reads the run, the relay reads
+ * ciphertext, and no access decision is made twice in two places that can
+ * disagree.
+ *
+ * Two calls rather than one because the binding tags have to be on the rumor
+ * BEFORE it is hashed — same argument as `inGroup`, different tags — and only
+ * the transport knows which tags those are.
+ */
+export interface ConcordSink {
+  /** Stamp the channel binding and re-hash. Idempotent. */
+  bind(rumor: Rumor, room: string): Rumor;
+  publish(
+    rumor: Rumor,
+    room: string,
+  ): Promise<{ delivered: string[]; undeliverable: string[] }>;
+}
+
 export interface EveTranscriptOptions {
   agentPubkey: string;
   /** The `d` tag of the agent's definition. */
@@ -106,6 +128,8 @@ export interface EveTranscriptOptions {
    * room when the session opens — not from this being present.
    */
   group?: GroupSink;
+  /** The same, for a run happening in a Concord channel. */
+  concord?: ConcordSink;
   /** Off means nothing streams; the turns still arrive when they close. */
   deltas?: boolean;
   /**
@@ -268,22 +292,23 @@ export class EveTranscript {
     this.options.store.saveTranscript(this.record);
   }
 
-  /** Wrapped to the operator, or wrapped AND published in the clear. */
-  get carriage(): "wrapped" | "group" {
+  /** Wrapped to the operator, or wrapped AND carried in the room it happened in. */
+  get carriage(): "wrapped" | "group" | "concord" {
     return this.record.carriage ?? "wrapped";
   }
 
-  set carriage(value: "wrapped" | "group") {
-    this.record.carriage = value === "group" ? "group" : undefined;
+  set carriage(value: "wrapped" | "group" | "concord") {
+    this.record.carriage =
+      value === "group" || value === "concord" ? value : undefined;
     this.options.store.saveTranscript(this.record);
   }
 
   /**
-   * The group this run is in. Every one of its events carries it as an `h` tag.
+   * The room this run is in — a NIP-29 group id, or a Concord `community:channel`.
    *
-   * On the rumor BEFORE it is wrapped, so the wrapped copy and the group copy
-   * are one event with one id. A DM relay never sees it either way — it is
-   * inside the seal.
+   * Whichever it is, the binding goes on the rumor BEFORE it is wrapped, so the
+   * wrapped copy and the room copy are one event with one id. A DM relay never
+   * sees it either way — it is inside the seal.
    */
   get group(): string | undefined {
     return this.record.group;
@@ -1744,7 +1769,7 @@ export class EveTranscript {
      * two events a reader would count as two turns at one `seq` — which this
      * NIP tells a client to treat as the signature of a forgery.
      */
-    const rumor = inGroup(original, this.group);
+    const rumor = this.bind(original);
     try {
       const { delivered, undeliverable } = await this.options.sink.publishRumor(
         rumor,
@@ -1786,6 +1811,21 @@ export class EveTranscript {
   }
 
   /**
+   * Bind a rumor to the room this run is in, whatever kind of room that is.
+   *
+   * An `h` tag on a Concord room id would be a lie in a tag nobody reads, so the
+   * two carriages never share a stamp — and a carriage whose sink was not wired
+   * stamps nothing at all rather than the wrong thing.
+   */
+  private bind(original: Rumor): Rumor {
+    if (this.carriage === "concord")
+      return this.group && this.options.concord
+        ? this.options.concord.bind(original, this.group)
+        : original;
+    return inGroup(original, this.group);
+  }
+
+  /**
    * The group copy, for a run happening in one.
    *
    * After the wrap and never instead of it: the operator's copy is the one the
@@ -1804,6 +1844,7 @@ export class EveTranscript {
     ephemeral: boolean,
   ): Promise<void> {
     if (ephemeral) return;
+    if (this.carriage === "concord") return this.sendConcord(rumor, what);
     if (this.carriage !== "group") return;
     const sink = this.options.group;
     const relay = this.groupRelay;
@@ -1820,6 +1861,40 @@ export class EveTranscript {
       this.groupStopped = true;
       this.log(
         `[hex] the group copy of ${what} failed, so this session's group transcript stops here: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * The channel copy, for a run happening in a Concord room.
+   *
+   * Same latch and same order as the group copy: after the wrap, never instead
+   * of it, and one refusal stops the chain for this process rather than leaving
+   * a hole a reader is required to render and can never fill.
+   *
+   * Unlike the group copy this one has no relay-side kind list to trip over —
+   * every relay sees is a 1059 by an author it has no opinion about. What it can
+   * still hit is a rotation past the epoch the rumor bound itself to, which the
+   * transport refuses rather than re-addressing.
+   */
+  private async sendConcord(rumor: Rumor, what: string): Promise<void> {
+    const sink = this.options.concord;
+    const room = this.group;
+    if (!sink || !room || this.groupStopped) return;
+
+    try {
+      const { delivered } = await sink.publish(rumor, room);
+      if (delivered.length > 0) return;
+      this.groupStopped = true;
+      this.log(
+        `[hex] no relay took the channel copy of ${what}; this session's channel transcript stops here`,
+      );
+    } catch (error) {
+      this.groupStopped = true;
+      this.log(
+        `[hex] the channel copy of ${what} failed, so this session's channel transcript stops here: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

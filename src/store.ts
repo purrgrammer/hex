@@ -27,6 +27,11 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { TERMINAL_STATUSES } from "./nostr/types.js";
+import {
+  membershipToStored,
+  type Membership,
+  type StoredMembership,
+} from "./concord/membership.js";
 
 /**
  * Where a published transcript stands.
@@ -122,10 +127,18 @@ export interface StoredTranscript {
    * one chain and one `last-seq`, so a group copy beginning at turn twelve is a
    * transcript with a hole nobody can fill.
    */
-  carriage?: "wrapped" | "group";
-  /** The NIP-29 group id this run happens in, for its `h` tag. */
+  carriage?: "wrapped" | "group" | "concord";
+  /**
+   * The room this run happens in: a NIP-29 group id, or — under the `concord`
+   * carriage — a `community:channel` room id. Which it is, is the carriage.
+   */
   group?: string;
-  /** The relay that hosts that group — the only one the group copy goes to. */
+  /**
+   * The relay that hosts that group — the only one the group copy goes to.
+   *
+   * NIP-29 only. A Concord channel's relays come from the membership, which
+   * holds them because the keys and the relays arrive in the same invite.
+   */
   groupRelay?: string;
   /**
    * The running total includes a figure nobody billed.
@@ -286,6 +299,59 @@ CREATE TABLE IF NOT EXISTS published (
   at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS published_lookup ON published (kind, scope, at);
+
+/*
+ * A Concord membership: the keys that ARE Hex's belonging to a community.
+ *
+ * Durable because there is nothing to re-fetch. A NIP-29 group can be rejoined
+ * by asking its relay; a Concord community cannot be asked anything — the only
+ * copy of what Hex holds is this row, and losing it means losing the room until
+ * somebody issues a fresh invite. Which is also why a rotation writes here the
+ * moment it is adopted rather than at shutdown: a crash between the two would
+ * leave Hex holding an epoch it can no longer derive.
+ *
+ * The whole membership rides as JSON rather than as columns: it is key material
+ * read and written as one thing, and a schema of epochs and priors would be a
+ * migration every time CORD-06 grows a field.
+ */
+CREATE TABLE IF NOT EXISTS concord_memberships (
+  community_id TEXT PRIMARY KEY,
+  data         TEXT NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+
+/*
+ * How far each stream has been read, per relay.
+ *
+ * A Concord channel has no "since the last message" — its events are wraps by a
+ * pseudonymous author, and asking for the last hour of one is asking a relay to
+ * re-serve ciphertext already stored. The cursor is what makes a restart resume
+ * instead of re-ingesting, and it is per RELAY because two relays serving one
+ * community are at different points in it.
+ */
+CREATE TABLE IF NOT EXISTS concord_cursors (
+  relay  TEXT NOT NULL,
+  stream TEXT NOT NULL,
+  since  INTEGER NOT NULL,
+  PRIMARY KEY (relay, stream)
+);
+
+/*
+ * Rumors already ingested, and which of them Hex wrote.
+ *
+ * Two jobs, and both need to outlive the process. The first is dedupe: four
+ * relays serve one wrap and a cursor's overlap replays the boundary, so without
+ * this a restart answers the same question twice. The second is the one that
+ * makes a conversation a conversation — a reply to something Hex said addresses
+ * Hex whether or not it repeats the name, and in memory that recognition lasted
+ * exactly as long as the daemon did.
+ */
+CREATE TABLE IF NOT EXISTS concord_rumors (
+  rumor_id TEXT PRIMARY KEY,
+  at       INTEGER NOT NULL,
+  own      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS concord_rumors_at ON concord_rumors (at);
 `;
 
 /**
@@ -391,7 +457,114 @@ export class HexStore {
       Math.floor(Date.now() / 1000) - PUBLISHED_HORIZON_SECONDS,
     );
 
+    // The Concord dedupe set is a replay guard, not a log: it only has to
+    // outlast the window a cursor's overlap can replay.
+    db.prepare(`DELETE FROM concord_rumors WHERE at < ?`).run(
+      Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
+    );
+
     return new HexStore(db);
+  }
+
+  // ── Concord ───────────────────────────────────────────────────────────────
+
+  /** Every community Hex holds keys for. */
+  storedMemberships(): StoredMembership[] {
+    const rows = this.db
+      .prepare(`SELECT data FROM concord_memberships`)
+      .all() as { data: string }[];
+    const out: StoredMembership[] = [];
+    for (const row of rows) {
+      try {
+        out.push(JSON.parse(row.data) as StoredMembership);
+      } catch {
+        // A row that will not parse is not a reason to start with no
+        // communities at all: the others still open.
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Write a membership back.
+   *
+   * Called on every adopted rotation, not only at join. The window between
+   * holding a new epoch and having written it down is the window in which a
+   * crash costs the key.
+   */
+  saveMembership(membership: Membership): void {
+    const stored = membershipToStored(membership);
+    this.db
+      .prepare(
+        `INSERT INTO concord_memberships (community_id, data, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(community_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
+      )
+      .run(
+        stored.communityId,
+        JSON.stringify(stored),
+        Math.floor(Date.now() / 1000),
+      );
+  }
+
+  /** Forget a community entirely — a leave, or an operator cleaning up. */
+  forgetMembership(communityIdHex: string): void {
+    this.db
+      .prepare(`DELETE FROM concord_memberships WHERE community_id = ?`)
+      .run(communityIdHex);
+  }
+
+  cursorFor(relay: string, stream: string): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT since FROM concord_cursors WHERE relay = ? AND stream = ?`,
+      )
+      .get(relay, stream) as { since?: number } | undefined;
+    return row?.since;
+  }
+
+  /**
+   * Move a cursor forward, and only forward.
+   *
+   * `MAX` rather than a plain write because events do not arrive in order: a
+   * relay serving stored history after a live event would otherwise walk the
+   * cursor backwards and re-ingest everything between.
+   */
+  rememberCursor(relay: string, stream: string, at: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO concord_cursors (relay, stream, since)
+         VALUES (?, ?, ?)
+         ON CONFLICT(relay, stream) DO UPDATE SET since = MAX(since, excluded.since)`,
+      )
+      .run(relay, stream, at);
+  }
+
+  sawRumor(rumorId: string): boolean {
+    return Boolean(
+      this.db
+        .prepare(`SELECT 1 FROM concord_rumors WHERE rumor_id = ?`)
+        .get(rumorId),
+    );
+  }
+
+  isOwnRumor(rumorId: string): boolean {
+    const row = this.db
+      .prepare(`SELECT own FROM concord_rumors WHERE rumor_id = ?`)
+      .get(rumorId) as { own?: number } | undefined;
+    return row?.own === 1;
+  }
+
+  rememberRumor(
+    rumorId: string,
+    own: boolean,
+    at = Math.floor(Date.now() / 1000),
+  ): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO concord_rumors (rumor_id, at, own) VALUES (?, ?, ?)`,
+      )
+      .run(rumorId, at, own ? 1 : 0);
   }
 
   close(): void {
@@ -567,7 +740,10 @@ export class HexStore {
       channel: parseChannel(row.channel),
       described: row.described === 1,
       subjects: parseSubjects(row.subjects),
-      carriage: row.carriage === "group" ? "group" : undefined,
+      carriage:
+        row.carriage === "group" || row.carriage === "concord"
+          ? row.carriage
+          : undefined,
       group: row.grp == null ? undefined : String(row.grp),
       groupRelay: row.grp_relay == null ? undefined : String(row.grp_relay),
     };

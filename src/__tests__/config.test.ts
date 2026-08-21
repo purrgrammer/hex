@@ -138,8 +138,60 @@ describe("parseConfig", () => {
 
   it("refuses a transport type it cannot serve", () => {
     expect(() =>
+      parseConfig({ ...minimal, transports: [{ type: "nip-04" }] }),
+    ).toThrow(/must be "nip-29", "nip-17" or "concord"/);
+  });
+
+  it("refuses a Concord transport with no community", () => {
+    expect(() =>
       parseConfig({ ...minimal, transports: [{ type: "concord" }] }),
-    ).toThrow(/must be "nip-29" or "nip-17"/);
+    ).toThrow(/communities must be a non-empty array/);
+  });
+
+  it("reads a Concord community, its channels and who may invite Hex", () => {
+    const community = "a".repeat(64);
+    const channel = "b".repeat(64);
+    const inviter = "c".repeat(64);
+    const config = parseConfig({
+      ...minimal,
+      transports: [
+        {
+          type: "concord",
+          communities: [
+            { id: community, channels: [{ id: channel, name: "grimoire" }] },
+          ],
+          acceptInvitesFrom: [inviter],
+        },
+      ],
+    });
+    const [transport] = config.transports;
+    expect(transport?.type === "concord" ? transport.communities : undefined)
+      .toMatchObject([{ id: community, channels: [{ id: channel }] }]);
+    expect(
+      transport?.type === "concord" ? transport.acceptInvitesFrom : undefined,
+    ).toEqual([inviter]);
+  });
+
+  it("refuses a community or channel id that is not 32 bytes of hex", () => {
+    // A mistyped id is an address nobody publishes to, which looks exactly like
+    // a quiet room — so it is a startup failure instead.
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        transports: [{ type: "concord", communities: [{ id: "nope" }] }],
+      }),
+    ).toThrow(/64-char hex community id/);
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        transports: [
+          {
+            type: "concord",
+            communities: [{ id: "a".repeat(64), channels: ["nope"] }],
+          },
+        ],
+      }),
+    ).toThrow(/64-char hex channel id/);
   });
 
   it("refuses a DM transport with nobody allowed", () => {
