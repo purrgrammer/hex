@@ -811,6 +811,34 @@ export class EveServer {
   }
 
   /** Close a head the runtime will never speak for again. */
+  /**
+   * Retire sessions from outside a control event.
+   *
+   * The `reset` verb is the operator's way in, and it needs their key and a
+   * signed 1779. This is the same two steps — retire it in the runtime, close
+   * the head as `aborted` — for an operator standing at the machine, which is
+   * where "stop everything" is usually said from.
+   */
+  async stop(sessionIds: string[]): Promise<{ id: string; why?: string }[]> {
+    const done: { id: string; why?: string }[] = [];
+    for (const sessionId of sessionIds) {
+      try {
+        // Best effort: a runtime that has already forgotten the session is not
+        // a reason to leave its head open forever.
+        await this.options.runtime.reset?.(sessionId, "stopped by the operator");
+      } catch (error) {
+        this.log(`[hex] ${sessionId} would not reset: ${message(error)}`);
+      }
+      try {
+        await this.retire(sessionId);
+        done.push({ id: sessionId });
+      } catch (error) {
+        done.push({ id: sessionId, why: message(error) });
+      }
+    }
+    return done;
+  }
+
   private async retire(sessionId: string): Promise<void> {
     const conversation = [...this.conversations.values()].find(
       (candidate) => candidate.sessionId === sessionId,

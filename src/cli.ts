@@ -60,6 +60,9 @@ Usage:
                                    (nip-17) or <relay-host>'<group-id> (nip-29)
   hex dm       [config] <npub> "message" [--attach <path>] [--no-encrypt]
                                    the same thing, fixed to nip-17
+  hex stop     [config] <session-id...> | --all
+                                   retire sessions and close their heads.
+                                   Run it with the daemon stopped
   hex rm       [config] <event-id...> [--reason "why"] [--dry-run]
                                    ask relays to forget events Hex published.
                                    Refuses any id it did not sign
@@ -154,6 +157,7 @@ async function main(): Promise<void> {
       "no-encrypt": { type: "boolean", default: false },
       reason: { type: "string" },
       relay: { type: "string", multiple: true },
+      all: { type: "boolean", default: false },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -369,6 +373,98 @@ async function main(): Promise<void> {
               " forget.",
           );
         if (result.targets.some((target) => target.refused)) process.exitCode = 1;
+        return;
+      }
+
+      /**
+       * Stop sessions from the machine they run on.
+       *
+       * The `reset` control verb does this over Nostr, signed by the operator.
+       * Standing at the machine, "stop everything" should not require a browser
+       * and a key: this retires the session in the runtime and closes its head
+       * as `aborted`, which is the same two steps that verb takes.
+       *
+       * Run it with the daemon stopped. Two processes publishing heads for one
+       * session fork its `seq` chain, and a reader is required to treat that as
+       * a fork rather than a continuation.
+       */
+      case "stop": {
+        const named = args.filter((arg) => !arg.startsWith("-"));
+        if (named.length === 0 && !values.all)
+          fail("usage: hex stop [config] <session-id...> | --all");
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const home = agentHome(
+          config.state.home
+            ? expandHome(config.state.home, loaded.baseDir)
+            : DEFAULT_HOME,
+          resolved.pubkey,
+        );
+        const store = HexStore.open(home.db);
+        const targets = values.all
+          ? store.openTranscripts().map((record) => record.sessionId)
+          : named;
+        if (targets.length === 0) {
+          console.log("nothing open to stop");
+          store.close();
+          await resolved.close();
+          return;
+        }
+
+        const transcriptConfig = config.transcript;
+        if (!transcriptConfig)
+          fail("no transcript configuration — nothing publishes a head to close");
+
+        const dms = new Nip17Transport({
+          relays,
+          signer: resolved.signer,
+          pubkey: resolved.pubkey,
+          inboxRelays: config.relays.dm,
+          relayHints: config.relays.dm,
+          readRelays: config.relays.read,
+          allow: transcriptConfig.to,
+          since: Math.floor(Date.now() / 1000),
+        });
+
+        const host = config.eve?.host ?? values.host;
+        for (const sessionId of targets) {
+          // Best effort: a runtime that has forgotten the session is not a
+          // reason to leave its head open forever.
+          if (host)
+            await fetch(
+              new URL(
+                `/eve/v1/session/${encodeURIComponent(sessionId)}/reset`,
+                host,
+              ).toString(),
+              {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ reason: "stopped by the operator" }),
+              },
+            ).catch(() => undefined);
+
+          const transcript = new EveTranscript(
+            {
+              agentPubkey: resolved.pubkey,
+              slug: transcriptConfig.slug,
+              recipients: transcriptConfig.to,
+              store,
+              sink: dms,
+              log: (line) => console.log(line),
+            },
+            sessionId,
+          );
+          // `aborted`, not `done`: a session stopped by its operator did not
+          // finish what it was doing, and a reader deserves the difference.
+          await transcript.close("aborted");
+          console.log(`${sessionId}  aborted`);
+        }
+
+        await resolved.close();
+        store.close();
         return;
       }
 
