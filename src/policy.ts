@@ -29,10 +29,21 @@ import type { Inbound } from "./transports/types.js";
  * either. The boundary is asserted with lookarounds rather than `\b`, since
  * `\b@hex` never matches — `@` is already a non-word character.
  *
- * This is one of three ways to reach Hex, and the narrowest. A `p` tag naming
- * it counts (`tagsSelf`), which is what every client's mention picker writes;
- * and a reply in a thread Hex is already running counts, which is what makes a
- * conversation a conversation.
+ * This is one of three ways to reach Hex, and the least reliable. A `p` tag
+ * naming it counts (`tagsSelf`), which is what every client's mention picker
+ * writes; and a reply in a thread Hex is already running counts, which is what
+ * makes a conversation a conversation.
+ *
+ * It is also the only one of the three that can fire when nobody addressed
+ * anything: QUOTE a message that said `@hex` and the text carries the mention
+ * while the tags do not, because the quoter p-tags the original author rather
+ * than Hex. No regex fixes that — the text is genuinely ambiguous about who is
+ * being spoken to.
+ *
+ * So `mentions` defaults to EMPTY and an operator opts in. Configure nothing
+ * and Hex answers a `p` tag or a thread it is in, both of which are deliberate
+ * acts; configure a name and you also accept the quoting case in exchange for
+ * working with clients whose mentions do not tag.
  */
 export function mentionsName(text: string, mentions: string[]): boolean {
   return mentions.some((token) => {

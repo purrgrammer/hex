@@ -197,6 +197,33 @@ export function parseConcordRoomId(
 }
 
 /**
+ * What a NIP-22 comment points at, in the order the spec offers it.
+ *
+ * A 1111 does not always hang off an event id. The root is `E` for a regular
+ * event, `A` for an addressable one — an article, a repository, a channel
+ * definition — and `I` for something outside Nostr entirely, like a URL; the
+ * parent is the same three in lowercase. Reading only `E` and `e` meant a
+ * thread rooted on any of the others reported no root at all and fell back to
+ * its parent, which is the exact class of bug that made a reply open a new run.
+ *
+ * The value is used as a key and never dereferenced, so an address works as
+ * well as an id: what matters is that every message in one thread agrees on it.
+ */
+const ROOT_TAGS = ["E", "A", "I"] as const;
+const PARENT_TAGS = ["e", "a", "i"] as const;
+
+function nip22Scope(
+  tags: string[][],
+  names: readonly string[],
+): string | undefined {
+  for (const name of names) {
+    const found = tags.find((tag) => tag[0] === name && tag[1]);
+    if (found) return found[1];
+  }
+  return undefined;
+}
+
+/**
  * Which message a chat rumor replies to.
  *
  * A NIP-22 comment (1111) names its immediate parent with a lowercase `e`; the
@@ -206,8 +233,7 @@ export function parseConcordRoomId(
  * about", and is what the NIP-29 transport reads too.
  */
 export function replyTargetOf(opened: OpenedEvent): string | undefined {
-  if (opened.kind === KIND_COMMENT)
-    return opened.tags.find((tag) => tag[0] === "e" && tag[1])?.[1];
+  if (opened.kind === KIND_COMMENT) return nip22Scope(opened.tags, PARENT_TAGS);
   return opened.tags.find((tag) => tag[0] === "q" && tag[1])?.[1];
 }
 
@@ -222,7 +248,7 @@ export function replyTargetOf(opened: OpenedEvent): string | undefined {
  */
 export function threadRootOf(opened: OpenedEvent): string | undefined {
   if (opened.kind !== KIND_COMMENT) return undefined;
-  return opened.tags.find((tag) => tag[0] === "E" && tag[1])?.[1];
+  return nip22Scope(opened.tags, ROOT_TAGS);
 }
 
 export class ConcordTransport implements Transport {

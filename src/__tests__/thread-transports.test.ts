@@ -27,6 +27,8 @@ import {
   replyTarget,
   threadRoot,
 } from "../transports/nip29.js";
+import { replyTargetOf, threadRootOf } from "../transports/concord.js";
+import { KIND_COMMENT } from "../concord/kinds.js";
 import { startMockRelay, type MockRelay } from "./mock-relay.js";
 
 const ROOT = "11".repeat(32);
@@ -76,6 +78,57 @@ describe("NIP-10 markers, which is how NIP-17 threads", () => {
   it("says nothing about an event that threads onto nothing", () => {
     expect(nip10Root({ tags: [["p", OTHER]] })).toBeUndefined();
     expect(nip10Parent({ tags: [] })).toBeUndefined();
+  });
+});
+
+describe("a NIP-22 comment rooted on something that is not an event id", () => {
+  const comment = (tags: string[][]) => ({ kind: KIND_COMMENT, tags }) as never;
+
+  const ADDRESS = "30617:" + "aa".repeat(32) + ":hex";
+
+  it("reads an addressable root, which an article or a repo has", () => {
+    // A thread hanging off a repository announcement or a long-form post has
+    // no root event id at all — the root IS an address.
+    const reply = comment([
+      ["A", ADDRESS],
+      ["K", "30617"],
+      ["a", ADDRESS],
+    ]);
+    expect(threadRootOf(reply)).toBe(ADDRESS);
+    expect(replyTargetOf(reply)).toBe(ADDRESS);
+  });
+
+  it("reads an external root, which is not a Nostr event at all", () => {
+    const url = "https://example.com/thing";
+    const reply = comment([
+      ["I", url],
+      ["K", "web"],
+      ["i", url],
+    ]);
+    expect(threadRootOf(reply)).toBe(url);
+    expect(replyTargetOf(reply)).toBe(url);
+  });
+
+  it("prefers an event id when the comment carries both", () => {
+    // E is the most specific of the three and the one every in-channel thread
+    // uses; an A beside it names the container, not the subject.
+    const reply = comment([
+      ["A", ADDRESS],
+      ["E", ROOT],
+      ["e", PARENT],
+      ["a", ADDRESS],
+    ]);
+    expect(threadRootOf(reply)).toBe(ROOT);
+    expect(replyTargetOf(reply)).toBe(PARENT);
+  });
+
+  it("keeps a deep reply on the thread's root, not its parent's address", () => {
+    const reply = comment([
+      ["A", ADDRESS],
+      ["e", PARENT],
+    ]);
+    expect(threadRootOf(reply)).toBe(ADDRESS);
+    expect(replyTargetOf(reply)).toBe(PARENT);
   });
 });
 
