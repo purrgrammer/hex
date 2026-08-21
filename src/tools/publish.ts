@@ -413,19 +413,22 @@ export class PublishTools {
     const template = this.templateFor(args);
     if ("error" in template) return { ok: false, output: template.error };
 
-    if (name === SIGN_TOOL) {
-      const event = await this.sign(template.value);
-      return { ok: true, output: JSON.stringify({ signed: event }) };
-    }
-
     /**
      * Already filed?
      *
      * Checked before the rate limit, and a hit does not spend the hourly
-     * budget: refusing to repeat work is not work.
+     * budget: refusing to repeat work is not work. Checked for signing too,
+     * for the reason at the top of this file: a signed event is one relay call
+     * from being published by whoever holds it, so a tool that signs what
+     * publish refuses is the loophole that note warns about.
      */
     const already = this.duplicate(template.value);
     if (already) return { ok: false, output: already };
+
+    if (name === SIGN_TOOL) {
+      const event = await this.sign(template.value);
+      return { ok: true, output: JSON.stringify({ signed: event }) };
+    }
 
     const rate = this.withinRate();
     if (rate) return { ok: false, output: rate };
