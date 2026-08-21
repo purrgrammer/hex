@@ -65,6 +65,15 @@ export interface MessagePayload {
   /** Set by the TRANSPORT, which is the only layer that knows the tag shape. */
   addressesSelf: boolean;
   replyToId?: string;
+  /**
+   * The thread this hangs under, when the protocol names one.
+   *
+   * Distinct from `replyToId`, which is the immediate parent. Only the root is
+   * common to every message in a thread, so it — not the parent — is what
+   * "which conversation is this" has to be keyed on. Dropping it here once
+   * meant every reply in a thread opened a new session.
+   */
+  threadRoot?: string;
 }
 
 /** A control event's canonical fields: the instruction, already authorised. */
@@ -141,6 +150,7 @@ export function messageEvent(
     text: inbound.text,
     addressesSelf: inbound.addressesSelf,
     replyToId: inbound.replyToId,
+    threadRoot: inbound.threadRoot,
   };
   return {
     v: HEX_EVENT_VERSION,
@@ -151,7 +161,7 @@ export function messageEvent(
       relay: inbound.room.relay,
       room: inbound.room.id,
       peer: inbound.author,
-      thread: inbound.replyToId,
+      thread: inbound.threadRoot ?? inbound.replyToId,
     },
     createdAt: inbound.createdAt,
     observedAt,
@@ -209,7 +219,12 @@ export function carrierFor(row: QueuedInbound): Inbound | undefined {
       ...(row.route.relay !== undefined ? { relay: row.route.relay } : {}),
     },
     addressesSelf: payload.addressesSelf ?? false,
-    ...(payload.replyToId !== undefined ? { replyToId: payload.replyToId } : {}),
+    ...(payload.replyToId !== undefined
+      ? { replyToId: payload.replyToId }
+      : {}),
+    ...(payload.threadRoot !== undefined
+      ? { threadRoot: payload.threadRoot }
+      : {}),
     event: row.raw,
   } as unknown as Inbound;
 }

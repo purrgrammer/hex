@@ -19,7 +19,12 @@ import { replyTargetOf, threadRootOf } from "../transports/concord.js";
 import { refusesWork } from "../eve/serve.js";
 import { whyIgnored } from "../policy-table.js";
 import { KIND_COMMENT, KIND_MESSAGE } from "../concord/kinds.js";
-import type { CanonicalEvent } from "../ingest.js";
+import {
+  carrierFor,
+  messageEvent,
+  type CanonicalEvent,
+  type MessagePayload,
+} from "../ingest.js";
 
 const ROOT = "8f44c425c3".padEnd(64, "0");
 const REPLY = "967e23e9f2".padEnd(64, "0");
@@ -154,5 +159,76 @@ describe("saying why nothing answered", () => {
     expect(whyIgnored(message(true), { inTurn: true })).toBe(
       "no rule for a message arriving mid-turn",
     );
+  });
+});
+
+/**
+ * The queue is the only path a message takes to the runtime, so a field the
+ * queue does not carry does not exist by the time anything reads it.
+ *
+ * Watched live: `threadRoot` was read correctly off the tags, and then dropped
+ * on the way into `inbound_events`. Every reply rebuilt without it fell back to
+ * its immediate parent, so replying to one of Hex's own answers opened a new
+ * session and bound the thread to that reply — a fresh run per message, and the
+ * real root left pointing at a run nothing would reach again.
+ */
+describe("a message crossing the durable queue", () => {
+  let home: string;
+  let store: HexStore;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "thread-queue-"));
+    store = HexStore.open(join(home, "data.db"));
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const inbound = {
+    id: REPLY,
+    author: OPERATOR,
+    text: "check NIP 5A",
+    createdAt: 1,
+    room: { transport: "concord" as const, id: "community:channel" },
+    addressesSelf: true,
+    replyToId: "85bf509a4d".padEnd(64, "0"),
+    threadRoot: ROOT,
+    event: {
+      id: REPLY,
+      pubkey: OPERATOR,
+      kind: KIND_COMMENT,
+      tags: [],
+      content: "check NIP 5A",
+      created_at: 1,
+      sig: "",
+    },
+  };
+
+  it("keeps the root and the parent apart", () => {
+    const event = messageEvent(inbound, 2);
+    const payload = event.payload as MessagePayload;
+
+    expect(payload.threadRoot).toBe(ROOT);
+    expect(payload.replyToId).toBe(inbound.replyToId);
+    // The route names the exchange, and only the root is common to all of it.
+    expect(event.route.thread).toBe(ROOT);
+  });
+
+  it("hands the root back to the transport that has to answer", () => {
+    const seq = store.enqueueInbound(messageEvent(inbound, 2));
+    expect(seq).toBeGreaterThan(0);
+
+    const row = store.pendingInbound().find((r) => r.seq === seq)!;
+    const carrier = carrierFor(row)!;
+
+    expect(carrier.threadRoot).toBe(ROOT);
+    expect(carrier.replyToId).toBe(inbound.replyToId);
+  });
+
+  it("falls back to the parent only when the protocol names no root", () => {
+    const { threadRoot: _root, ...unthreaded } = inbound;
+    expect(messageEvent(unthreaded, 2).route.thread).toBe(inbound.replyToId);
   });
 });
