@@ -35,8 +35,10 @@ import { finalizeEvent } from "nostr-tools/pure";
 import type { EventTemplate, NostrEvent } from "nostr-tools";
 
 import { publishTo, type HexRelays } from "../relays.js";
+import { retract } from "../retract.js";
 import {
   PUBLISH_TOOL,
+  RM_TOOL,
   SIGN_TOOL,
   type ToolResult,
   type ToolSpec,
@@ -66,6 +68,8 @@ export interface PublishToolsOptions {
   relays: HexRelays;
   /** Where an event goes when the model names no relay. */
   publishRelays: string[];
+  /** Where the agent looks events up, for `nostr.rm` to check authorship. */
+  readRelays?: string[];
   /** Guarded kinds the operator has explicitly allowed. */
   allowKinds?: number[];
   perHour?: number;
@@ -224,14 +228,46 @@ export class PublishTools {
           " bounds as publishing, because a signed event is one relay call away" +
           " from being published by whoever holds it.",
       },
+      {
+        name: RM_TOOL,
+        description:
+          "Ask relays to forget events THIS agent published, by id. Only its " +
+          "own: every id is fetched first and one signed by anyone else is " +
+          "refused. Deletion is a request — a relay that already served the " +
+          "event may keep serving it, and a reader that cached it never hears " +
+          "the ask — so this repairs a mistake without erasing it.",
+        parameters: {
+          type: "object",
+          properties: {
+            ids: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Event ids, 64 hex characters each. Never note or nevent.",
+            },
+            reason: {
+              type: "string",
+              description:
+                "Why, for whoever reads the deletion request. One line.",
+            },
+          },
+          required: ["ids"],
+        },
+        prompt:
+          "`nostr.rm` retracts something this agent published. Reach for it" +
+          " when a published event was a mistake — a duplicate, or wrong —" +
+          " and say which id and why before you do.",
+      },
     ];
   }
 
   handles(name: string): boolean {
-    return name === PUBLISH_TOOL || name === SIGN_TOOL;
+    return name === PUBLISH_TOOL || name === SIGN_TOOL || name === RM_TOOL;
   }
 
   async call(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+    if (name === RM_TOOL) return await this.remove(args);
+
     const template = this.templateFor(args);
     if ("error" in template) return { ok: false, output: template.error };
 
@@ -287,6 +323,63 @@ export class PublishTools {
         refused: outcomes
           .filter((outcome) => !outcome.ok)
           .map((outcome) => ({ relay: outcome.relay, why: outcome.message })),
+      }),
+    };
+  }
+
+  /**
+   * Retract the agent's own events.
+   *
+   * Bounded like a publish, because it is one: a kind 5 is signed by the same
+   * key and lands on the same relays. It does not go through `templateFor`,
+   * whose guard refuses kind 5 outright — that guard exists to stop a generic
+   * signer minting deletion requests for arbitrary ids, and the authorship
+   * check in `retract` is the narrower thing that replaces it here.
+   */
+  private async remove(args: Record<string, unknown>): Promise<ToolResult> {
+    const ids = Array.isArray(args.ids)
+      ? args.ids.filter((id): id is string => typeof id === "string")
+      : [];
+    if (ids.length === 0)
+      return { ok: false, output: "`ids` must list at least one event id" };
+    if (ids.length > 20)
+      return {
+        ok: false,
+        output: `that is ${ids.length} ids; retract at most 20 at a time`,
+      };
+
+    const rate = this.withinRate();
+    if (rate) return { ok: false, output: rate };
+
+    const reason = typeof args.reason === "string" ? args.reason : undefined;
+    const result = await retract(ids, {
+      relays: this.options.relays,
+      signer: this.options.signer,
+      pubkey: this.options.pubkey,
+      readRelays: this.options.readRelays ?? this.options.publishRelays,
+      publishRelays: this.options.publishRelays,
+      reason,
+      dryRun: this.options.dryRun,
+    });
+
+    const retracted = result.targets.filter((target) => !target.refused);
+    if (result.outcomes.some((outcome) => outcome.ok)) this.published.push(this.now());
+
+    return {
+      ok: retracted.length > 0,
+      output: JSON.stringify({
+        request: result.request?.id,
+        dryRun: this.options.dryRun || undefined,
+        retracted: retracted.map((target) => target.id),
+        refused: result.targets
+          .filter((target) => target.refused)
+          .map((target) => ({ id: target.id, why: target.refused })),
+        accepted: result.outcomes
+          .filter((outcome) => outcome.ok)
+          .map((outcome) => outcome.relay),
+        note:
+          "a deletion request is a request; relays and caches are not obliged" +
+          " to honour it",
       }),
     };
   }

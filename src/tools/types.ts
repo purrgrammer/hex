@@ -119,6 +119,8 @@ export const RESOLVE_TOOL = "nostr.resolve";
 /** Signing and publishing as the agent. Public, permanent, bounded. */
 export const PUBLISH_TOOL = "nostr.publish";
 export const SIGN_TOOL = "nostr.sign";
+/** Asking relays to forget the agent's OWN events. A request, not an undo. */
+export const RM_TOOL = "nostr.rm";
 /** Putting a file somewhere a reader can fetch it. Off unless configured. */
 export const UPLOAD_TOOL = "blossom.upload";
 /**
@@ -167,6 +169,7 @@ export const KNOWN_TOOLS: readonly string[] = [
   RESOLVE_TOOL,
   PUBLISH_TOOL,
   SIGN_TOOL,
+  RM_TOOL,
   UPLOAD_TOOL,
   HELP_TOOL_LEGACY,
   GIT_ISSUES_TOOL,

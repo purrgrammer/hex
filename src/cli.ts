@@ -22,6 +22,7 @@ import {
 } from "./relays.js";
 import { resolveSigner } from "./signer.js";
 import { announceIdentity } from "./identity.js";
+import { retract } from "./retract.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
 import type { TransportConfig } from "./config.js";
@@ -59,6 +60,9 @@ Usage:
                                    (nip-17) or <relay-host>'<group-id> (nip-29)
   hex dm       [config] <npub> "message" [--attach <path>] [--no-encrypt]
                                    the same thing, fixed to nip-17
+  hex rm       [config] <event-id...> [--reason "why"] [--dry-run]
+                                   ask relays to forget events Hex published.
+                                   Refuses any id it did not sign
   hex eve      [config] <session-id> [--host <url>] [--dry-run]
                                    follow an Eve session, publish it as events
   hex serve    [config] [--host <url>] [--no-reply]
@@ -148,6 +152,8 @@ async function main(): Promise<void> {
       transport: { type: "string" },
       "as-file": { type: "boolean", default: false },
       "no-encrypt": { type: "boolean", default: false },
+      reason: { type: "string" },
+      relay: { type: "string", multiple: true },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -299,6 +305,70 @@ async function main(): Promise<void> {
         await resolved.close();
         if (results.some((result) => result.action === "failed"))
           process.exitCode = 1;
+        return;
+      }
+
+      /**
+       * Unpublish, as far as anything on Nostr can be unpublished.
+       *
+       * Operator-driven on purpose: the events worth retracting are usually the
+       * ones a confused run produced, and asking that same run to clean up
+       * after itself is the least reliable moment to ask it anything.
+       */
+      case "rm": {
+        const ids = args.filter((arg) => !arg.startsWith("-"));
+        if (ids.length === 0) fail('usage: hex rm [config] <event-id...> [--reason "why"]');
+
+        const resolved = await resolveSigner(config.identity.signer, {
+          baseDir: loaded.baseDir,
+          relays,
+        });
+        const result = await retract(ids, {
+          relays,
+          signer: resolved.signer,
+          pubkey: resolved.pubkey,
+          // A deletion has to reach the relays that carry the events, which
+          // are not always the ones this agent publishes to.
+          readRelays: [
+            ...new Set([
+              ...config.relays.read,
+              ...config.relays.publish,
+              ...(values.relay ?? []),
+            ]),
+          ],
+          publishRelays: [
+            ...new Set([...config.relays.publish, ...(values.relay ?? [])]),
+          ],
+          reason: values.reason,
+          dryRun: values["dry-run"],
+        });
+        await resolved.close();
+
+        for (const target of result.targets)
+          console.log(
+            `${target.id.slice(0, 12)}  ${
+              target.refused ? `refused — ${target.refused}` : `kind ${target.kind}  retracted`
+            }`,
+          );
+        if (result.request)
+          console.log(
+            `\nrequest ${result.request.id.slice(0, 12)}${
+              values["dry-run"] ? " (dry run — nothing published)" : ""
+            }`,
+          );
+        for (const outcome of result.outcomes)
+          console.log(
+            `  ${outcome.ok ? "took it" : "refused"}  ${outcome.relay}${
+              outcome.message ? ` — ${outcome.message}` : ""
+            }`,
+          );
+        if (result.request && !values["dry-run"])
+          console.log(
+            "\nA deletion request is a request. Relays that already served" +
+              " these events, and readers that cached them, are not obliged to" +
+              " forget.",
+          );
+        if (result.targets.some((target) => target.refused)) process.exitCode = 1;
         return;
       }
 
@@ -834,6 +904,7 @@ async function main(): Promise<void> {
                 pubkey: resolved.pubkey,
                 relays,
                 publishRelays: config.relays.publish,
+                readRelays: config.relays.read,
                 allowKinds: publishConfig.kinds,
                 perHour: publishConfig.perHour,
                 dryRun: publishConfig.dryRun,
