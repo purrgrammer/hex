@@ -267,6 +267,14 @@ export class Spool {
    * unhandled rejection, and Node's default for that is to kill the daemon.
    * The row keeps whatever state it has and the next pass tries it again.
    */
+  /**
+   * How many rows are mid-delivery. A test seam: quiescent means zero, and a
+   * row stuck here is one nothing will ever try again.
+   */
+  get sendingCount(): number {
+    return this.sending.size;
+  }
+
   private async send(row: OutboundRow): Promise<string | undefined> {
     // Somebody is already delivering this one; two callers is one duplicate.
     if (this.sending.has(row.id)) return undefined;

@@ -444,6 +444,17 @@ export class Ingestor {
     }
   }
 
+  /**
+   * How many rows are dispatched and unsettled.
+   *
+   * A test seam, and the only view of a set that is otherwise invisible: a seq
+   * left here is a row nothing will ever hand out again, and the process has to
+   * be restarted to notice. Quiescent means zero.
+   */
+  get inFlightCount(): number {
+    return this.inFlight.size;
+  }
+
   /** Settle a row. Not calling this leaves the event owed until a restart. */
   finish(seq: number, outcome: string): void {
     this.options.store.finishInbound(seq, outcome);

@@ -43,6 +43,7 @@ const CONCORD = `${TESTS}/concord-transport.test.ts`;
 const STORE_PBT = `${TESTS}/store.property.test.ts`;
 const POLICY_PBT = `${TESTS}/policy.property.test.ts`;
 const RUNNER_PBT = `${TESTS}/runner.property.test.ts`;
+const QUIESCENCE_PBT = `${TESTS}/quiescence.property.test.ts`;
 
 type Status = "covered" | "partial" | "gap";
 
@@ -130,10 +131,10 @@ const COVERAGE: Coverage[] = [
   {
     id: "I10",
     statement: "no in-memory set leaks: inFlight/sending/lanes empty at rest",
-    status: "gap",
+    status: "partial",
     owner:
-      "GAP: the store machine cannot see them — they live in the runner and the spool. Needs the driven tier: a real store plus a fake runtime over generated crash and restart histories.",
-    ownerFiles: [],
+      "quiescence.property.test.ts covers the ingestor's inFlight and the spool's sending, including the fenced path that is the only way to reach send's own catch. The runner's lanes map is not covered: emptying it needs turns to finish, which needs the driven tier.",
+    ownerFiles: [QUIESCENCE_PBT],
   },
   {
     id: "I11",
@@ -174,6 +175,7 @@ const SENTINELS: Record<string, string[]> = {
   I6: [INVARIANTS, STORE_PBT],
   I7: [POLICY_PBT],
   I9: [RUNNER_PBT],
+  I10: [QUIESCENCE_PBT],
   I13: [POLICY_PBT],
 };
 
