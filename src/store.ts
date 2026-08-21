@@ -261,6 +261,31 @@ CREATE TABLE IF NOT EXISTS obeyed (
   at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS obeyed_at ON obeyed (at);
+
+/*
+ * Every event this agent published through nostr.publish, so it can tell
+ * whether it is about to publish the same thing twice.
+ *
+ * The runtime re-executes a turn: five turn.started produced eight
+ * turn.completed in the run that filed seven issues for four ideas. Each
+ * execution composes afresh, so it arrives with a new tool-call id and new
+ * prose -- which is why the bridge's call-id dedup and a content hash both
+ * miss it. What does not change is what the event is ABOUT: same kind, same
+ * repository, same subject.
+ *
+ * Durable, because a restart mid-turn is exactly when the question gets asked.
+ */
+CREATE TABLE IF NOT EXISTS published (
+  id      TEXT PRIMARY KEY,
+  kind    INTEGER NOT NULL,
+  -- The "a" tag this event hangs off, or "" -- a repository, usually.
+  scope   TEXT NOT NULL,
+  -- Normalised subject tag, lowercased and stripped of punctuation.
+  subject TEXT NOT NULL,
+  sha256  TEXT NOT NULL,
+  at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS published_lookup ON published (kind, scope, at);
 `;
 
 /**
@@ -271,6 +296,26 @@ CREATE INDEX IF NOT EXISTS obeyed_at ON obeyed (at);
  * obeyed twice.
  */
 const OBEYED_HORIZON_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * How long a published event is remembered for the duplicate check.
+ *
+ * Long enough to outlast any re-execution — those land minutes apart — and
+ * short enough that a genuine follow-up next week is nobody's duplicate.
+ */
+const PUBLISHED_HORIZON_SECONDS = 30 * 24 * 60 * 60;
+
+/** One row of the publish ledger. */
+export interface PublishedEvent {
+  id: string;
+  kind: number;
+  /** The `a` tag the event hangs off, or "". */
+  scope: string;
+  /** Normalised subject — see `normaliseSubject` in `tools/publish.ts`. */
+  subject: string;
+  sha256: string;
+  at: number;
+}
 
 export class HexStore {
   private constructor(private readonly db: DatabaseSync) {}
@@ -342,6 +387,9 @@ export class HexStore {
     db.prepare(`DELETE FROM obeyed WHERE at < ?`).run(
       Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
     );
+    db.prepare(`DELETE FROM published WHERE at < ?`).run(
+      Math.floor(Date.now() / 1000) - PUBLISHED_HORIZON_SECONDS,
+    );
 
     return new HexStore(db);
   }
@@ -371,6 +419,33 @@ export class HexStore {
     this.db
       .prepare(`INSERT OR IGNORE INTO obeyed (control_id, at) VALUES (?, ?)`)
       .run(controlId, at);
+  }
+
+  /** What this agent published recently, in the scope and kind asked about. */
+  publishedSince(kind: number, scope: string, since: number): PublishedEvent[] {
+    return this.db
+      .prepare(
+        `SELECT id, kind, scope, subject, sha256, at FROM published
+          WHERE kind = ? AND scope = ? AND at >= ? ORDER BY at DESC`,
+      )
+      .all(kind, scope, since) as unknown as PublishedEvent[];
+  }
+
+  /** Record one, after a relay took it. */
+  rememberPublished(event: PublishedEvent): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO published (id, kind, scope, subject, sha256, at)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.id,
+        event.kind,
+        event.scope,
+        event.subject,
+        event.sha256,
+        event.at,
+      );
   }
 
   /**

@@ -44,6 +44,26 @@ import {
   type ToolSpec,
 } from "./types.js";
 
+/**
+ * What this needs of the store: two calls, so the tool stays testable without
+ * a database and the store stays free of any notion of a tool.
+ */
+export interface PublishLedger {
+  publishedSince(
+    kind: number,
+    scope: string,
+    since: number,
+  ): { id: string; subject: string; sha256: string }[];
+  rememberPublished(entry: {
+    id: string;
+    kind: number;
+    scope: string;
+    subject: string;
+    sha256: string;
+    at: number;
+  }): void;
+}
+
 /** What this needs of a signer: the one method, however the key is held. */
 export interface EventSigner {
   signEvent(template: EventTemplate): Promise<NostrEvent>;
@@ -62,6 +82,104 @@ const MAX_CONTENT = 64 * 1024;
 /** NIP-34's patch. The one kind whose content has a shape worth checking. */
 const KIND_PATCH = 1617;
 
+/**
+ * The kinds where publishing the same thing twice is always a mistake.
+ *
+ * A patch, a pull request and an issue each propose ONE thing to ONE
+ * repository. Two of them saying the same thing is not a conversation, it is a
+ * maintainer triaging the same work twice. Notes and replies are deliberately
+ * absent: people repeat themselves on purpose.
+ */
+const ONE_PER_THING: readonly number[] = [1617, 1618, 1621];
+
+/** How much of a subject's opening has to match. See `duplicateOf`. */
+const OPENING_WORDS = 2;
+
+/** How far back a duplicate is still a duplicate. */
+const DEFAULT_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+/** Words too common to tell two subjects apart. */
+const NOISE = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has",
+  "have", "in", "is", "it", "its", "no", "not", "of", "on", "or", "that", "the",
+  "there", "this", "to", "was", "were", "with",
+]);
+
+/**
+ * A subject reduced to what it is about.
+ *
+ * Case, punctuation and the em-dash clause a model likes to append are not
+ * identity: "No opt-in path for hex to speak unprompted -- automation is
+ * currently impossible" and the same sentence rephrased are the same issue.
+ */
+export function normaliseSubject(subject: string): string {
+  return subject
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** The significant words of a subject, in order. */
+function significant(subject: string): string[] {
+  return normaliseSubject(subject)
+    .split(" ")
+    .filter((word) => word.length > 0 && !NOISE.has(word));
+}
+
+/**
+ * Is this the same proposal as one already published?
+ *
+ * Three rules, each of which has to be explainable in the refusal, because a
+ * model told only "duplicate" will rephrase and try again:
+ *
+ * 1. The same bytes. Certain.
+ * 2. The same subject once normalised. Certain enough.
+ * 3. The same opening — the first two words that are not noise. This is the one
+ *    that earns its keep, and the only reason it is set as low as two: the two
+ *    "Memory lives in ..." issues diverged at the third significant word, share
+ *    three words out of fourteen, and would clear no similarity threshold that
+ *    did not also fire on unrelated work. Dropping noise words is what makes
+ *    two enough — "No way for one hex identity ..." opens on "way one", not on
+ *    "no way", so it does not collide with every other "No way to ..." issue.
+ *
+ * A false positive here is cheap and self-correcting: the agent is told which
+ * event it already published and that a genuinely different proposal needs a
+ * subject that says how it differs. A false negative is a permanent duplicate
+ * on four relays that a maintainer triages by hand.
+ */
+function duplicateOf(
+  candidate: { subject: string; sha256: string },
+  earlier: readonly { id: string; subject: string; sha256: string }[],
+): { id: string; why: string } | undefined {
+  const subject = normaliseSubject(candidate.subject);
+  const words = significant(candidate.subject);
+  const opening = words.slice(0, OPENING_WORDS);
+
+  for (const previous of earlier) {
+    if (previous.sha256 === candidate.sha256)
+      return { id: previous.id, why: "the same content, byte for byte" };
+    if (subject && previous.subject === subject)
+      return { id: previous.id, why: "the same subject" };
+
+    // Only for subjects long enough that their opening is not the whole of
+    // them — a two-word subject matching a two-word subject is rule 2's job.
+    const theirs = previous.subject
+      .split(" ")
+      .filter((word) => word.length > 0 && !NOISE.has(word));
+    if (
+      opening.length === OPENING_WORDS &&
+      words.length > OPENING_WORDS &&
+      theirs.length > OPENING_WORDS &&
+      opening.every((word, at) => word === theirs[at])
+    )
+      return {
+        id: previous.id,
+        why: `a subject that begins the same way — "${opening.join(" ")}"`,
+      };
+  }
+  return undefined;
+}
+
 export interface PublishToolsOptions {
   signer: EventSigner;
   pubkey: string;
@@ -70,6 +188,15 @@ export interface PublishToolsOptions {
   publishRelays: string[];
   /** Where the agent looks events up, for `nostr.rm` to check authorship. */
   readRelays?: string[];
+  /**
+   * What has already been published, so the same proposal is not filed twice.
+   *
+   * Optional: a `hex eve` run with no home still publishes, it just cannot
+   * remember. Absent, the check is skipped rather than faked.
+   */
+  ledger?: PublishLedger;
+  /** How far back a duplicate is still a duplicate. Default six hours. */
+  duplicateWindowMs?: number;
   /** Guarded kinds the operator has explicitly allowed. */
   allowKinds?: number[];
   perHour?: number;
@@ -276,6 +403,15 @@ export class PublishTools {
       return { ok: true, output: JSON.stringify({ signed: event }) };
     }
 
+    /**
+     * Already filed?
+     *
+     * Checked before the rate limit, and a hit does not spend the hourly
+     * budget: refusing to repeat work is not work.
+     */
+    const already = this.duplicate(template.value);
+    if (already) return { ok: false, output: already };
+
     const rate = this.withinRate();
     if (rate) return { ok: false, output: rate };
 
@@ -310,7 +446,10 @@ export class PublishTools {
     const accepted = outcomes.filter((outcome) => outcome.ok);
     // Counted only when it landed: a publish nobody took has not spent the
     // agent's hourly budget, because it has not been seen.
-    if (accepted.length > 0) this.published.push(this.now());
+    if (accepted.length > 0) {
+      this.published.push(this.now());
+      this.record(event);
+    }
 
     return {
       // A relay that refused is not a tool that failed, but it is not a success
@@ -386,6 +525,72 @@ export class PublishTools {
 
   private now(): number {
     return this.options.now?.() ?? Date.now();
+  }
+
+  /**
+   * The `a` tag an event hangs off, which for NIP-34 is the repository.
+   *
+   * Scoping by it is what keeps the check honest: the same subject on two
+   * different repositories is two proposals, not one repeated.
+   */
+  private static scopeOf(template: EventTemplate): string {
+    return template.tags.find((tag) => tag[0] === "a")?.[1] ?? "";
+  }
+
+  private static subjectOf(template: EventTemplate): string {
+    const tagged = template.tags.find((tag) => tag[0] === "subject")?.[1];
+    if (tagged) return tagged;
+    // A patch carries its subject in the format-patch header, not in a tag.
+    const header = /^Subject:\s*(.+)$/m.exec(template.content);
+    return header?.[1]?.trim() ?? template.content.split("\n")[0] ?? "";
+  }
+
+  /** Whether this proposal has already been filed, and how it is known. */
+  private duplicate(template: EventTemplate): string | undefined {
+    const ledger = this.options.ledger;
+    if (!ledger || !ONE_PER_THING.includes(template.kind)) return undefined;
+
+    const window =
+      this.options.duplicateWindowMs ?? DEFAULT_DUPLICATE_WINDOW_MS;
+    const since = Math.floor((this.now() - window) / 1000);
+    const earlier = ledger.publishedSince(
+      template.kind,
+      PublishTools.scopeOf(template),
+      since,
+    );
+    if (earlier.length === 0) return undefined;
+
+    const hit = duplicateOf(
+      {
+        subject: PublishTools.subjectOf(template),
+        sha256: createHash("sha256")
+          .update(template.content, "utf8")
+          .digest("hex"),
+      },
+      earlier,
+    );
+    if (!hit) return undefined;
+
+    return (
+      `this agent already published ${hit.id} with ${hit.why}, and nothing ` +
+      "was published now. You have done this already — do not compose it " +
+      "again. If it really is a different proposal, give it a subject that " +
+      `says how it differs, or retract ${hit.id.slice(0, 12)} with nostr.rm ` +
+      "and publish the one you meant."
+    );
+  }
+
+  /** Remember one, so the next execution of this turn sees it. */
+  private record(event: NostrEvent): void {
+    if (!this.options.ledger || !ONE_PER_THING.includes(event.kind)) return;
+    this.options.ledger.rememberPublished({
+      id: event.id,
+      kind: event.kind,
+      scope: PublishTools.scopeOf(event),
+      subject: normaliseSubject(PublishTools.subjectOf(event)),
+      sha256: createHash("sha256").update(event.content, "utf8").digest("hex"),
+      at: Math.floor(this.now() / 1000),
+    });
   }
 
   private withinRate(): string | undefined {

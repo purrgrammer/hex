@@ -905,6 +905,7 @@ async function main(): Promise<void> {
                 relays,
                 publishRelays: config.relays.publish,
                 readRelays: config.relays.read,
+                ledger: store,
                 allowKinds: publishConfig.kinds,
                 perHour: publishConfig.perHour,
                 dryRun: publishConfig.dryRun,
