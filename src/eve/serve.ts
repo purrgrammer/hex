@@ -175,6 +175,19 @@ export interface ServeOptions {
 }
 
 /**
+ * A followed session whose stream moved while the reader on it stood still.
+ *
+ * `tailIndex` is the stored cursor, `deliveredIndex` what this process's reader
+ * has actually handed over, `sinceMs` how long that mark has been stuck.
+ */
+export interface GapReport {
+  sessionId: string;
+  tailIndex: number;
+  deliveredIndex: number;
+  sinceMs: number;
+}
+
+/**
  * How long a stored replay may pause before it counts as finished.
  *
  * Generous against a slow local read, and irrelevant to latency: this runs once
@@ -431,14 +444,130 @@ export class EveServer {
    */
   private startedReading(sessionId: string): () => void {
     this.readers.set(sessionId, (this.readers.get(sessionId) ?? 0) + 1);
+    if (!this.deliveries.has(sessionId))
+      this.deliveries.set(sessionId, {
+        // Where the reader is about to start: `follow` and `drain` both open at
+        // the stored cursor, so this is "delivered nothing" in the same counter.
+        index:
+          this.options.transcript.store.transcriptFor(sessionId)?.streamIndex ??
+          0,
+        at: Date.now(),
+      });
     let released = false;
     return () => {
       if (released) return;
       released = true;
       const left = (this.readers.get(sessionId) ?? 1) - 1;
       if (left > 0) this.readers.set(sessionId, left);
-      else this.readers.delete(sessionId);
+      else {
+        this.readers.delete(sessionId);
+        this.deliveries.delete(sessionId);
+      }
     };
+  }
+
+  /**
+   * How far each registered reader has actually got, and when it last moved.
+   *
+   * Recorded BEFORE the transcript handles the event, not after: `handle`
+   * publishes and batch-saves the row, so a mark written afterwards would sit
+   * behind the very cursor it is compared against and every healthy follow
+   * would look like a gap.
+   */
+  private readonly deliveries = new Map<
+    string,
+    { index: number; at: number }
+  >();
+
+  /** Gaps seen since this process started, so a sweep can be seen to work. */
+  private gaps = 0;
+
+  /** How many dropped follows this process has had to force a read on. */
+  get gapsDetected(): number {
+    return this.gaps;
+  }
+
+  private deliveredTo(sessionId: string, index: number): void {
+    const mark = this.deliveries.get(sessionId);
+    if (!mark || index <= mark.index) return;
+    mark.index = index;
+    mark.at = Date.now();
+  }
+
+  /**
+   * Sessions whose stream moved while the reader on them delivered nothing.
+   *
+   * The stored cursor only ever moves forward, and only a reader moves it, so a
+   * row ahead of this process's own mark means something else advanced the
+   * stream: the follow here is dropped, and silence is not completion. Pure —
+   * `sweepGaps` is the half that warns and reads.
+   */
+  detectGaps(): GapReport[] {
+    const now = Date.now();
+    const reports: GapReport[] = [];
+    for (const [sessionId, mark] of this.deliveries) {
+      if ((this.readers.get(sessionId) ?? 0) <= 0) continue;
+      const tail =
+        this.options.transcript.store.transcriptFor(sessionId)?.streamIndex;
+      if (tail === undefined || tail <= mark.index) continue;
+      reports.push({
+        sessionId,
+        tailIndex: tail,
+        deliveredIndex: mark.index,
+        sinceMs: now - mark.at,
+      });
+    }
+    return reports;
+  }
+
+  /**
+   * Say a dropped follow out loud and read the session anyway.
+   *
+   * Deliberately past the never-two-readers guard: a reader that has delivered
+   * nothing while the tail moved is not reading, and leaving it registered is
+   * what makes a drop invisible until the next restart. Safe only because the
+   * publish reservations and the transcript fence make a woken stale reader's
+   * writes fail loudly instead of forking the chain.
+   */
+  async sweepGaps(): Promise<GapReport[]> {
+    const gaps = this.detectGaps();
+    for (const gap of gaps) {
+      this.gaps += 1;
+      this.log(
+        `[hex] ${gap.sessionId} has reached index ${gap.tailIndex} but the ` +
+          `reader here has delivered nothing past ${gap.deliveredIndex} for ` +
+          `${Math.round(gap.sinceMs / 1000)}s — reading it again`,
+      );
+      await this.reread(gap.sessionId);
+    }
+    return gaps;
+  }
+
+  /** Read one session from its stored cursor, whoever else claims to be on it. */
+  private async reread(sessionId: string): Promise<void> {
+    const record = this.options.transcript.store.transcriptFor(sessionId);
+    if (!record) return;
+    const conversation: Conversation = {
+      sessionId,
+      transcript: new EveTranscript(this.transcriptOptions(), sessionId),
+      finished: new Set(),
+    };
+    this.bindRoomFor(
+      sessionId,
+      this.options.transcript.recipients[0] ??
+        this.options.transcript.agentPubkey,
+      record.trigger,
+      record.channel,
+    );
+    try {
+      const boundary = await this.drain(conversation, RECONCILE_MS);
+      this.log(
+        `[hex] ${sessionId} read again to ${boundary.last} (${conversation.transcript.headStatus})`,
+      );
+    } catch (error) {
+      // One session that cannot be reached must not stop the sweep.
+      this.log(`[hex] could not read ${sessionId} again: ${message(error)}`);
+    }
   }
 
   /**
@@ -1884,6 +2013,13 @@ export class EveServer {
      * exactly what it is.
      */
     const stopReading = this.startedReading(conversation.sessionId);
+    // The mark starts where this reader does. The stored row lags the in-memory
+    // cursor by a batch, so seeding from the row alone reads as a gap the
+    // moment the next publish saves it.
+    this.deliveredTo(
+      conversation.sessionId,
+      conversation.transcript.streamIndex,
+    );
     const verdict = new AbortController();
     let verdictTimer: ReturnType<typeof setTimeout> | undefined;
     /**
@@ -1905,6 +2041,7 @@ export class EveServer {
         conversation.sessionId,
         { startIndex: conversation.transcript.streamIndex, signal },
       )) {
+        this.deliveredTo(conversation.sessionId, index);
         await conversation.transcript.handle(event, index);
 
         if (index <= boundary.last) continue;
@@ -2162,6 +2299,7 @@ export class EveServer {
     deadline?.unref?.();
 
     let last = conversation.transcript.streamIndex;
+    this.deliveredTo(conversation.sessionId, last);
     const finished = new Set(conversation.finished);
     try {
       for await (const { index, event } of this.options.runtime.follow(
@@ -2178,6 +2316,7 @@ export class EveServer {
          * saying `active`, which is the exact lie it was called to fix.
          */
         clearTimeout(timer);
+        this.deliveredTo(conversation.sessionId, index);
         await conversation.transcript.handle(event, index);
         last = index;
         if (controller.signal.aborted) break;
@@ -2208,14 +2347,19 @@ export class EveServer {
    * that lived: a dropped stream, a reconcile that could not reach a relay, a
    * session picked up by nothing. Without it the only cure for a stale head is
    * a restart, which is how one came to claim `active` for eleven hours.
+   *
+   * Gaps first: a session whose reader has stopped delivering is invisible to
+   * the settle below, because a registered reader is what makes it skip.
    */
   watch(): void {
     const every = this.options.sweepMs ?? DEFAULT_SWEEP_MS;
     if (every <= 0 || this.sweeping) return;
     this.sweeping = setInterval(() => {
-      void this.catchUp({ claimingWork: true }).catch((error: unknown) =>
-        this.log(`[hex] the sweep did not finish: ${message(error)}`),
-      );
+      void this.sweepGaps()
+        .then(() => this.catchUp({ claimingWork: true }))
+        .catch((error: unknown) =>
+          this.log(`[hex] the sweep did not finish: ${message(error)}`),
+        );
     }, every);
     // A backstop must not be the reason a CLI refuses to exit.
     this.sweeping.unref?.();

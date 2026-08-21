@@ -287,19 +287,28 @@ describe("the periodic sweep", () => {
   });
 
   it("reads a session claiming work and leaves a resting one alone", async () => {
-    store.saveTranscript(record("wrun_RESTING", "idle") as never, fenceFor(store));
+    store.saveTranscript(
+      record("wrun_RESTING", "idle") as never,
+      fenceFor(store),
+    );
     const idleOnly = droppingEve();
     await serverFor(idleOnly).catchUp({ claimingWork: true });
     expect(idleOnly.reads).toEqual([]);
 
-    store.saveTranscript(record("wrun_CLAIMING", "active") as never, fenceFor(store));
+    store.saveTranscript(
+      record("wrun_CLAIMING", "active") as never,
+      fenceFor(store),
+    );
     const working = droppingEve();
     await serverFor(working).catchUp({ claimingWork: true });
     expect(working.reads.length).toBe(1);
   });
 
   it("still reads every open session at startup", async () => {
-    store.saveTranscript(record("wrun_RESTING", "idle") as never, fenceFor(store));
+    store.saveTranscript(
+      record("wrun_RESTING", "idle") as never,
+      fenceFor(store),
+    );
     const eve = droppingEve();
     await serverFor(eve).catchUp();
     expect(eve.reads.length).toBe(1);
@@ -417,5 +426,178 @@ describe("what counts as already being read", () => {
 
     eve.release();
     await working;
+  });
+});
+
+/**
+ * A drop the process never notices is a drop nothing reconciles until restart.
+ *
+ * The reader stays registered — so the sweep skips the session as "already
+ * being read" — while the stream it claims to be reading moves on without it.
+ * Gap detection is the tell: the stored cursor is ahead of anything this
+ * process's reader delivered, and silence is not completion.
+ */
+describe("a reader that stopped delivering", () => {
+  let home: string;
+  let store: HexStore;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "eve-gap-"));
+    store = HexStore.open(agentHome(home, AGENT).db);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /**
+   * `heldEve`, except that only the FIRST read is held: the forced reconcile is
+   * itself a read, and a fake that held every one would hang it for a minute.
+   */
+  function heldOnceEve() {
+    const encoder = new TextEncoder();
+    const reads: number[] = [];
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let first = true;
+
+    const impl = (async (url: string | URL, init?: RequestInit) => {
+      if (init?.method === "POST")
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({ ok: true, sessionId: SESSION }),
+        };
+      const from = Number(
+        new URL(String(url)).searchParams.get("startIndex") ?? 0,
+      );
+      reads.push(from);
+      const hold = first;
+      first = false;
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers(),
+        body: (async function* () {
+          const all = [...CUT_OFF, ...THE_REST];
+          if (!hold) {
+            for (let at = from; at < all.length; at += 1)
+              yield encoder.encode(JSON.stringify(all[at]) + "\n");
+            return;
+          }
+          for (const event of CUT_OFF)
+            yield encoder.encode(JSON.stringify(event) + "\n");
+          open();
+          await held;
+          for (const event of THE_REST)
+            yield encoder.encode(JSON.stringify(event) + "\n");
+        })(),
+      };
+    }) as unknown as typeof fetch;
+
+    return { impl, reads, opened, release };
+  }
+
+  function server(eve: ReturnType<typeof heldOnceEve>) {
+    return new EveServer({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
+      transport: transport() as never,
+      drainQuietMs: 50,
+      // The sweep is driven by hand here; a timer would race the assertions.
+      sweepMs: 0,
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        fence: fenceFor(store),
+        sink: sink().impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+  }
+
+  /** Move the stored cursor the way a run carrying on without us would. */
+  function advanceTail(to: number) {
+    const record = store.transcriptFor(SESSION);
+    expect(record).toBeTruthy();
+    store.saveTranscript({ ...record!, streamIndex: to }, fenceFor(store));
+  }
+
+  it("reports the gap and forces a read of the session anyway", async () => {
+    const eve = heldOnceEve();
+    const hex = server(eve);
+
+    const working = hex.runTurn(inbound("m1", "do the long thing"));
+    await eve.opened;
+
+    advanceTail(500);
+
+    const gaps = hex.detectGaps();
+    expect(gaps.length).toBe(1);
+    expect(gaps[0]!.sessionId).toBe(SESSION);
+    expect(gaps[0]!.tailIndex).toBe(500);
+    expect(gaps[0]!.deliveredIndex).toBeLessThanOrEqual(CUT_OFF.length);
+    expect(gaps[0]!.sinceMs).toBeGreaterThanOrEqual(0);
+
+    // The reader is still registered, so the ordinary sweep would leave this
+    // session alone forever. The gap sweep reads it regardless, and counts it.
+    const before = eve.reads.length;
+    const swept = await hex.sweepGaps();
+    expect(
+      swept.map(({ sessionId, tailIndex, deliveredIndex }) => ({
+        sessionId,
+        tailIndex,
+        deliveredIndex,
+      })),
+    ).toEqual([
+      {
+        sessionId: SESSION,
+        tailIndex: 500,
+        deliveredIndex: gaps[0]!.deliveredIndex,
+      },
+    ]);
+    expect(eve.reads.length).toBe(before + 1);
+    expect(hex.gapsDetected).toBe(1);
+
+    eve.release();
+    await working;
+  });
+
+  it("says nothing about a follow that is keeping up", async () => {
+    const eve = heldOnceEve();
+    const hex = server(eve);
+
+    const working = hex.runTurn(inbound("m1", "do the long thing"));
+    await eve.opened;
+
+    expect(hex.detectGaps()).toEqual([]);
+    const before = eve.reads.length;
+    expect(await hex.sweepGaps()).toEqual([]);
+    expect(eve.reads.length).toBe(before);
+    expect(hex.gapsDetected).toBe(0);
+
+    eve.release();
+    await working;
+  });
+
+  /** No reader, no claim to be reading: an unfollowed session is the sweep's. */
+  it("says nothing about a session nobody is reading", async () => {
+    const eve = heldOnceEve();
+    const hex = server(eve);
+
+    const working = hex.runTurn(inbound("m1", "do the long thing"));
+    await eve.opened;
+    eve.release();
+    await working;
+    advanceTail(500);
+
+    expect(hex.detectGaps()).toEqual([]);
   });
 });
