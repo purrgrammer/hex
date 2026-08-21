@@ -8,6 +8,7 @@ import { nip19 } from "nostr-tools";
 
 import { EveServer } from "../eve/serve.js";
 import { Ingestor, settleControl, type ControlPayload } from "../ingest.js";
+import { Runner } from "../runner.js";
 import { EveRuntime } from "../runtime/eve.js";
 import type { RumorSink } from "../eve/transcript.js";
 import type { Rumor } from "../nostr/types.js";
@@ -272,6 +273,15 @@ function transport() {
   };
 }
 
+/** Poll until it is true, or give up loudly rather than hang the suite. */
+async function until(done: () => boolean, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error("gave up waiting for the queue");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 const tag = (rumor: Rumor, name: string) =>
   rumor.tags.find((t) => t[0] === name);
 
@@ -337,6 +347,43 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     });
   }
 
+  /**
+   * The daemon's own wiring: the queue, and the runner that drains it.
+   *
+   * Built here rather than mocked because what is under test is the ORDER two
+   * dispatches reach one session in, and only the real pair produces it.
+   */
+  function runnerFor(
+    hex: EveServer,
+    options: { generation?: number; settle?: boolean } = {},
+  ) {
+    const generation = options.generation ?? fenceFor(store).generation;
+    const ingest: Ingestor = new Ingestor({
+      store,
+      dispatch: (queued) => runner.offer(queued),
+    });
+    const runner = new Runner({
+      store,
+      // `settle: false` is a process that died before it could write done_at.
+      queue: options.settle === false ? { finish: () => {} } : ingest,
+      target: hex,
+      generation,
+      selfPubkey: AGENT,
+      // Nothing here is backfill, and the limit is not what is under test.
+      startedAt: 0,
+      repliesPerRoomPerHour: 100,
+    });
+    return {
+      ingest,
+      generation,
+      /** Wait for every row to be settled, one way or the other. */
+      quiet: (seqs: number[]) =>
+        until(() =>
+          seqs.every((seq) => store.inboundOutcome(seq) !== undefined),
+        ),
+    };
+  }
+
   it("names the run after what was asked, not after the runtime's id", async () => {
     /**
      * The head's title was the runtime session id, so a client listing twenty
@@ -370,12 +417,12 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const { impl, sent } = sink();
     const hex = server(eve, bus, impl);
 
-    await hex.handle(inbound("m1", "how many kinds are there?"));
+    await hex.runTurn(inbound("m1", "how many kinds are there?"));
     const first = sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
     expect(tag(first, "title")).toEqual(["title", "which relays serve 30166?"]);
 
     // A second message steers the same run. It must not rename it.
-    await hex.handle(inbound("m2", "now delete it", "m1"));
+    await hex.runTurn(inbound("m2", "now delete it", "m1"));
     const later = sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
     expect(tag(later, "title")).toEqual(["title", "which relays serve 30166?"]);
   });
@@ -416,13 +463,13 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       },
     });
 
-    await hex.handle(inbound("m1", "how many kinds?"));
+    await hex.runTurn(inbound("m1", "how many kinds?"));
     const before = bound.length;
 
-    const head = (await hex.handle(inbound("m2", "again", "m1")), undefined);
+    const head = (await hex.runTurn(inbound("m2", "again", "m1")), undefined);
     void head;
 
-    await hex.control({
+    await hex.applyControl({
       id: "ctl_1",
       session: store.transcriptFor(eve.session)!.nostrId,
       operator: PEER,
@@ -446,7 +493,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const eve = fakeEve();
     const bus = transport();
     const { impl, sent } = sink();
-    await server(eve, bus, impl).handle(inbound("m1", "how many kinds?"));
+    await server(eve, bus, impl).runTurn(inbound("m1", "how many kinds?"));
 
     const head = sent.filter((rumor) => rumor.kind === 31777).at(-1)!;
     expect(tag(head, "transport")).toEqual(["transport", "nip-17"]);
@@ -481,7 +528,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const { impl } = sink();
     const hex = server(eve, bus, impl);
 
-    await hex.handle(inbound("m1", "publish my note"));
+    await hex.runTurn(inbound("m1", "publish my note"));
 
     // Asked out loud, with the options spelled out and a pointer to the session.
     const question = bus.replies.at(-1)!;
@@ -497,7 +544,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     });
 
     // A reply to THAT message resolves the request rather than steering.
-    await hex.handle(inbound("m2", "nos.lol", "reply-id"));
+    await hex.runTurn(inbound("m2", "nos.lol", "reply-id"));
 
     const answered = eve.posts.filter(
       (post) =>
@@ -538,13 +585,13 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const out = sink();
     const hex = server(eve, transport(), out.impl);
 
-    await hex.handle(inbound("m1", "publish my note"));
+    await hex.runTurn(inbound("m1", "publish my note"));
 
     const parked = store.transcriptFor(eve.session)!;
     expect(parked.pending).toEqual(["req_1"]);
     expect(parked.status).toBe("awaiting-input");
 
-    await hex.control({
+    await hex.applyControl({
       id: "c1",
       operator: PEER,
       agent: AGENT,
@@ -586,11 +633,11 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const out = sink();
     const hex = server(eve, transport(), out.impl);
 
-    await hex.handle(inbound("m1", "publish my note"));
+    await hex.runTurn(inbound("m1", "publish my note"));
     const parked = store.transcriptFor(eve.session)!;
     expect(parked.pending).toEqual(["req_1"]);
 
-    await hex.control({
+    await hex.applyControl({
       id: "c1",
       operator: PEER,
       agent: AGENT,
@@ -630,7 +677,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const out = sink();
     const hex = server(eve, transport(), out.impl);
 
-    await hex.handle(inbound("m1", "first"));
+    await hex.runTurn(inbound("m1", "first"));
     const record = store.transcriptFor(eve.session)!;
     const before = out.sent.length;
 
@@ -640,11 +687,15 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       session: record.nostrId,
       command: "steer" as const,
     };
-    // Fired together, the way a relay hands two instructions over at once.
-    await Promise.all([
-      hex.control({ ...base, id: "c1", text: "do this" }),
-      hex.control({ ...base, id: "c2", text: "and this" }),
-    ]);
+    // Through the queue, the way a relay hands two instructions over at once.
+    // The runner's lane is what keeps them apart now: `EveServer` serialises
+    // nothing of its own any more.
+    const lane = runnerFor(hex);
+    const seqs = [
+      lane.ingest.acceptControl({ ...base, id: "c1", text: "do this" })!,
+      lane.ingest.acceptControl({ ...base, id: "c2", text: "and this" })!,
+    ];
+    await lane.quiet(seqs);
 
     const turns = out.sent
       .slice(before)
@@ -662,7 +713,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const out = sink();
     const server_ = server(eve, bus, out.impl);
 
-    await server_.handle(inbound("msg-1", "which relays serve 30166?"));
+    await server_.runTurn(inbound("msg-1", "which relays serve 30166?"));
 
     const heads = out.sent.filter((rumor) => rumor.kind === 31777);
     expect(heads.length).toBeGreaterThan(0);
@@ -676,7 +727,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const out = sink();
     const server_ = server(eve, bus, out.impl);
 
-    await server_.handle(inbound("msg-1", "which relays serve 30166?"));
+    await server_.runTurn(inbound("msg-1", "which relays serve 30166?"));
 
     const turns = out.sent.filter((rumor) => rumor.kind === 1777);
     expect(turns.map((t) => tag(t, "role")?.[1])).toEqual([
@@ -696,7 +747,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // makes it checkable.
     const eve = fakeEve();
     const bus = transport();
-    await server(eve, bus, sink().impl).handle(inbound("msg-1", "hello"));
+    await server(eve, bus, sink().impl).runTurn(inbound("msg-1", "hello"));
     expect(bus.replies).toEqual([
       { to: "msg-1", text: "41 of them.", tags: undefined },
     ]);
@@ -705,7 +756,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // follow-up with nothing new to read.
     const eve2 = fakeEve();
     const bus2 = transport();
-    await server(eve2, bus2, sink().impl, false).handle({
+    await server(eve2, bus2, sink().impl, false).runTurn({
       ...inbound("msg-2", "hello"),
       author: "2".repeat(64),
       room: { transport: "nip-17", id: "2".repeat(64) },
@@ -718,7 +769,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // difference a reader can see between "working on it" and "ignored you".
     const eve = fakeEve();
     const bus = transport();
-    await server(eve, bus, sink().impl).handle(inbound("msg-1", "hello"));
+    await server(eve, bus, sink().impl).runTurn(inbound("msg-1", "hello"));
     expect(bus.reactions).toEqual([{ to: "msg-1", emoji: "👀" }]);
   });
 
@@ -728,8 +779,8 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const out = sink();
     const server_ = server(eve, bus, out.impl);
 
-    await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "second", "msg-1"));
+    await server_.runTurn(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-2", "second", "msg-1"));
 
     expect(eve.posts.map((p) => p.path)).toEqual([
       "/eve/v1/session",
@@ -758,8 +809,8 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const bus = transport();
     const server_ = server(eve, bus, sink().impl);
 
-    await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "second", "msg-1"));
+    await server_.runTurn(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-2", "second", "msg-1"));
 
     expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
   });
@@ -789,8 +840,8 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const bus = transport();
     const server_ = server(eve, bus, sink().impl);
 
-    await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "second", "msg-1"));
+    await server_.runTurn(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-2", "second", "msg-1"));
 
     expect(bus.replies.at(-1)?.text).toBe("and the second answer.");
   });
@@ -809,7 +860,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const bus = transport();
     const server_ = server(eve, bus, sink().impl);
 
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     await server_.interrupt(
       inbound("msg-2", "never mind — this instead", "msg-1"),
     );
@@ -834,8 +885,8 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
 
-    await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "an unrelated question"));
+    await server_.runTurn(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-2", "an unrelated question"));
 
     // Two creates, no continue: the second message opened its own run.
     expect(eve.posts.map((post) => post.path)).toEqual([
@@ -852,7 +903,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
      */
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const first = server(eve, transport(), sink().impl);
-    await first.handle(inbound("msg-1", "first"));
+    await first.runTurn(inbound("msg-1", "first"));
 
     // Rewind the cursor to mid-turn and reopen the head, the way a kill does.
     rewindOnDisk(eve.session, 3);
@@ -878,7 +929,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
      */
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const first = server(eve, transport(), sink().impl);
-    await first.handle(inbound("msg-1", "first"));
+    await first.runTurn(inbound("msg-1", "first"));
     const nostrId = store.transcriptFor(eve.session)!.nostrId;
     const stop = {
       id: "c-stop",
@@ -889,7 +940,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     };
 
     const before = eve.posts.length;
-    await first.control(stop);
+    await first.applyControl(stop);
     const after = eve.posts.length;
     // The first one has to have LANDED, or this test passes for the wrong
     // reason — two refusals also leave the count unchanged.
@@ -899,7 +950,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     store.close();
     store = HexStore.open(agentHome(home, AGENT).db);
     const second = server(eve, transport(), sink().impl);
-    await second.control(stop);
+    await second.applyControl(stop);
 
     expect(eve.posts.length).toBe(after);
   });
@@ -910,7 +961,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // is its retry.
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     const nostrId = store.transcriptFor(eve.session)!.nostrId;
     const stop = {
       id: "c-stop",
@@ -921,13 +972,13 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     };
 
     eve.failNext = true;
-    await server_.control(stop);
+    await server_.applyControl(stop);
     expect(store.wasObeyed("c-stop")).toBe(false);
 
     // A second process, so the in-memory guard is not what lets it through.
     const retry = server(eve, transport(), sink().impl);
     const before = eve.posts.length;
-    await retry.control(stop);
+    await retry.applyControl(stop);
     expect(eve.posts.length).toBe(before + 1);
   });
 
@@ -940,7 +991,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
      */
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     const record = store.transcriptFor(eve.session)!;
     store.saveTranscript({ ...record, status: "aborted" }, fenceFor(store));
     const before = eve.posts.length;
@@ -950,9 +1001,9 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       agent: AGENT,
       session: record.nostrId,
     };
-    await server_.control({ ...base, id: "c1", command: "cancel" });
-    await server_.control({ ...base, id: "c2", command: "compact" });
-    await server_.control({
+    await server_.applyControl({ ...base, id: "c1", command: "cancel" });
+    await server_.applyControl({ ...base, id: "c2", command: "compact" });
+    await server_.applyControl({
       ...base,
       id: "c3",
       command: "steer",
@@ -969,11 +1020,11 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // posted as a second answer to a settled question.
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     const nostrId = store.transcriptFor(eve.session)!.nostrId;
     const before = eve.posts.length;
 
-    await server_.control({
+    await server_.applyControl({
       id: "c1",
       operator: PEER,
       agent: AGENT,
@@ -1029,7 +1080,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       },
     });
 
-    await new EveServer(options()).handle({
+    await new EveServer(options()).runTurn({
       ...inbound("msg-group", "first"),
       room: {
         transport: "nip-29",
@@ -1079,8 +1130,8 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       },
     });
 
-    await server_.handle(inbound("msg-dm", "in a direct message"));
-    await server_.handle({
+    await server_.runTurn(inbound("msg-dm", "in a direct message"));
+    await server_.runTurn({
       ...inbound("msg-group", "in a group"),
       room: {
         transport: "nip-29",
@@ -1129,7 +1180,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
           setTimer: () => 0,
           clearTimer: () => {},
         },
-      }).handle({
+      }).runTurn({
         ...inbound("msg-" + (room?.id ?? "dm"), "first"),
         ...(room ? { room } : {}),
       });
@@ -1154,7 +1205,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
         setTimer: () => 0,
         clearTimer: () => {},
       },
-    }).handle({
+    }).runTurn({
       ...inbound("msg-group", "first"),
       room: {
         transport: "nip-29",
@@ -1176,7 +1227,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // by the follower that holds the open set.
     const eve = fakeEve(ASKING_TURN, 0, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     const before = eve.posts.length;
 
     // A reader knows the WIRE's session id — 32 random bytes — and never the
@@ -1184,28 +1235,28 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const record = store.transcriptFor(eve.session)!;
     const nostrId = record.nostrId;
     const base = { id: "", operator: PEER, agent: AGENT, session: nostrId };
-    await server_.control({
+    await server_.applyControl({
       ...base,
       id: "c1",
       command: "respond",
       request: "req_1",
       option: "approve",
     });
-    await server_.control({
+    await server_.applyControl({
       ...base,
       id: "c2",
       command: "steer",
       text: "do the other thing",
     });
-    await server_.control({
+    await server_.applyControl({
       ...base,
       id: "c3",
       command: "cancel",
       turn: "turn_0",
     });
-    await server_.control({ ...base, id: "c4", command: "compact" });
-    await server_.control({ ...base, id: "c5", command: "clear" });
-    await server_.control({
+    await server_.applyControl({ ...base, id: "c4", command: "compact" });
+    await server_.applyControl({ ...base, id: "c5", command: "clear" });
+    await server_.applyControl({
       ...base,
       id: "c6",
       command: "reset",
@@ -1262,11 +1313,11 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     );
     const out = sink();
     const server_ = server(eve, transport(), out.impl);
-    await server_.handle(inbound("msg-1", "do something long"));
+    await server_.runTurn(inbound("msg-1", "do something long"));
     const before = out.sent.length;
 
     const nostrId = store.transcriptFor(eve.session)!.nostrId;
-    await server_.control({
+    await server_.applyControl({
       id: "c1",
       operator: PEER,
       agent: AGENT,
@@ -1282,11 +1333,11 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
   it("lets a steer cancel the running turn when the operator asks for it", async () => {
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     const before = eve.posts.length;
     const nostrId = store.transcriptFor(eve.session)!.nostrId;
 
-    await server_.control({
+    await server_.applyControl({
       id: "c1",
       operator: PEER,
       agent: AGENT,
@@ -1328,7 +1379,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     );
     const out = sink();
     const server_ = server(eve, transport(), out.impl);
-    await server_.handle(inbound("msg-1", "spend money I do not have"));
+    await server_.runTurn(inbound("msg-1", "spend money I do not have"));
 
     const heads = out.sent.filter((rumor) => rumor.kind === 31777);
     expect(tag(heads[heads.length - 1]!, "status")?.[1]).toBe("error");
@@ -1345,7 +1396,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const eve = fakeEve(FIRST_TURN, 8);
     const out = sink();
     const server_ = server(eve, transport(), out.impl);
-    await server_.handle(inbound("msg-1", "hello"));
+    await server_.runTurn(inbound("msg-1", "hello"));
 
     const head = out.sent.filter((rumor) => rumor.kind === 31777)[0]!;
     expect(tag(head, "agent")).toBeUndefined();
@@ -1359,7 +1410,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // The client picks the published name, so it can subscribe to the address
     // before the first head exists rather than poll for a run it cannot name.
     const chosen = "b".repeat(64);
-    await server_.control({
+    await server_.applyControl({
       id: "start-1",
       operator: PEER,
       agent: AGENT,
@@ -1393,7 +1444,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       text: "do it",
     };
 
-    await server_.control({ ...start, id: "start-1" });
+    await server_.applyControl({ ...start, id: "start-1" });
     const after = eve.posts.length;
     /**
      * A DIFFERENT event id, so the dedupe on rumor id cannot be what saves it.
@@ -1403,14 +1454,14 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
      * old wraps — and a start replayed out of that backlog must not open a
      * second session and spend a second time.
      */
-    await server_.control({ ...start, id: "start-2" });
+    await server_.applyControl({ ...start, id: "start-2" });
     expect(eve.posts.length).toBe(after);
   });
 
   it("refuses a start whose session id is not one", async () => {
     const eve = fakeEve(FIRST_TURN, 8);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.control({
+    await server_.applyControl({
       id: "start-1",
       operator: PEER,
       agent: AGENT,
@@ -1432,10 +1483,10 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
      */
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     const before = eve.posts.length;
 
-    await server_.control({
+    await server_.applyControl({
       id: "c9",
       operator: PEER,
       agent: AGENT,
@@ -1451,7 +1502,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // stops a turn that had nothing to do with it.
     const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
     const server_ = server(eve, transport(), sink().impl);
-    await server_.handle(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-1", "first"));
     const before = eve.posts.length;
 
     const twice = {
@@ -1461,8 +1512,8 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       session: store.transcriptFor(eve.session)!.nostrId,
       command: "cancel" as const,
     };
-    await server_.control(twice);
-    await server_.control(twice);
+    await server_.applyControl(twice);
+    await server_.applyControl(twice);
 
     expect(eve.posts.slice(before)).toHaveLength(1);
   });
@@ -1516,8 +1567,8 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       },
     });
 
-    await server_.handle(inbound("msg-1", "first"));
-    await server_.handle(inbound("msg-2", "second", "msg-1"));
+    await server_.runTurn(inbound("msg-1", "first"));
+    await server_.runTurn(inbound("msg-2", "second", "msg-1"));
 
     const definitions = out.sent.filter((rumor) => rumor.kind === 31779);
     // Once, not once per turn: a snapshot that kept up with its subject would
@@ -1548,7 +1599,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
      * two unrelated runs for one conversation.
      */
     const first = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
-    await server(first, transport(), sink().impl).handle(
+    await server(first, transport(), sink().impl).runTurn(
       inbound("msg-1", "first"),
     );
     expect(first.posts.map((p) => p.path)).toEqual(["/eve/v1/session"]);
@@ -1556,7 +1607,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     // A new server over the same store, serving the same session: a different
     // process, same disk, same Eve.
     const second = fakeEve(FIRST_TURN, 8, first.session, SECOND_TURN);
-    await server(second, transport(), sink().impl).handle(
+    await server(second, transport(), sink().impl).runTurn(
       inbound("msg-2", "second", "msg-1"),
     );
     expect(second.posts.map((p) => p.path)).toEqual([
@@ -1581,7 +1632,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const bus = transport();
     const out = sink();
 
-    await server(eve, bus, out.impl, true).handle(inbound("msg-1", "hello"));
+    await server(eve, bus, out.impl, true).runTurn(inbound("msg-1", "hello"));
 
     expect(bus.replies[0]?.text).toContain("the model refused");
   });
@@ -1605,7 +1656,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
           if (type !== "control") return;
           const { instruction } = event.payload as ControlPayload;
           acting.push(
-            hex.control(instruction).then((outcome) => {
+            hex.applyControl(instruction).then((outcome) => {
               settleControl(ingest, seq, outcome);
             }),
           );
@@ -1625,7 +1676,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     it("stays owed when the runtime was down, and lands at the next start", async () => {
       const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN, true);
       const first = server(eve, transport(), sink().impl);
-      await first.handle(inbound("msg-1", "first"));
+      await first.runTurn(inbound("msg-1", "first"));
       const stop = stopFor(store.transcriptFor(eve.session)!.nostrId);
 
       eve.failNext = true;
@@ -1652,10 +1703,48 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       expect(store.inboundOutcome(seq)).toBe("handled");
     });
 
+    it("redelivers what a dead generation claimed, and it takes effect once", async () => {
+      /**
+       * The crash this phase's claims are for.
+       *
+       * A process claims a control row, carries the instruction out, and is
+       * killed before it can write `done_at`. The row is still owed and no
+       * relay will ever offer the wrap again — `inbound_seen` keeps it for
+       * thirty days — so the next start has to redeliver it. Redelivering into
+       * an unfenced writer is the duplicate-publish bug, which is why this
+       * could not ship before the fence and the obeyed ledger: the ledger is
+       * what turns the second delivery into a no-op.
+       */
+      const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN, true);
+      const hex = server(eve, transport(), sink().impl);
+      await hex.runTurn(inbound("msg-1", "first"));
+      const stop = { ...stopFor(store.transcriptFor(eve.session)!.nostrId), id: "c-kill" };
+
+      const live = fenceFor(store).generation;
+      const dead = runnerFor(hex, { generation: live - 1, settle: false });
+      const seq = dead.ingest.acceptControl(stop)!;
+      await until(() => store.wasObeyed("c-kill"));
+      const after = eve.posts.length;
+      expect(store.inboundOutcome(seq)).toBeUndefined();
+      expect(store.inboundClaim(seq)).toBe(live - 1);
+
+      // A second process over the same home, with an empty in-memory guard.
+      const revived = server(eve, transport(), sink().impl);
+      const alive = runnerFor(revived);
+      alive.ingest.start();
+      await alive.quiet([seq]);
+      alive.ingest.stop();
+
+      // Exactly one effect: the durable ledger refused the second delivery.
+      expect(eve.posts.length).toBe(after);
+      expect(store.inboundOutcome(seq)).toBe("duplicate");
+      expect(store.inboundClaim(seq)).toBe(live);
+    });
+
     it("settles an instruction that can never land, rather than owing it forever", async () => {
       const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
       const hex = server(eve, transport(), sink().impl);
-      await hex.handle(inbound("msg-1", "first"));
+      await hex.runTurn(inbound("msg-1", "first"));
 
       const queue = controlQueue(hex);
       const seq = queue.ingest.acceptControl({
@@ -1675,7 +1764,7 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     it("settles a row for an instruction a previous run already obeyed", async () => {
       const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN);
       const hex = server(eve, transport(), sink().impl);
-      await hex.handle(inbound("msg-1", "first"));
+      await hex.runTurn(inbound("msg-1", "first"));
       const stop = stopFor(store.transcriptFor(eve.session)!.nostrId);
       // The crash gap: obeyed on disk, its row never settled.
       store.markObeyed(stop.id);

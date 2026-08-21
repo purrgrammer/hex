@@ -238,8 +238,14 @@ misbehaves quietly:
 - Never the same message twice, however many relays deliver it.
 - Never a message dated before the process started (minus a small grace), so a
   restart does not answer a week of backfill at once.
-- One reply in flight per room, and `limits.repliesPerRoomPerHour` per room. A
-  turn that published nothing does not spend that budget.
+- One turn at a time per conversation — a person in a room — and that covers the
+  operator's control events as well as the room's messages. A message that
+  addresses Hex mid-turn is answered when the turn ends rather than dropped; a
+  private message from whoever the turn is answering abandons it and takes over.
+  `limits.maxConcurrentTurns` caps how many conversations run at once, and is
+  absent — unlimited — by default.
+- `limits.repliesPerRoomPerHour` per room. A turn that published nothing does not
+  spend that budget.
 
 A runtime that returns nothing is silence, which is a legitimate answer. A runtime
 or relay that FAILS is logged as a failure — never dressed up as having nothing to

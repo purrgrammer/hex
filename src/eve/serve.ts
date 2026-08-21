@@ -53,10 +53,7 @@ import type { Inbound, Room } from "../transports/types.js";
  * id, or it never can.
  */
 export type ControlOutcome =
-  | "handled"
-  | "duplicate"
-  | "refused"
-  | "unavailable";
+  "handled" | "duplicate" | "refused" | "unavailable";
 
 /** What this needs of a transport: answer a message, and acknowledge one. */
 export interface ServeTransport {
@@ -394,24 +391,17 @@ interface Conversation {
  */
 export class EveServer {
   private readonly conversations = new Map<string, Conversation>();
-  /**
-   * The turn in flight per correspondent, kept OUTSIDE the conversation.
-   *
-   * A first message has no conversation yet — it is what creates one — so a queue
-   * hung off the conversation would leave the very first pair of messages racing,
-   * which is the case a queue exists for.
-   */
-  private readonly queues = new Map<string, Promise<void>>();
 
-  /**
-   * The instruction in flight per SESSION.
+  /*
+   * Nothing is serialised here any more.
    *
-   * Keyed differently from `queues` on purpose: a message belongs to a room and
-   * a control event belongs to a session, and the operator sending one is not
-   * in the room. What they share is the stream — two readers of one session
-   * publish one session's turns twice — so controls queue among themselves.
+   * There used to be two maps: turns keyed by (author, room) and instructions
+   * keyed by session. They are the same serialisation domain — a control and a
+   * message about ONE session are two readers of one stream — and being keyed
+   * differently is what let them run at once. The runner (`src/runner.ts`) now
+   * holds one lane per conversation and this class runs whatever it is handed,
+   * one call at a time, by contract rather than by lock.
    */
-  private readonly instructions = new Map<string, Promise<ControlOutcome>>();
 
   /** The periodic settle, while this server is up. */
   private sweeping?: ReturnType<typeof setInterval>;
@@ -468,28 +458,14 @@ export class EveServer {
   /**
    * Take one inbound message: run it, publish it, answer it.
    *
-   * Serialised per correspondent PER ROOM. Two questions arriving together are
-   * two turns of one session, not two sessions — and the runtime would reject
-   * the second while the first is still running anyway.
-   *
-   * Per room, not per person, because the same human in a group and in a direct
-   * message is two conversations. Keyed on the person alone, a group question
-   * queued behind an unrelated DM run and waited for it — watched happen, for
-   * ten minutes — and would then have continued the DM's session and answered
-   * in the wrong place.
+   * NOT serialised here. The caller owes one call at a time per conversation —
+   * two questions arriving together are two turns of one session, and the
+   * runtime would reject the second while the first is still running. The
+   * runner's lane is what owes that, and it covers control events too, which a
+   * queue in this class never could.
    */
-  async handle(inbound: Inbound): Promise<void> {
-    const peer = conversationKey(inbound);
-    const previous = this.queues.get(peer);
-    const run = (async () => {
-      // Wait for this person's previous turn, and do not let its failure stop
-      // this one.
-      await previous?.catch(() => {});
-      await this.turn(inbound);
-    })();
-
-    this.queues.set(peer, run);
-    return run;
+  async runTurn(inbound: Inbound): Promise<void> {
+    return this.turn(inbound);
   }
 
   /**
@@ -888,7 +864,10 @@ export class EveServer {
       try {
         // Best effort: a runtime that has already forgotten the session is not
         // a reason to leave its head open forever.
-        await this.options.runtime.reset?.(sessionId, "stopped by the operator");
+        await this.options.runtime.reset?.(
+          sessionId,
+          "stopped by the operator",
+        );
       } catch (error) {
         this.log(`[hex] ${sessionId} would not reset: ${message(error)}`);
       }
@@ -940,7 +919,7 @@ export class EveServer {
    * harmless. The residual is a crash between the two, which replays a command
    * once — a no-op against a settled target for every verb but `steer`.
    */
-  async control(control: SessionControl): Promise<ControlOutcome> {
+  async applyControl(control: SessionControl): Promise<ControlOutcome> {
     if (!this.obeyed.admit(control.id)) return "duplicate";
     const store = this.options.transcript.store;
     if (store.wasObeyed(control.id)) return "duplicate";
@@ -972,23 +951,16 @@ export class EveServer {
     }
 
     /**
-     * One instruction at a time per SESSION, for the same reason a room's
-     * messages queue.
+     * One instruction at a time per session is the CALLER's promise now.
      *
-     * Every verb here reads the stream before it acts and publishes what it
-     * read. Two arriving together — a `cancel` and the `respond` an operator
-     * pressed a second later — each built their own reader from the same stored
-     * cursor and each published the turns between it and the tail. The session
-     * got every one of those turns twice, under the same `seq`, from two
-     * writers that could not see each other.
+     * Every verb below reads the stream before it acts and publishes what it
+     * read. Two arriving together each built their own reader from the same
+     * stored cursor and each published the turns between it and the tail — the
+     * session got every one of them twice, under the same `seq`, from two
+     * writers that could not see each other. The runner's lane is what keeps
+     * them apart, and it keeps them apart from the room's messages too.
      */
-    const previous = this.instructions.get(record.sessionId);
-    const run = (async () => {
-      await previous?.catch(() => {});
-      return this.obey(control, record, store);
-    })();
-    this.instructions.set(record.sessionId, run);
-    return run;
+    return this.obey(control, record, store);
   }
 
   /** One control event, with its session's turn to act. */
@@ -1337,7 +1309,7 @@ export class EveServer {
             `[hex] could not cancel the running turn: ${message(error)}`,
           ),
       );
-    return this.handle(inbound);
+    return this.turn(inbound);
   }
 
   private async turn(inbound: Inbound): Promise<void> {
@@ -1471,7 +1443,8 @@ export class EveServer {
         transcript.group = inbound.room?.id;
         transcript.groupRelay = inbound.room?.relay;
       }
-      if (transcript.carriage === "concord") transcript.group = inbound.room?.id;
+      if (transcript.carriage === "concord")
+        transcript.group = inbound.room?.id;
       /**
        * What the run is about, lifted off the message that started it.
        *

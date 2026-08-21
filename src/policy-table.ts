@@ -97,11 +97,18 @@ export const IDLE_LANE: LaneState = { inTurn: false };
 /**
  * Today's behaviour, written down.
  *
- * Every line is a branch that exists in `ReplyGate.consider` and the daemon's
- * dispatch: a control is always carried out; a DM from the author of the
- * running turn steers it; a DM addresses Hex by arriving; a mention in a room
- * gets an answer when nothing is running; a reply inside a live exchange is the
- * next turn of it rather than room chatter.
+ * Every line was a branch in the old reply gate and the daemon's dispatch: a
+ * control is always carried out; a DM from the author of the running turn
+ * steers it; a DM addresses Hex by arriving; a message that addresses Hex gets
+ * an answer; a reply inside a live exchange is the next turn of it rather than
+ * room chatter.
+ *
+ * One line changed when the runner landed, deliberately: a message that
+ * addresses Hex while a turn is running is answered when that turn ends, where
+ * it used to be dropped in silence. Being ignored for writing at the wrong
+ * moment is the least explicable thing this agent did. An operator who wants
+ * the old behaviour writes `{ "types": ["message"], "when": "in-turn", "do":
+ * "ignore" }` above it.
  *
  * What is NOT here: own-message, duplicate, before-start and rate-limited. They
  * are guards, not dispositions — they answer "should this event have reached a
@@ -122,12 +129,9 @@ export const DEFAULT_POLICY: readonly PolicyRule[] = [
     when: "idle",
     do: "respond",
   },
-  {
-    types: ["message"],
-    where: { addressed: true },
-    when: "idle",
-    do: "respond",
-  },
+  // No `when`: mid-turn this becomes a followup, which is the runner's answer
+  // to "respond while busy". See the note above.
+  { types: ["message"], where: { addressed: true }, do: "respond" },
   {
     types: ["message"],
     where: { inActiveThread: true },

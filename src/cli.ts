@@ -58,8 +58,8 @@ import { PublishTools } from "./tools/publish.js";
 import { BlossomTools } from "./tools/blossom-tools.js";
 import { GitTools } from "./tools/git-tools.js";
 import { NgitTools } from "./tools/ngit-tools.js";
-import { ReplyGate } from "./policy.js";
-import { Ingestor, settleControl, type ControlPayload } from "./ingest.js";
+import { Ingestor } from "./ingest.js";
+import { Runner } from "./runner.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -1478,29 +1478,6 @@ async function main(): Promise<void> {
         );
 
         /**
-         * The gate decides, before a single token is spent.
-         *
-         * Not optional and not a nicety. A NIP-17 inbox filter has to reach two
-         * days back — a wrap's timestamp is randomised that far, so a strict
-         * `since` drops messages sent this second — which means every start reads
-         * the BACKLOG. Without the gate, the first run of this command opened an
-         * Eve session for a month of old conversation and queued twenty more:
-         * real money, on questions nobody had just asked.
-         *
-         * `before-start` is the rule that matters here. The rest matter too: its
-         * own messages come back through the same subscription, four relays
-         * deliver the same wrap four times, and one turn per room at a time is
-         * what stops a stall fanning out.
-         */
-        const gate = new ReplyGate({
-          selfPubkey: resolved.pubkey,
-          mentions: config.mentions,
-          startedAt,
-          repliesPerRoomPerHour: config.limits.repliesPerRoomPerHour,
-          now: () => Math.floor(Date.now() / 1000),
-        });
-
-        /**
          * One turn per message, and a failure is reported rather than fatal.
          *
          * A daemon that dies on one bad question stops answering every later one,
@@ -1543,118 +1520,43 @@ async function main(): Promise<void> {
         }
 
         /**
-         * The queue between hearing and acting.
+         * Hearing, deciding, acting — three things, in that order.
          *
-         * Nothing decides anything until the event is a row: a message is
-         * durable before the gate looks at it, so what arrived survives the
-         * turn that answers it, and a wrap served by four relays — or re-served
-         * by the two-day inbox window after a restart — is one row and one
-         * answer. The gate, and everything below it, is unchanged.
+         * The ingestor makes what arrived durable before anything looks at it;
+         * the policy table says what to do about it; the runner drains the
+         * queue and does it, one dispatch at a time per conversation. A wrap
+         * served by four relays — or re-served by the two-day inbox window
+         * after a restart — is one row, one decision and one answer.
          */
+        // The two halves refer to each other — the ingestor dispatches into the
+        // runner, the runner settles the ingestor's rows — so the dispatch
+        // reaches forward, and nothing runs until `start()` below.
         const ingest = new Ingestor({
           store,
           log: (line) => console.log(line),
-          dispatch: ({ seq, type, event, carrier }) => {
-            if (type === "control") {
-              const { instruction } = event.payload as ControlPayload;
-              void server
-                .control(instruction)
-                .then((outcome) => {
-                  // Settled only when the instruction is finished with. One
-                  // that never landed is left PENDING deliberately: the row is
-                  // the only thing that can bring it back, now that the queue's
-                  // dedupe stops a relay ever redelivering the wrap. The next
-                  // start is its retry.
-                  if (!settleControl(ingest, seq, outcome))
-                    console.log(
-                      `[hex] the ${instruction.command} did not land — still owed`,
-                    );
-                })
-                .catch((error: unknown) => {
-                  // Same rule for a rejection: still owed, still pending.
-                  console.log(
-                    `[hex] the control failed: ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                });
-              return;
-            }
-
-            // A message needs the transport's own object to be answered, and a
-            // row from a previous run has none. Nothing else in the taxonomy
-            // has a handler yet.
-            if (type !== "message" || !carrier) {
-              ingest.finish(seq, "ignored");
-              return;
-            }
-            const inbound = carrier;
-            const verdict = gate.consider(inbound);
-
-            /**
-             * `interrupt` is the one verdict that asks for an action.
-             *
-             * It used to be logged with the refusals and the message thrown
-             * away, so writing while Hex was working meant not being answered at
-             * all — the worst reading of "not that, this". The running turn is
-             * cancelled and this message takes over.
-             */
-            if (!verdict.reply && verdict.reason === "interrupt") {
-              console.log(
-                `[hex] ${inbound.author.slice(0, 8)}… interrupted: ${inbound.text.slice(0, 80)}`,
-              );
-              gate.begin(inbound);
-              // Settled at dispatch, not at turn end: a turn is fire-and-forget
-              // here, and the row records that the event was acted on.
-              ingest.finish(seq, "handled");
-              void server
-                .interrupt(inbound)
-                .then(() => gate.end(inbound, true))
-                .catch((error: unknown) => {
-                  gate.end(inbound, false);
-                  console.log(
-                    `[hex] the turn failed: ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                });
-              return;
-            }
-
-            if (!verdict.reply) {
-              // Said out loud, because an unanswered message with no explanation
-              // is the hardest kind of bug to be told about.
-              if (
-                verdict.reason !== "own-message" &&
-                verdict.reason !== "duplicate"
-              )
-                console.log(
-                  `[hex] ${inbound.author.slice(0, 8)}… not answered: ${verdict.reason}`,
-                );
-              // Never answering is normal; being DROPPED by a limit is not, and
-              // the column is where that difference is legible later.
-              ingest.finish(
-                seq,
-                verdict.reason === "not-addressed" ||
-                  verdict.reason === "own-message" ||
-                  verdict.reason === "duplicate"
-                  ? "ignored"
-                  : `dropped:${verdict.reason}`,
-              );
-              return;
-            }
-
-            console.log(
-              `[hex] ${inbound.author.slice(0, 8)}… asked: ${inbound.text.slice(0, 80)}`,
-            );
-            gate.begin(inbound);
-            ingest.finish(seq, "handled");
-            void server
-              .handle(inbound)
-              .then(() => gate.end(inbound, true))
-              .catch((error: unknown) => {
-                gate.end(inbound, false);
-                console.log(
-                  `[hex] the turn failed: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              });
-          },
+          dispatch: (queued) => runner.offer(queued),
+        });
+        const runner = new Runner({
+          store,
+          queue: ingest,
+          target: server,
+          generation: lease.generation,
+          selfPubkey: resolved.pubkey,
+          /**
+           * `before-start` is the guard that matters here.
+           *
+           * A NIP-17 inbox filter has to reach two days back — a wrap's
+           * timestamp is randomised that far, so a strict `since` drops
+           * messages sent this second — which means every start reads the
+           * BACKLOG. Without this, the first run of this command opened an Eve
+           * session for a month of old conversation and queued twenty more:
+           * real money, on questions nobody had just asked.
+           */
+          startedAt,
+          repliesPerRoomPerHour: config.limits.repliesPerRoomPerHour,
+          maxConcurrentTurns: config.limits.maxConcurrentTurns,
+          policy: config.policy,
+          log: (line) => console.log(line),
         });
         ingest.start();
 

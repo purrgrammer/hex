@@ -41,15 +41,13 @@ export {
   type AnnounceResult,
   type EventTemplate,
 } from "./identity.js";
+export { mentionsName, tagsSelf, addressesSelfInGroup } from "./policy.js";
 export {
-  ReplyGate,
-  mentionsName,
-  tagsSelf,
-  addressesSelfInGroup,
-  type Verdict,
-  type SkipReason,
-  type ReplyGateOptions,
-} from "./policy.js";
+  Runner,
+  type RunnerOptions,
+  type RunnerQueue,
+  type RunnerTarget,
+} from "./runner.js";
 export {
   roomKey,
   type Room,

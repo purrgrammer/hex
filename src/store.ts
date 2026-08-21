@@ -1109,6 +1109,43 @@ export class HexStore {
       .run(at, outcome, seq);
   }
 
+  /**
+   * Take one row for the live generation, once.
+   *
+   * The claim is what makes redelivery safe: a row claimed by a generation that
+   * is no longer live is offered again — the process that held it is gone —
+   * while a row this generation already claimed is never dispatched twice. Both
+   * halves are read and written in one transaction, or two drains of one queue
+   * interleave between them and both claim it.
+   *
+   * False when the row is already settled, or already claimed by this
+   * generation.
+   */
+  claimInbound(
+    seq: number,
+    generation: number,
+    at = Math.floor(Date.now() / 1000),
+  ): boolean {
+    return this.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE inbound_events SET claimed_gen = ?, claimed_at = ?
+             WHERE seq = ? AND done_at IS NULL
+               AND (claimed_gen IS NULL OR claimed_gen != ?)`,
+        )
+        .run(generation, at, seq, generation);
+      return Number(result.changes) === 1;
+    });
+  }
+
+  /** Which generation holds a row, if any — for the operator, and for tests. */
+  inboundClaim(seq: number): number | undefined {
+    const row = this.db
+      .prepare(`SELECT claimed_gen FROM inbound_events WHERE seq = ?`)
+      .get(seq) as { claimed_gen?: number | null } | undefined;
+    return row?.claimed_gen ?? undefined;
+  }
+
   /** What became of one row — for the operator, and for tests. */
   inboundOutcome(seq: number): string | undefined {
     const row = this.db
@@ -1323,6 +1360,25 @@ export class HexStore {
       .prepare("SELECT peer FROM conversations WHERE session_id = ?")
       .get(sessionId) as { peer?: string } | undefined;
     return row?.peer;
+  }
+
+  /**
+   * The whole conversation a session belongs to, peer and room together.
+   *
+   * What the runner serialises on: a control names a session and a message
+   * names a room, and the two have to reach the SAME lane or an instruction and
+   * a question about one session run at once — two readers of one stream, which
+   * publishes its turns twice.
+   */
+  conversationForSession(
+    sessionId: string,
+  ): { peer: string; room: string } | undefined {
+    const row = this.db
+      .prepare("SELECT peer, room FROM conversations WHERE session_id = ?")
+      .get(sessionId) as { peer?: string; room?: string } | undefined;
+    return row?.peer === undefined
+      ? undefined
+      : { peer: row.peer, room: row.room ?? "" };
   }
 
   /** Remember it, or move this correspondent to a different session. */

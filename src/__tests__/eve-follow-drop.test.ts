@@ -195,7 +195,7 @@ describe("a follow that stops before its turn does", () => {
     const { impl, sent } = sink();
     const hex = server(eve, impl);
 
-    await hex.handle(inbound("m1", "do the long thing"));
+    await hex.runTurn(inbound("m1", "do the long thing"));
 
     const heads = sent.filter((rumor) => rumor.kind === 31777);
     expect(heads.length).toBeGreaterThan(0);
@@ -209,7 +209,7 @@ describe("a follow that stops before its turn does", () => {
     const { impl, sent } = sink();
     const hex = server(eve, impl);
 
-    await hex.handle(inbound("m1", "do the long thing"));
+    await hex.runTurn(inbound("m1", "do the long thing"));
 
     expect(store.transcriptFor(SESSION)?.status).not.toBe("active");
   });
@@ -224,7 +224,7 @@ describe("a follow that stops before its turn does", () => {
     const { impl } = sink();
     const hex = server(eve, impl);
 
-    await hex.handle(inbound("m1", "do the long thing"));
+    await hex.runTurn(inbound("m1", "do the long thing"));
     const before = eve.reads.length;
 
     // Nothing is in flight now, so this is the honest case: the sweep is free
@@ -397,7 +397,7 @@ describe("what counts as already being read", () => {
     });
 
     const wire = "a".repeat(64);
-    const working = hex.control({
+    const working = hex.applyControl({
       id: "ctl_1",
       operator: PEER,
       agent: AGENT,

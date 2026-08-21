@@ -278,7 +278,18 @@ export interface HexConfig {
   mentions: string[];
   relays: RelayRoles;
   profile: ProfileConfig;
-  limits: { repliesPerRoomPerHour: number };
+  limits: {
+    repliesPerRoomPerHour: number;
+    /**
+     * How many turns may run at once, across every conversation.
+     *
+     * Absent means no cap, which is what Hex did before the runner existed: one
+     * turn per conversation and as many conversations as arrive. A number is
+     * for the operator who is paying per token and would rather a busy hour
+     * queued than fanned out.
+     */
+    maxConcurrentTurns?: number;
+  };
   state: StateConfig;
   transcript?: TranscriptConfig;
   eve?: EveConfig;
@@ -715,7 +726,11 @@ function parseTransports(value: unknown): TransportConfig[] {
     }
 
     if (type === "concord") {
-      rejectUnknown(transport, ["type", "communities", "acceptInvitesFrom"], path);
+      rejectUnknown(
+        transport,
+        ["type", "communities", "acceptInvitesFrom"],
+        path,
+      );
       const communitiesRaw = transport.communities;
       if (!Array.isArray(communitiesRaw) || communitiesRaw.length === 0)
         throw new ConfigError(`${path}.communities must be a non-empty array`);
@@ -726,7 +741,9 @@ function parseTransports(value: unknown): TransportConfig[] {
         rejectUnknown(community, ["id", "invite", "channels"], where);
         const id = requireString(community.id, `${where}.id`).toLowerCase();
         if (!/^[0-9a-f]{64}$/.test(id))
-          throw new ConfigError(`${where}.id must be a 64-char hex community id`);
+          throw new ConfigError(
+            `${where}.id must be a 64-char hex community id`,
+          );
 
         const channelsRaw = community.channels;
         const channels =
@@ -753,7 +770,12 @@ function parseTransports(value: unknown): TransportConfig[] {
                   return {
                     id: channelId,
                     ...(channel.name !== undefined
-                      ? { name: requireString(channel.name, `${channelPath}.name`) }
+                      ? {
+                          name: requireString(
+                            channel.name,
+                            `${channelPath}.name`,
+                          ),
+                        }
                       : {}),
                   };
                 });
@@ -950,7 +972,11 @@ export function parseConfig(input: unknown): HexConfig {
       ? { repliesPerRoomPerHour: DEFAULT_REPLIES_PER_HOUR }
       : (() => {
           const record = requireRecord(limitsRaw, "limits");
-          rejectUnknown(record, ["repliesPerRoomPerHour"], "limits");
+          rejectUnknown(
+            record,
+            ["repliesPerRoomPerHour", "maxConcurrentTurns"],
+            "limits",
+          );
           return {
             repliesPerRoomPerHour:
               record.repliesPerRoomPerHour === undefined
@@ -958,6 +984,15 @@ export function parseConfig(input: unknown): HexConfig {
                 : requirePositiveInt(
                     record.repliesPerRoomPerHour,
                     "limits.repliesPerRoomPerHour",
+                  ),
+            // Absent stays absent: undefined is "no cap", and a default here
+            // would be a limit nobody asked for.
+            maxConcurrentTurns:
+              record.maxConcurrentTurns === undefined
+                ? undefined
+                : requirePositiveInt(
+                    record.maxConcurrentTurns,
+                    "limits.maxConcurrentTurns",
                   ),
           };
         })();

@@ -96,6 +96,28 @@ export function knownEventType(type: string): HexEventType | undefined {
   return HEX_EVENT_TYPES.includes(type) ? (type as HexEventType) : undefined;
 }
 
+/**
+ * A stored row, read back as the event it was written from.
+ *
+ * Takes the type rather than reading it off the row, because the row's is a
+ * string on purpose: a row a newer hex wrote must be recognised
+ * (`knownEventType`) before anything casts it into this build's taxonomy.
+ */
+export function canonicalEvent(
+  row: QueuedInbound,
+  type: HexEventType,
+): CanonicalEvent {
+  return {
+    v: HEX_EVENT_VERSION,
+    type,
+    id: row.id,
+    route: { ...row.route, transport: row.route.transport as TransportName },
+    createdAt: row.createdAt,
+    observedAt: row.observedAt,
+    payload: row.payload,
+  };
+}
+
 function now(): number {
   return Math.floor(Date.now() / 1000);
 }
@@ -189,6 +211,17 @@ export interface IngestorOptions {
 const DEFAULT_POLL_MS = 5_000;
 
 /**
+ * Whatever can settle a row — the ingestor, or the runner holding it.
+ *
+ * Narrow on purpose: `settleControl` is the one rule about when an instruction
+ * stops being owed, and taking the whole ingestor would keep the runner from
+ * using the same copy of it.
+ */
+export interface Settleable {
+  finish(seq: number, outcome: string): void;
+}
+
+/**
  * How long a control stays owed before it is given up on.
  *
  * NIP-17's two-day timestamp window, because that window IS the redelivery this
@@ -209,7 +242,7 @@ const CONTROL_OWED_SECONDS = 2 * 24 * 60 * 60;
  * it again. Returns whether the row was settled.
  */
 export function settleControl(
-  ingest: Ingestor,
+  ingest: Settleable,
   seq: number,
   outcome: ControlOutcome,
 ): boolean {
