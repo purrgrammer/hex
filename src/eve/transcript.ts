@@ -166,6 +166,12 @@ export class EveTranscript {
    */
   private model?: { id: string; provider?: string };
 
+  /** Turns already ended, so a second ending can be recognised. */
+  private readonly endedTurns = new Set<string>();
+
+  /** Said once per session: the cause does not change between turns. */
+  private warnedRerun = false;
+
   /**
    * Where the stream is now, and where it is safe to say it has been read to.
    *
@@ -1181,6 +1187,11 @@ export class EveTranscript {
         break;
 
       case "turn.completed":
+        this.noticeRerun(stringField(data, "turnId"));
+        await this.flush("assistant");
+        await this.status("idle");
+        break;
+
       case "session.waiting":
         await this.flush("assistant");
         await this.status("idle");
@@ -1391,6 +1402,40 @@ export class EveTranscript {
    * With no status the head keeps whatever Eve last reported, which is what a
    * dropped connection means: the follower left, the session did not end.
    */
+  /**
+   * A turn ends once. Twice means it was executed twice.
+   *
+   * The runtime's local workflow queue delivers a turn over HTTP and waits for
+   * the handler to answer, with a 30-second ceiling by default. A turn that
+   * thinks for longer makes the delivery throw, and the queue redelivers —
+   * re-executing the turn's inline steps and every tool call in them. That is
+   * what filed patches and issues in duplicate pairs, and the only cure is a
+   * setting in the runtime's own environment, which this package cannot make
+   * for it.
+   *
+   * So it says so, loudly, once per turn. Everything else here contains the
+   * damage; this is the part that names the cause while somebody is looking.
+   */
+  private noticeRerun(turnId: string | undefined): void {
+    if (!turnId) return;
+    if (!this.endedTurns.has(turnId)) {
+      this.endedTurns.add(turnId);
+      // Bounded: a long session must not accumulate every turn it ever ran.
+      if (this.endedTurns.size > 200)
+        this.endedTurns.delete(this.endedTurns.values().next().value as string);
+      return;
+    }
+    if (this.warnedRerun) return;
+    this.warnedRerun = true;
+    this.log(
+      `[hex] ${this.sessionId} ended ${turnId} more than once, which means the ` +
+        "runtime executed it more than once — set " +
+        "WORKFLOW_LOCAL_HEADERS_TIMEOUT_MS=0 and " +
+        "WORKFLOW_LOCAL_BODY_TIMEOUT_MS=0 where Eve runs, or every turn longer " +
+        "than 30 seconds is redelivered and its tool calls happen again",
+    );
+  }
+
   async close(status?: SessionStatus): Promise<void> {
     await this.flush("assistant");
     // Let whatever is still queued go out before the head says the session is
