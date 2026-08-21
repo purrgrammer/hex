@@ -490,11 +490,17 @@ export class FencedWriteError extends Error {
 /** Thrown when the lease is held by a live process. Names the holder. */
 export class LeaseHeldError extends Error {
   constructor(readonly holder: WriterLeaseHolder) {
-    const age = Math.max(0, Math.floor(Date.now() / 1000) - holder.acquiredAt);
+    const now = Math.floor(Date.now() / 1000);
+    const age = Math.max(0, now - holder.acquiredAt);
+    const left = Math.max(0, holder.expiresAt - now);
+    // A killed holder cannot release, so this is also what a dead pid looks
+    // like. Saying the lease expires on its own stops that reading as fatal.
     super(
       `the writer lease on this agent home is held by pid ${holder.pid} ` +
         `on ${holder.hostname} (generation ${holder.generation}, ` +
-        `acquired ${age}s ago)`,
+        `acquired ${age}s ago). If that process is already gone, the lease ` +
+        `frees itself in ${left}s — a live holder renews it before then, so ` +
+        `nothing needs deleting`,
     );
     this.name = "LeaseHeldError";
   }

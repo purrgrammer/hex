@@ -33,6 +33,7 @@ import { Nip29Transport } from "./transports/nip29.js";
 import { ConcordTransport } from "./transports/concord.js";
 import { resolveMemberships } from "./concord/join.js";
 import { channelStreams, currentRoot } from "./concord/membership.js";
+import type { Membership } from "./concord/membership.js";
 import { TransportRouter } from "./transports/router.js";
 import { fileMessageTags, imetaTag, upload, type Uploaded } from "./blossom.js";
 import {
@@ -1144,6 +1145,8 @@ async function main(): Promise<void> {
             candidate.type === "concord",
         );
         let communities: ConcordTransport | undefined;
+        // Hoisted so the banner below can say what is actually being read.
+        let joined: Membership[] = [];
         if (concordConfig) {
           const memberships = await resolveMemberships({
             relays,
@@ -1162,12 +1165,7 @@ async function main(): Promise<void> {
               "[hex] concord: no community keys are held yet — waiting for an invite",
             );
           else {
-            for (const membership of memberships)
-              console.log(
-                `concord ${membership.name} — ${membership.channels
-                  .map((channel) => channel.name)
-                  .join(", ")}`,
-              );
+            joined = memberships;
             communities = new ConcordTransport({
               signer: resolved.signer,
               pubkey: resolved.pubkey,
@@ -1522,6 +1520,24 @@ async function main(): Promise<void> {
               ? `listening group ${group.id} on ${group.relay}`
               : `NOT listening to group ${group.id} — no transport was built for it`,
           );
+        // Same rule as the groups above: a community configured but never
+        // joined must not read as one being listened to.
+        for (const community of concordConfig?.communities ?? []) {
+          const held = joined.find(
+            (membership) => membership.communityIdHex === community.id,
+          );
+          if (!held) {
+            console.log(
+              `NOT listening to community ${community.id.slice(0, 12)}… — ` +
+                `no keys are held for it yet`,
+            );
+            continue;
+          }
+          console.log(
+            `listening ${held.name} on ${held.relays.join(", ")} — ` +
+              `${held.channels.map((channel) => channel.name).join(", ")}`,
+          );
+        }
 
         const subscription = transport.start().subscribe({
           next: (inbound) => {
