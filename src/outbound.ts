@@ -392,7 +392,28 @@ export class Spool {
   /** Bookkeeping that belongs to the delivery rather than to the composing. */
   private remember(row: OutboundRow, sentId: string): void {
     if (row.kind !== "reply") return;
-    const { remember } = row.payload as ReplyPayload;
+    const { to, remember } = row.payload as ReplyPayload;
+
+    /*
+     * The answer joins the thread it answers.
+     *
+     * This is the only place Hex's published id exists — it is minted by the
+     * relay round trip, long after the run that composed it decided anything —
+     * and a reply to THIS message is what a person sends next. Without it, a
+     * NIP-29 thread breaks at exactly the point it becomes a conversation: the
+     * protocol names no root, so the parent is the only handle, and the parent
+     * is whatever Hex just said.
+     */
+    if (to) {
+      const session = this.options.store.threadSession(to.id);
+      if (session)
+        this.options.store.rememberThread(
+          sentId,
+          session,
+          Math.floor(this.clock() / 1000),
+        );
+    }
+
     if (!remember) return;
     this.options.store.rememberQuestion(
       sentId,

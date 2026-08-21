@@ -11,6 +11,7 @@
 import { merge, Observable } from "rxjs";
 import { map as rxMap, filter as rxFilter } from "rxjs/operators";
 import type { NostrEvent } from "nostr-tools";
+import { nip10Root } from "./nip10.js";
 import {
   GroupMessageFactory,
   ReactionFactory,
@@ -57,6 +58,25 @@ export function replyTarget(event: NostrEvent): string | undefined {
   return (unmarked ?? tags[0])?.[1];
 }
 
+/**
+ * The thread a kind 9 hangs under, when it says — and usually it does not.
+ *
+ * NIP-C7 quotes the parent with `q` and names no root, so a group thread is a
+ * chain of parents and nothing more: grimoire, which is what writes most of
+ * these, sends the `q` alone. A client that threads with NIP-10 `e` tags
+ * instead does name one, and that is worth reading when it is there.
+ *
+ * Where it is not there, one hop is all this protocol offers — which is why
+ * every message Hex handles is bound to its session as well as its root. The
+ * hop then lands on something the store knows, and the thread resolves anyway.
+ */
+export function threadRoot(event: NostrEvent): string | undefined {
+  const root = nip10Root(event);
+  // A lone unmarked `e` is reported as both root and parent by the positional
+  // rules; here that would make every reply its own thread root.
+  return root === replyTarget(event) ? undefined : root;
+}
+
 export interface Nip29TransportOptions {
   relays: HexRelays;
   signer: ISigner;
@@ -76,6 +96,15 @@ export interface Nip29TransportOptions {
    * again on every restart.
    */
   isOwnMessage?: (id: string) => boolean;
+  /**
+   * Whether a thread already belongs to a run of Hex's.
+   *
+   * The half `isOwnMessage` cannot answer. In a group, a reply threads onto the
+   * message it answers — which is usually the PERSON'S own opening mention, not
+   * anything Hex wrote — so a thread Hex is already running looked like room
+   * chatter and demanded the mention be typed again on every message.
+   */
+  threadIsOurs?: (id: string) => boolean;
 }
 
 /**
@@ -141,14 +170,31 @@ export class Nip29Transport implements Transport {
       // A kind-9 reply quotes its parent with `q` (NIP-C7), which is what
       // grimoire writes and reads; `e` is the fallback.
       replyToId: replyTarget(event),
+      ...(threadRoot(event) !== undefined
+        ? { threadRoot: threadRoot(event) }
+        : {}),
       event,
     };
     // The transport decides this: it is the layer that knows the tag shape, and
     // the only one that knows which messages are Hex's own.
+    /*
+     * Three ways a kind 9 continues something rather than starting it: it
+     * quotes a message Hex wrote, in this run or an earlier one, or it hangs
+     * under a thread Hex already has a session for.
+     *
+     * The third is what makes a group thread usable. Without a root tag the
+     * only handle is the parent, so this asks the store about the parent — and
+     * the store knows it, because every message Hex handles is bound to its
+     * session too.
+     */
+    const root = inbound.threadRoot ?? inbound.replyToId;
     const continuesConversation =
-      inbound.replyToId !== undefined &&
-      (this.ownMessageIds.has(inbound.replyToId) ||
-        (this.options.isOwnMessage?.(inbound.replyToId) ?? false));
+      (inbound.replyToId !== undefined &&
+        (this.ownMessageIds.has(inbound.replyToId) ||
+          (this.options.isOwnMessage?.(inbound.replyToId) ?? false))) ||
+      (root !== undefined && (this.options.threadIsOurs?.(root) ?? false)) ||
+      (inbound.replyToId !== undefined &&
+        (this.options.threadIsOurs?.(inbound.replyToId) ?? false));
 
     return {
       ...inbound,

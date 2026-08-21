@@ -1743,11 +1743,6 @@ export class EveServer {
        * A message that starts a thread IS its root, so when the protocol names
        * no root the message's own id is the one every later reply will carry.
        */
-      this.options.transcript.store.rememberThread(
-        inbound.threadRoot ?? inbound.replyToId ?? inbound.id,
-        sessionId,
-        Math.floor(Date.now() / 1000),
-      );
       this.log(`[hex] ${short(peer)} → eve session ${sessionId}`);
       boundary = { last: -1, finished: new Set() };
 
@@ -1825,16 +1820,17 @@ export class EveServer {
           fresh,
           Math.floor(Date.now() / 1000),
         );
-        this.options.transcript.store.rememberThread(
-          inbound.threadRoot ?? inbound.replyToId ?? inbound.id,
-          fresh,
-          Math.floor(Date.now() / 1000),
-        );
         boundary = { last: -1, finished: new Set() };
         if (host) this.options.tools?.bridge.bind(fresh, host);
         this.log(`[hex] ${short(peer)} → eve session ${fresh}`);
       }
     }
+
+    /*
+     * Bound before the answer goes out, and on EVERY message rather than only
+     * the first: a chain is only walkable if each link was written down.
+     */
+    this.bindThread(inbound, conversation.sessionId);
 
     const asked: Asked[] = [];
     const answer = await this.follow(conversation, peer, boundary, asked);
@@ -2440,6 +2436,26 @@ export class EveServer {
    * has ever been stored under: the map is keyed on (peer, room) throughout,
    * so that line read as belt-and-braces and did nothing at all.
    */
+  /**
+   * Every id a later reply could name, pointed at the run that answers it.
+   *
+   * Three: the thread ROOT, which is what NIP-22 gives and what every message
+   * in a Concord thread agrees on; the message being answered, since a reply to
+   * a reply names its parent; and this message ITSELF, because a kind 9 names
+   * no root at all — NIP-C7 quotes the parent and stops — so one hop up the
+   * chain is the only handle a group thread ever offers, and it has to land on
+   * something the store knows.
+   *
+   * Hex's own answers are bound as they are delivered, by the spool, which is
+   * the only place their published ids exist.
+   */
+  private bindThread(inbound: Inbound, sessionId: string): void {
+    const at = Math.floor(Date.now() / 1000);
+    const store = this.options.transcript.store;
+    for (const id of [inbound.threadRoot, inbound.replyToId, inbound.id])
+      if (id) store.rememberThread(id, sessionId, at);
+  }
+
   private forget(key: string, sessionId: string): void {
     this.conversations.delete(key);
     this.options.transcript.store.forgetThread(sessionId);

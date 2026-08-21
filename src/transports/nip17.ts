@@ -42,6 +42,7 @@ import {
   subscribe,
   type HexRelays,
 } from "../relays.js";
+import { nip10Parent, nip10Root } from "./nip10.js";
 import type { Inbound, Room, Transport } from "./types.js";
 
 /**
@@ -274,7 +275,8 @@ export class Nip17Transport implements Transport {
      * not a conversation. What the agent said last time is most of the context
      * for what it is being asked now.
      */
-    if (rumor.pubkey === this.options.pubkey && !options.includeOwn) return null;
+    if (rumor.pubkey === this.options.pubkey && !options.includeOwn)
+      return null;
 
     if (!this.allows(rumor.pubkey)) {
       this.log(
@@ -283,7 +285,16 @@ export class Nip17Transport implements Transport {
       return null;
     }
 
-    const replyToId = rumor.tags.find((tag) => tag[0] === "e" && tag[1])?.[1];
+    /*
+     * The PARENT, not whichever `e` tag came first.
+     *
+     * A marked reply puts the root first and the parent second, so taking the
+     * first tag threaded a deep reply onto the root and answered it as if it
+     * were about the opening message. The root is read separately, because a
+     * thread is what decides which run continues.
+     */
+    const replyToId = nip10Parent(rumor);
+    const threadRoot = nip10Root(rumor);
 
     return {
       id: rumor.id,
@@ -294,6 +305,9 @@ export class Nip17Transport implements Transport {
       // A private message needs no mention: it was sent to Hex and nobody else.
       addressesSelf: true,
       replyToId,
+      ...(threadRoot !== undefined && threadRoot !== replyToId
+        ? { threadRoot }
+        : {}),
       // The rumor, which is unsigned by construction. Nothing re-verifies it —
       // the wrap it came out of is the proof.
       event: { ...rumor, sig: "" } as NostrEvent,
