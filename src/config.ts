@@ -9,6 +9,18 @@
 
 import { nip19 } from "nostr-tools";
 
+import { knownEventType } from "./ingest.js";
+import {
+  DISPOSITIONS,
+  TURN_HOLDER,
+  WHENS,
+  type Disposition,
+  type PolicyRule,
+  type PolicyWhere,
+  type When,
+} from "./policy-table.js";
+import { TRANSPORT_NAMES } from "./transports/types.js";
+
 export type SignerConfig =
   | { type: "nsec"; env: string }
   | { type: "nsec"; file: string }
@@ -281,6 +293,11 @@ export interface HexConfig {
    * wrote the bootstrap knows; nothing else does.
    */
   repositories?: RepositoryConfig[];
+  /**
+   * What Hex responds to, as rules. Absent means the compiled-in default,
+   * which is today's behaviour written down (`DEFAULT_POLICY`).
+   */
+  policy?: PolicyRule[];
   transports: TransportConfig[];
 }
 
@@ -807,6 +824,100 @@ function parseMentions(value: unknown): string[] {
   );
 }
 
+/**
+ * Rules, refused rather than guessed at.
+ *
+ * A type name this build does not know is a STARTUP error here, while the same
+ * name arriving in a queue row is ignored at runtime — different failure
+ * domains. A row was written by some other version of hex and must not stop
+ * this one; a rule was typed by a person who then expects it to work, and a
+ * misspelled disposition that silently never matches is an agent that goes
+ * quiet with no way to find out why.
+ */
+function parsePolicyWhere(value: unknown, path: string): PolicyWhere {
+  const record = requireRecord(value, path);
+  rejectUnknown(
+    record,
+    ["transport", "room", "peer", "addressed", "inActiveThread"],
+    path,
+  );
+  const where: PolicyWhere = {};
+  if (record.transport !== undefined) {
+    const transport = requireString(record.transport, `${path}.transport`);
+    if (!(TRANSPORT_NAMES as readonly string[]).includes(transport))
+      throw new ConfigError(
+        `${path}.transport must be one of: ${TRANSPORT_NAMES.join(", ")} (got ${JSON.stringify(transport)})`,
+      );
+    where.transport = transport as (typeof TRANSPORT_NAMES)[number];
+  }
+  if (record.room !== undefined)
+    where.room = requireString(record.room, `${path}.room`);
+  if (record.peer !== undefined) {
+    const raw = requireString(record.peer, `${path}.peer`);
+    // The placeholder is the only non-pubkey a peer may be.
+    where.peer = raw === TURN_HOLDER ? raw : parsePubkey(raw, `${path}.peer`);
+  }
+  for (const key of ["addressed", "inActiveThread"] as const) {
+    const flag = record[key];
+    if (flag === undefined) continue;
+    if (typeof flag !== "boolean")
+      throw new ConfigError(`${path}.${key} must be a boolean`);
+    where[key] = flag;
+  }
+  return where;
+}
+
+function parsePolicy(value: unknown): PolicyRule[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value))
+    throw new ConfigError("policy must be an array of rules");
+  return value.map((entry, index) => {
+    const path = `policy[${index}]`;
+    const record = requireRecord(entry, path);
+    rejectUnknown(record, ["types", "where", "when", "do"], path);
+
+    const types = record.types;
+    if (!Array.isArray(types) || types.length === 0)
+      throw new ConfigError(
+        `${path}.types must name at least one event type — a rule that matches nothing is a rule someone believes is working`,
+      );
+    const parsedTypes = types.map((name, at) => {
+      const type = knownEventType(requireString(name, `${path}.types[${at}]`));
+      if (!type)
+        throw new ConfigError(
+          `${path}.types[${at}] is not a known event type: ${JSON.stringify(name)}`,
+        );
+      return type;
+    });
+
+    const disposition = requireString(record.do, `${path}.do`);
+    if (!(DISPOSITIONS as readonly string[]).includes(disposition))
+      throw new ConfigError(
+        `${path}.do must be one of: ${DISPOSITIONS.join(", ")} (got ${JSON.stringify(disposition)})`,
+      );
+
+    let when: When | undefined;
+    if (record.when !== undefined) {
+      const raw = requireString(record.when, `${path}.when`);
+      if (!(WHENS as readonly string[]).includes(raw))
+        throw new ConfigError(
+          `${path}.when must be one of: ${WHENS.join(", ")} (got ${JSON.stringify(raw)})`,
+        );
+      when = raw as When;
+    }
+
+    return {
+      types: parsedTypes,
+      where:
+        record.where === undefined
+          ? undefined
+          : parsePolicyWhere(record.where, `${path}.where`),
+      when,
+      do: disposition as Disposition,
+    };
+  });
+}
+
 /** Validate a parsed JSON object into a `HexConfig`. */
 export function parseConfig(input: unknown): HexConfig {
   const raw = requireRecord(input, "config");
@@ -824,6 +935,7 @@ export function parseConfig(input: unknown): HexConfig {
       "eve",
       "tools",
       "repositories",
+      "policy",
       "transports",
     ],
     "config",
@@ -870,6 +982,7 @@ export function parseConfig(input: unknown): HexConfig {
     eve: parseEve(raw.eve),
     tools: parseTools(raw.tools),
     repositories: parseRepositories(raw.repositories),
+    policy: parsePolicy(raw.policy),
     transports: parseTransports(raw.transports),
   };
 

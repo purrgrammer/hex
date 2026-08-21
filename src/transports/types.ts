@@ -1,7 +1,10 @@
 import type { Observable } from "rxjs";
 import type { NostrEvent } from "nostr-tools";
 
-export type TransportName = "nip-29" | "nip-17" | "concord";
+/** Every transport there is. A runtime list, so config validation cannot drift. */
+export const TRANSPORT_NAMES = ["nip-29", "nip-17", "concord"] as const;
+
+export type TransportName = (typeof TRANSPORT_NAMES)[number];
 
 /**
  * A place Hex can be spoken to.

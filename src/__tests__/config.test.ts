@@ -305,3 +305,120 @@ describe("transcript and eve sections", () => {
     ).toEqual({ host: "http://127.0.0.1:2000" });
   });
 });
+
+describe("policy rules", () => {
+  it("is absent unless stated, so the compiled-in default applies", () => {
+    expect(parseConfig(minimal).policy).toBeUndefined();
+  });
+
+  it("accepts a rule and decodes an npub peer", () => {
+    const config = parseConfig({
+      ...minimal,
+      policy: [
+        {
+          types: ["message", "timer"],
+          where: { transport: "nip-17", peer: "$turn-holder" },
+          when: "in-turn",
+          do: "steer",
+        },
+        { types: ["message"], where: { addressed: true }, do: "respond" },
+        {
+          types: ["message"],
+          where: {
+            peer: "npub1sg6plzptd64u62a878hep2kev88swjh3tw00gjsfl8f237lmu63q0uf63m",
+          },
+          do: "collect",
+        },
+      ],
+    });
+    expect(config.policy?.[0]?.where?.peer).toBe("$turn-holder");
+    expect(config.policy?.[1]?.when).toBeUndefined();
+    // An npub is decoded here, so a rule and a route compare as one shape.
+    expect(config.policy?.[2]?.where?.peer).toBe(
+      "82341f882b6eabcd2ba7f1ef90aad961cf074af15b9ef44a09f9d2a8fbfbe6a2",
+    );
+  });
+
+  it("refuses a rule that is not an array", () => {
+    expect(() => parseConfig({ ...minimal, policy: {} })).toThrow(
+      /policy must be an array/,
+    );
+  });
+
+  it("refuses an unknown key on a rule and on its where", () => {
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [{ types: ["message"], do: "respond", unless: {} }],
+      }),
+    ).toThrow(/policy\[0\]\.unless is not a known option/);
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [{ types: ["message"], where: { kind: 9 }, do: "respond" }],
+      }),
+    ).toThrow(/policy\[0\]\.where\.kind is not a known option/);
+  });
+
+  it("refuses an event type this build does not know", () => {
+    // A row naming an unknown type is ignored at runtime; a RULE naming one is
+    // a typo someone expects to work, and silence is not a diagnosis.
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [{ types: ["mention"], do: "respond" }],
+      }),
+    ).toThrow(/not a known event type/);
+  });
+
+  it("refuses an empty types list", () => {
+    expect(() =>
+      parseConfig({ ...minimal, policy: [{ types: [], do: "respond" }] }),
+    ).toThrow(/at least one event type/);
+  });
+
+  it("refuses an unknown disposition and an unknown when", () => {
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [{ types: ["message"], do: "reply" }],
+      }),
+    ).toThrow(/policy\[0\]\.do must be one of/);
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [{ types: ["message"], when: "busy", do: "respond" }],
+      }),
+    ).toThrow(/policy\[0\]\.when must be one of/);
+  });
+
+  it("refuses an unknown transport and a peer that is not a pubkey", () => {
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [
+          { types: ["message"], where: { transport: "nip-4" }, do: "respond" },
+        ],
+      }),
+    ).toThrow(/where\.transport must be one of/);
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [
+          { types: ["message"], where: { peer: "alice" }, do: "respond" },
+        ],
+      }),
+    ).toThrow(/where\.peer must be an npub or a 64-character hex pubkey/);
+  });
+
+  it("refuses a non-boolean predicate flag", () => {
+    expect(() =>
+      parseConfig({
+        ...minimal,
+        policy: [
+          { types: ["message"], where: { addressed: "yes" }, do: "respond" },
+        ],
+      }),
+    ).toThrow(/where\.addressed must be a boolean/);
+  });
+});

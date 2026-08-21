@@ -7,6 +7,7 @@
  * are not timing tests.
  */
 
+import type { LaneState } from "./policy-table.js";
 import type { Inbound } from "./transports/types.js";
 import { roomKey } from "./transports/types.js";
 
@@ -169,6 +170,19 @@ export class ReplyGate {
   /** Who is working in this room, if anyone. */
   holderFor(inbound: Inbound): TurnHolder | undefined {
     return this.inFlight.get(roomKey(inbound.room));
+  }
+
+  /**
+   * The same room state, in the shape the policy table matches on.
+   *
+   * The gate still owns who is working where, so the table is asked about a
+   * lane reported from here rather than a second copy that could disagree.
+   */
+  laneFor(inbound: Inbound): LaneState {
+    const holder = this.holderFor(inbound);
+    return holder
+      ? { inTurn: true, turnHolder: holder.author }
+      : { inTurn: false };
   }
 
   /** Claim the room. One reply in flight per room, so a stall cannot fan out. */
