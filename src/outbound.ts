@@ -24,6 +24,7 @@
 import type { Rumor } from "./nostr/types.js";
 import { FencedWriteError } from "./store.js";
 import type { HexStore, OutboundRow } from "./store.js";
+import { secondsFrom, systemClock, type Clock } from "./clock.js";
 import { roomKey } from "./transports/types.js";
 import type { Inbound } from "./transports/types.js";
 
@@ -94,7 +95,8 @@ export interface SpoolOptions {
   maxBackoffMs?: number;
   log?: (line: string) => void;
   /** Milliseconds. Injected so the backoff's tests are not timing tests. */
-  clock?: () => number;
+  /** Unix SECONDS. The package's one clock — see `clock.ts`. */
+  clock?: Clock;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 5;
@@ -147,7 +149,7 @@ export class Spool {
   }
 
   private clock(): number {
-    return this.options.clock?.() ?? Date.now();
+    return this.options.clock?.() ?? systemClock();
   }
 
   private get maxAttempts(): number {
@@ -360,11 +362,14 @@ export class Spool {
         );
         return undefined;
       }
-      const backoff = Math.min(
+      const backoffMs = Math.min(
         (this.options.backoffMs ?? DEFAULT_BACKOFF_MS) * 2 ** (attempts - 1),
         this.options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
       );
-      this.nextAt.set(row.id, this.clock() + backoff);
+      // The one place a duration meets a timestamp here. Durations stay in the
+      // unit their name gives; what goes into `nextAt` is seconds, like every
+      // other stamp in this package.
+      this.nextAt.set(row.id, this.clock() + secondsFrom(backoffMs));
       this.log(
         `[hex] a ${row.kind} for ${row.room.slice(0, 12)}… is still owed after ` +
           `${attempts} tries: ${message(error)}`,
@@ -451,12 +456,7 @@ export class Spool {
       const room = roomKey(to.room);
       const session = this.options.store.threadSession(to.id, room);
       if (session)
-        this.options.store.rememberThread(
-          sentId,
-          session,
-          room,
-          Math.floor(this.clock() / 1000),
-        );
+        this.options.store.rememberThread(sentId, session, room, this.clock());
     }
 
     if (!remember) return;
@@ -464,7 +464,7 @@ export class Spool {
       sentId,
       remember.sessionId,
       remember.requestId,
-      Math.floor(this.clock() / 1000),
+      this.clock(),
     );
   }
 

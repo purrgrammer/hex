@@ -455,6 +455,43 @@ describe("Spool", () => {
       expect(lines.some((line) => line.includes("given up on"))).toBe(false);
     });
   });
+  /**
+   * The backoff is a DURATION in milliseconds and the gap it sets is a
+   * TIMESTAMP in seconds, and the conversion between them is the one place in
+   * this file where a unit changes.
+   *
+   * Without it the gap is a thousand times too long: a five-second backoff
+   * becomes an hour and twenty minutes, and an owed answer sits there while
+   * every pass walks past it. Nothing would fail — the row is still owed, the
+   * log still says it is owed — which is what makes it worth pinning.
+   */
+  it("waits the backoff in seconds, because that is what the clock counts", async () => {
+    let at = 1_700_000_000;
+    const bus = transport({ failing: true });
+    const spool = new Spool({
+      store,
+      generation,
+      transport: bus.impl,
+      backoffMs: 5_000,
+      clock: () => at,
+      log: () => {},
+    });
+
+    await spool.reply(inbound("m1"), "the answer");
+    expect(bus.replies).toHaveLength(0);
+    bus.heal();
+
+    // Four seconds later the gap has not passed, so the pass walks past it.
+    at += 4;
+    await spool.drain();
+    expect(bus.replies).toHaveLength(0);
+
+    // Five does. A gap measured in milliseconds would still have 4,995 to go.
+    at += 1;
+    await spool.drain();
+    expect(bus.replies).toHaveLength(1);
+    spool.stop();
+  });
 });
 
 /**

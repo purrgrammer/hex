@@ -31,6 +31,7 @@ import {
 import type { ControlOutcome } from "./eve/serve.js";
 import type { SessionControl } from "./nostr/decode-control.js";
 import type { HexStore } from "./store.js";
+import { systemClock, type Clock } from "./clock.js";
 import { roomKey } from "./transports/types.js";
 import type { Inbound } from "./transports/types.js";
 
@@ -76,8 +77,8 @@ export interface RunnerOptions {
   /** Absent means the compiled-in default, which is today's behaviour. */
   policy?: readonly PolicyRule[];
   graceSecs?: number;
-  /** Unix seconds. Injected so the rate limit's tests are not timing tests. */
-  now?: () => number;
+  /** Unix SECONDS. Injected so the rate limit's tests are not timing tests. */
+  now?: Clock;
   log?: (line: string) => void;
 }
 
@@ -191,7 +192,7 @@ export class Runner {
   }
 
   private now(): number {
-    return this.options.now?.() ?? Math.floor(Date.now() / 1000);
+    return this.options.now?.() ?? systemClock();
   }
 
   /**

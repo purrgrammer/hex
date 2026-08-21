@@ -22,6 +22,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { systemClock, type Clock } from "./clock.js";
 import { mkdirSync } from "node:fs";
 import { homedir, hostname as osHostname } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -342,22 +343,6 @@ CREATE TABLE IF NOT EXISTS concord_memberships (
   community_id TEXT PRIMARY KEY,
   data         TEXT NOT NULL,
   updated_at   INTEGER NOT NULL
-);
-
-/*
- * How far each stream has been read, per relay.
- *
- * A Concord channel has no "since the last message" — its events are wraps by a
- * pseudonymous author, and asking for the last hour of one is asking a relay to
- * re-serve ciphertext already stored. The cursor is what makes a restart resume
- * instead of re-ingesting, and it is per RELAY because two relays serving one
- * community are at different points in it.
- */
-CREATE TABLE IF NOT EXISTS concord_cursors (
-  relay  TEXT NOT NULL,
-  stream TEXT NOT NULL,
-  since  INTEGER NOT NULL,
-  PRIMARY KEY (relay, stream)
 );
 
 /*
@@ -733,11 +718,14 @@ export class LeaseHeldError extends Error {
   }
 }
 
-/** What a store reads the wall clock through. Unix SECONDS, like every `at`. */
-export type StoreClock = () => number;
-
-// clock: the injection default itself — the one place the wall clock is read.
-const systemClock: StoreClock = () => Math.floor(Date.now() / 1000);
+/**
+ * What a store reads the wall clock through.
+ *
+ * The package's one clock type — unix seconds, like every `at` here. Aliased
+ * rather than redefined so that a caller cannot hand this a different unit than
+ * it hands the runner or the spool; see `clock.ts` for why that mattered.
+ */
+export type StoreClock = Clock;
 
 export class HexStore {
   /**
@@ -889,17 +877,30 @@ export class HexStore {
     ).run(now() - OUTBOUND_SENT_HORIZON_SECONDS);
 
     /**
-     * Concord's cursors, carried into the general table.
+     * Concord's cursors, carried into the general table and then retired.
      *
-     * Additive and idempotent — an existing `transport_cursors` row wins, so a
-     * home that has already moved on is not walked backwards. `concord_cursors`
-     * is left where it is: dropping an operator's read position to tidy a
-     * schema is not a migration this gets to make.
+     * `concord_cursors` was the first cursor table and `transport_cursors`
+     * generalised it; for a while both existed, which meant two places to look
+     * when a subscription started in the wrong place. The copy is additive and
+     * idempotent — an existing row in the general table wins, so a home that
+     * has already moved on is not walked backwards — and the old table is
+     * dropped once its rows are somewhere better.
+     *
+     * The cost of the drop is a downgrade: an older build would find no cursor
+     * and re-subscribe from the configured floor. That re-reads ciphertext, and
+     * `inbound_seen` and `concord_rumors` both outlive it, so what it spends is
+     * bandwidth rather than a second answer to anybody.
      */
-    db.exec(
-      `INSERT OR IGNORE INTO transport_cursors (transport, relay, stream, since)
-         SELECT 'concord', relay, stream, since FROM concord_cursors`,
-    );
+    const hasOldCursors = db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get("concord_cursors");
+    if (hasOldCursors) {
+      db.exec(
+        `INSERT OR IGNORE INTO transport_cursors (transport, relay, stream, since)
+           SELECT 'concord', relay, stream, since FROM concord_cursors`,
+      );
+      db.exec(`DROP TABLE concord_cursors`);
+    }
 
     return new HexStore(db, now);
   }

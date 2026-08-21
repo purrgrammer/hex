@@ -44,6 +44,7 @@ import {
   type ToolResult,
   type ToolSpec,
 } from "./types.js";
+import { secondsFrom, systemClock, type Clock } from "../clock.js";
 
 /**
  * What this needs of the store: two calls, so the tool stays testable without
@@ -297,7 +298,8 @@ export interface PublishToolsOptions {
   /** Log instead of publishing, so the whole path can be exercised safely. */
   dryRun?: boolean;
   log?: (line: string) => void;
-  now?: () => number;
+  /** Unix SECONDS. The package's one clock — see `clock.ts`. */
+  now?: Clock;
 }
 
 /**
@@ -729,7 +731,7 @@ export class PublishTools {
   }
 
   private now(): number {
-    return this.options.now?.() ?? Date.now();
+    return this.options.now?.() ?? systemClock();
   }
 
   /**
@@ -755,9 +757,15 @@ export class PublishTools {
     const ledger = this.options.ledger;
     if (!ledger || !ONE_PER_THING.includes(template.kind)) return undefined;
 
-    const window =
+    /*
+     * A duration in milliseconds meeting a timestamp in seconds — the one
+     * conversion on this path, and named rather than divided inline. It used to
+     * be `Math.floor((now() - window) / 1000)`, which reads as arithmetic and
+     * hides the fact that the two halves are different units.
+     */
+    const windowMs =
       this.options.duplicateWindowMs ?? DEFAULT_DUPLICATE_WINDOW_MS;
-    const since = Math.floor((this.now() - window) / 1000);
+    const since = this.now() - secondsFrom(windowMs);
     const earlier = ledger.publishedSince(
       template.kind,
       PublishTools.scopeOf(template),
@@ -787,14 +795,17 @@ export class PublishTools {
   }
 
   /** The ledger row a published event becomes. */
-  private static entryFor(event: NostrEvent, nowMs: number) {
+  private static entryFor(event: NostrEvent, at: number) {
     return {
       id: event.id,
       kind: event.kind,
       scope: PublishTools.scopeOf(event),
       subject: normaliseSubject(PublishTools.subjectOf(event)),
       sha256: createHash("sha256").update(event.content, "utf8").digest("hex"),
-      at: Math.floor(nowMs / 1000),
+      // Seconds in, seconds out. This used to divide, back when the clock it
+      // was handed was milliseconds — a conversion inside a helper, which is
+      // the shape that made the units impossible to check at the call site.
+      at,
     };
   }
 
@@ -808,7 +819,7 @@ export class PublishTools {
 
   private withinRate(): string | undefined {
     const cap = this.options.perHour ?? DEFAULT_PER_HOUR;
-    const hourAgo = this.now() - 60 * 60 * 1000;
+    const hourAgo = this.now() - 60 * 60;
     while (this.published.length && this.published[0]! < hourAgo)
       this.published.shift();
     return this.published.length >= cap
@@ -897,8 +908,11 @@ export class PublishTools {
         content,
         tags,
         // The agent's clock, never the model's: a `created_at` it could choose
-        // is one it could backdate into somebody else's thread.
-        created_at: Math.floor(this.now() / 1000),
+        // is one it could backdate into somebody else's thread. Seconds, which
+        // is what `created_at` is and what this clock now returns — it used to
+        // divide, and after the unit changed that would have stamped every
+        // event in 1970.
+        created_at: this.now(),
       },
     };
   }

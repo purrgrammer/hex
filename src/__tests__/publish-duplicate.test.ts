@@ -53,7 +53,8 @@ function ledger(): PublishLedger & { rows: number } {
   };
 }
 
-function tools(book: PublishLedger, now = () => 1_700_000_000_000) {
+// Unix SECONDS, matching the ledger rows below and every clock in this package.
+function tools(book: PublishLedger, now = () => 1_700_000_000) {
   return new PublishTools({
     signer: signerFromSecret(secret),
     pubkey,
@@ -228,7 +229,8 @@ describe("what the duplicate check must not refuse", () => {
       publishRelays: [],
       ledger: book,
       perHour: 1,
-      now: () => 1_700_000_000_000,
+      // Unix seconds, like every clock in this package.
+      now: () => 1_700_000_000,
     });
 
     for (let attempt = 0; attempt < 3; attempt += 1) {

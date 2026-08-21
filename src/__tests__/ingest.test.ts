@@ -331,6 +331,30 @@ describe("transport cursors", () => {
     const opened = HexStore.open(older);
     expect(opened.cursorFor("wss://old.example/", "aa".repeat(32))).toBe(4242);
     opened.close();
+
+    /*
+     * And retired once carried. Two tables answering "where did we get to" is
+     * two places to look when a subscription starts in the wrong place, which
+     * is the only time anybody looks.
+     */
+    const after = new DatabaseSync(older);
+    const left = after
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get("concord_cursors");
+    after.close();
+    expect(left).toBeUndefined();
+  });
+
+  it("never creates the old cursor table on a home that never had one", () => {
+    const fresh = join(dir, "fresh.db");
+    HexStore.open(fresh).close();
+
+    const raw = new DatabaseSync(fresh);
+    const table = raw
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get("concord_cursors");
+    raw.close();
+    expect(table).toBeUndefined();
   });
 });
 
