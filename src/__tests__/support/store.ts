@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { HexStore } from "../../store.js";
+import { HexStore, type StoreClock } from "../../store.js";
 
 /** One lease per store: every transcript save is fenced on its generation. */
 const generations = new WeakMap<HexStore, number>();
@@ -43,10 +43,14 @@ export interface TempStore {
  * `takeover` because the directory is new: there is no other holder, and a
  * test that had to wait out a TTL to prove that would just be slow.
  */
-export function tempStore(prefix = "hex-store-"): TempStore {
+export function tempStore(
+  prefix = "hex-store-",
+  /** The clock the store — and every store it is reopened as — reads. */
+  now?: StoreClock,
+): TempStore {
   const home = mkdtempSync(join(tmpdir(), prefix));
   const path = join(home, "data.db");
-  let store = HexStore.open(path);
+  let store = HexStore.open(path, now ? { now } : undefined);
   fenceFor(store);
   let gone = false;
   return {
@@ -67,7 +71,7 @@ export function tempStore(prefix = "hex-store-"): TempStore {
     },
     restart(): HexStore {
       store.close();
-      store = HexStore.open(path);
+      store = HexStore.open(path, now ? { now } : undefined);
       fenceFor(store);
       return store;
     },

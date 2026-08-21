@@ -40,6 +40,8 @@ const OUTBOUND = `${TESTS}/outbound.test.ts`;
 const FOLLOW_DROP = `${TESTS}/eve-follow-drop.test.ts`;
 const THREAD = `${TESTS}/thread-session.test.ts`;
 const CONCORD = `${TESTS}/concord-transport.test.ts`;
+const STORE_PBT = `${TESTS}/store.property.test.ts`;
+const POLICY_PBT = `${TESTS}/policy.property.test.ts`;
 
 type Status = "covered" | "partial" | "gap";
 
@@ -58,22 +60,25 @@ const COVERAGE: Coverage[] = [
     id: "I1",
     statement: "seq and stream_index never move backwards",
     status: "covered",
-    owner: "store-fence.test.ts + the shared checker's high-water comparison",
-    ownerFiles: [STORE_FENCE, INVARIANTS],
+    owner:
+      "store-fence.test.ts, the store state machine's SaveTranscript, and the shared checker's high-water comparison",
+    ownerFiles: [STORE_FENCE, STORE_PBT, INVARIANTS],
   },
   {
     id: "I2",
     statement: "at most one live generation; generations strictly increase",
     status: "covered",
-    owner: "writer-lease.test.ts + the shared checker",
-    ownerFiles: [WRITER_LEASE, INVARIANTS],
+    owner:
+      "writer-lease.test.ts, the state machine's TakeOverLease and Restart, and the shared checker",
+    ownerFiles: [WRITER_LEASE, STORE_PBT, INVARIANTS],
   },
   {
     id: "I3",
     statement: "an event enqueues at most once per (transport, event_id)",
     status: "covered",
-    owner: "ingest.test.ts + the shared checker",
-    ownerFiles: [INGEST, INVARIANTS],
+    owner:
+      "ingest.test.ts, the state machine's Arrive — which found the redelivery that outlived its guard — and the shared checker",
+    ownerFiles: [INGEST, STORE_PBT, INVARIANTS],
   },
   {
     id: "I4",
@@ -86,23 +91,25 @@ const COVERAGE: Coverage[] = [
     id: "I5",
     statement: "a composed reply is delivered exactly once",
     status: "covered",
-    owner: "outbound.test.ts + the shared checker",
-    ownerFiles: [OUTBOUND, INVARIANTS],
+    owner:
+      "outbound.test.ts, the state machine's BeginSend/MarkSent, and the shared checker",
+    ownerFiles: [OUTBOUND, STORE_PBT, INVARIANTS],
   },
   {
     id: "I6",
     statement: "a reservation prevents a duplicate publish",
     status: "covered",
-    owner: "store-fence.test.ts + the shared checker",
-    ownerFiles: [STORE_FENCE, INVARIANTS],
+    owner:
+      "store-fence.test.ts, the state machine's Reserve/Release under AdvanceClock, and the shared checker",
+    ownerFiles: [STORE_FENCE, STORE_PBT, INVARIANTS],
   },
   {
     id: "I7",
     statement: "decide always returns a member of DISPOSITIONS",
-    status: "gap",
+    status: "covered",
     owner:
-      "GAP: needs the stateless property over arbitrary events x lane states (P3). DISPOSITIONS is exported and used as an oracle by nothing.",
-    ownerFiles: [],
+      "policy.property.test.ts, over arbitrary events x lane states x operator tables",
+    ownerFiles: [POLICY_PBT],
   },
   {
     id: "I8",
@@ -146,10 +153,10 @@ const COVERAGE: Coverage[] = [
     id: "I13",
     statement:
       "every field of an inbound message survives the queue round trip",
-    status: "partial",
+    status: "covered",
     owner:
-      "thread-session.test.ts by example, and the type manifest in ingest.ts; the exhaustive property is P3",
-    ownerFiles: [THREAD],
+      "policy.property.test.ts compares the whole payload, thread-session.test.ts pins the case that prompted it, and the type manifest in ingest.ts refuses to compile without it",
+    ownerFiles: [POLICY_PBT, THREAD],
   },
 ];
 
@@ -159,11 +166,13 @@ const COVERAGE: Coverage[] = [
  * person twice land green.
  */
 const SENTINELS: Record<string, string[]> = {
-  I1: [INVARIANTS],
-  I2: [INVARIANTS],
-  I3: [INVARIANTS],
-  I5: [INVARIANTS],
-  I6: [INVARIANTS],
+  I1: [INVARIANTS, STORE_PBT],
+  I2: [INVARIANTS, STORE_PBT],
+  I3: [INVARIANTS, STORE_PBT],
+  I5: [INVARIANTS, STORE_PBT],
+  I6: [INVARIANTS, STORE_PBT],
+  I7: [POLICY_PBT],
+  I13: [POLICY_PBT],
 };
 
 function sentinelPattern(id: string): RegExp {

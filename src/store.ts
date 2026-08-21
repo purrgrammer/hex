@@ -1170,9 +1170,18 @@ export class HexStore {
         )
         .run(event.route.transport, event.id, event.observedAt);
       if (Number(seen.changes) === 0) return undefined;
+      /*
+       * `OR IGNORE` because the two tables have different retentions on
+       * purpose, and the queue can outlive the guard that remembers the
+       * message. A row nothing ever settled is never pruned, while its
+       * inbound_seen row goes at thirty days — so a redelivery after that got
+       * past the guard and hit the identity index, and enqueueing threw
+       * instead of saying "already have it". Found by the store state machine:
+       * AdvanceClock, Arrive, Restart, Arrive.
+       */
       const inserted = this.db
         .prepare(
-          `INSERT INTO inbound_events
+          `INSERT OR IGNORE INTO inbound_events
              (v, type, event_id, transport, relay, room, peer, thread,
               created_at, observed_at, payload, raw)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1191,6 +1200,9 @@ export class HexStore {
           JSON.stringify(event.payload),
           event.raw === undefined ? null : JSON.stringify(event.raw),
         );
+      // The index is the real identity, so nothing inserted means this message
+      // is already queued — a duplicate, however it got here.
+      if (Number(inserted.changes) === 0) return undefined;
       return Number(inserted.lastInsertRowid);
     });
   }
