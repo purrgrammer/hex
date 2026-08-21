@@ -1250,7 +1250,7 @@ async function main(): Promise<void> {
 
         if (bridge)
           console.log(
-            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.history, nostr.help, nostr.req, nostr.resolve${publishing ? ` + nostr.publish, nostr.sign${publishConfig?.dryRun ? " (dry run)" : ""}` : ""}`,
+            `tools   http://127.0.0.1:${bridge.port} — chat.respond, chat.react, chat.history, nostr.help, nostr.req, nostr.resolve${publishing ? ` + nostr.publish, nostr.sign, nostr.rm${publishConfig?.dryRun ? " (dry run)" : ""}` : ""}`,
           );
         /**
          * Settle anything the last run left mid-flight before taking new work.

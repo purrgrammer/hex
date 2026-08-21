@@ -52,7 +52,7 @@ Four sections govern what `serve` can do, and all four are absent by default:
 | `eve.host`      | which runtime to drive                                                        |
 | `eve.bridge`    | the loopback port and token for Hex's own tools                               |
 | `eve.pricing`   | an OpenAI-shaped `/models` endpoint, for costing a provider that reports none |
-| `tools.publish` | `nostr.publish` and `nostr.sign`, with `kinds`, `perHour` and `dryRun`        |
+| `tools.publish` | `nostr.publish`, `nostr.sign` and `nostr.rm`, with `kinds`, `perHour` and `dryRun` |
 
 `eve.pricing` has no default URL, because a guessed price list is a made-up
 number with a currency on it. What it produces is published marked `estimated`,
@@ -117,6 +117,13 @@ uses, because it is the same Hex:
 | `nostr.resolve` | A bech32 entity turned into the person or event it names.              |
 | `nostr.publish` | Sign an event and put it on relays. Off unless configured.             |
 | `nostr.sign`    | Sign an event and hand it back unsent. Same bounds as publishing.      |
+| `nostr.rm`      | Ask relays to forget events Hex signed. Its own only, and a request.   |
+| `git.issues`    | A NIP-34 repository's issues.                                          |
+| `git.patches`   | Its patches.                                                           |
+| `git.state`     | Its branches and tags, as the maintainer last announced them.          |
+| `git.proposals` | Open proposals in a local checkout, via ngit.                          |
+| `git.proposal`  | One proposal in full.                                                  |
+| `git.merge`     | Apply one, if `tools.git.write` allows it.                             |
 
 The ids carry the dot; the wire carries an underscore, since OpenAI-shaped
 function names cannot contain one.
@@ -125,6 +132,14 @@ function names cannot contain one.
 told nothing else. Without them "check my recent posts" became a query for kind 1
 across the whole network, answered from strangers, and anything referring to
 earlier was repeated or invented.
+
+A proposal is filed once. `nostr.publish` keeps a durable ledger of the patches,
+pull requests and issues it has sent, and refuses one that repeats a recent
+proposal to the same repository — same bytes, same subject, or the same opening.
+The runtime re-executes a turn, and each execution composes afresh, so a
+duplicate arrives with a new call id and rephrased prose that no call-level
+dedup can see. The refusal names the event already published; `nostr.rm`
+retracts it if the wrong one landed.
 
 The writing tools are absent unless `tools.publish.enabled` is set. Signing and
 publishing carry the same bounds — a signed event is one relay call from being
