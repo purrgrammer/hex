@@ -59,6 +59,7 @@ import { BlossomTools } from "./tools/blossom-tools.js";
 import { GitTools } from "./tools/git-tools.js";
 import { NgitTools } from "./tools/ngit-tools.js";
 import { ReplyGate } from "./policy.js";
+import { Ingestor, type ControlPayload } from "./ingest.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -1098,7 +1099,9 @@ async function main(): Promise<void> {
               console.log(`[hex] control ignored: ${read.refused}`);
               return;
             }
-            void server.control(read.control);
+            // Into the same queue as the messages: one arrival order, one
+            // durable dedupe. `obeyed` still guards the execution.
+            ingest.acceptControl(read.control);
           },
           log: (line) => console.log(line),
         });
@@ -1539,8 +1542,43 @@ async function main(): Promise<void> {
           );
         }
 
-        const subscription = transport.start().subscribe({
-          next: (inbound) => {
+        /**
+         * The queue between hearing and acting.
+         *
+         * Nothing decides anything until the event is a row: a message is
+         * durable before the gate looks at it, so what arrived survives the
+         * turn that answers it, and a wrap served by four relays — or re-served
+         * by the two-day inbox window after a restart — is one row and one
+         * answer. The gate, and everything below it, is unchanged.
+         */
+        const ingest = new Ingestor({
+          store,
+          log: (line) => console.log(line),
+          dispatch: ({ seq, type, event, carrier }) => {
+            if (type === "control") {
+              const { instruction } = event.payload as ControlPayload;
+              void server
+                .control(instruction)
+                .then(() => ingest.finish(seq, "handled"))
+                .catch((error: unknown) => {
+                  // Left pending deliberately: an instruction that could not
+                  // land is still owed, and the next start redelivers it. That
+                  // is what a relay's redelivery used to do.
+                  console.log(
+                    `[hex] the control failed: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+              return;
+            }
+
+            // A message needs the transport's own object to be answered, and a
+            // row from a previous run has none. Nothing else in the taxonomy
+            // has a handler yet.
+            if (type !== "message" || !carrier) {
+              ingest.finish(seq, "ignored");
+              return;
+            }
+            const inbound = carrier;
             const verdict = gate.consider(inbound);
 
             /**
@@ -1556,6 +1594,9 @@ async function main(): Promise<void> {
                 `[hex] ${inbound.author.slice(0, 8)}… interrupted: ${inbound.text.slice(0, 80)}`,
               );
               gate.begin(inbound);
+              // Settled at dispatch, not at turn end: a turn is fire-and-forget
+              // here, and the row records that the event was acted on.
+              ingest.finish(seq, "handled");
               void server
                 .interrupt(inbound)
                 .then(() => gate.end(inbound, true))
@@ -1578,6 +1619,16 @@ async function main(): Promise<void> {
                 console.log(
                   `[hex] ${inbound.author.slice(0, 8)}… not answered: ${verdict.reason}`,
                 );
+              // Never answering is normal; being DROPPED by a limit is not, and
+              // the column is where that difference is legible later.
+              ingest.finish(
+                seq,
+                verdict.reason === "not-addressed" ||
+                  verdict.reason === "own-message" ||
+                  verdict.reason === "duplicate"
+                  ? "ignored"
+                  : `dropped:${verdict.reason}`,
+              );
               return;
             }
 
@@ -1585,6 +1636,7 @@ async function main(): Promise<void> {
               `[hex] ${inbound.author.slice(0, 8)}… asked: ${inbound.text.slice(0, 80)}`,
             );
             gate.begin(inbound);
+            ingest.finish(seq, "handled");
             void server
               .handle(inbound)
               .then(() => gate.end(inbound, true))
@@ -1594,6 +1646,13 @@ async function main(): Promise<void> {
                   `[hex] the turn failed: ${error instanceof Error ? error.message : String(error)}`,
                 );
               });
+          },
+        });
+        ingest.start();
+
+        const subscription = transport.start().subscribe({
+          next: (inbound) => {
+            ingest.accept(inbound);
           },
           error: (error: unknown) => {
             console.log(
@@ -1626,6 +1685,7 @@ async function main(): Promise<void> {
         });
 
         subscription.unsubscribe();
+        ingest.stop();
         // Every followed session keeps whatever status Eve last reported: the
         // follower is leaving, the sessions are not over.
         await server.close();

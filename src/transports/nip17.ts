@@ -172,8 +172,6 @@ export class Nip17Transport implements Transport {
   private readonly inbox = new Subject<Inbound>();
   private subscription?: { unsubscribe(): void };
   private inboxAuth?: { close(): void };
-  /** Wraps already opened. Decrypting costs a signer round trip. */
-  private readonly seen = new Set<string>();
   private readonly ownRumorIds = new Set<string>();
 
   constructor(private readonly options: Nip17TransportOptions) {}
@@ -239,22 +237,15 @@ export class Nip17Transport implements Transport {
    */
   private async toInbound(
     wrap: NostrEvent,
-    options: { dedupe?: boolean; includeOwn?: boolean } = {},
+    options: { includeOwn?: boolean } = {},
   ): Promise<Inbound | null> {
     /**
-     * The dedupe belongs to the LIVE stream, not to reading history.
-     *
-     * Four relays hand over the same wrap four times and only one of them is a
-     * message, so the stream remembers what it has opened. History borrowed that
-     * memory and was therefore destructive: every wrap the stream had already
-     * seen came back null, so a second read of a conversation returned the
-     * handful of messages that arrived while nobody was watching.
+     * No dedupe here. It used to be a wrap-id set, which is the wrong identity
+     * — one rumor is wrapped once per recipient and per relay, so the same
+     * message counted several times — and it was in memory, so a restart
+     * re-read the two-day inbox window and answered everything again. Both are
+     * the ingestor's job now, on the RUMOR id, in sqlite.
      */
-    if (options.dedupe !== false) {
-      if (this.seen.has(wrap.id)) return null;
-      this.seen.add(wrap.id);
-    }
-
     let rumor: Rumor;
     try {
       rumor = await unlockGiftWrap(wrap, this.options.signer);
@@ -377,10 +368,7 @@ export class Nip17Transport implements Transport {
     const opened = (
       await Promise.allSettled(
         wraps.map((wrap) =>
-          this.toInbound(wrap, {
-            dedupe: false,
-            includeOwn: options.includeOwn,
-          }),
+          this.toInbound(wrap, { includeOwn: options.includeOwn }),
         ),
       )
     ).map((result) => (result.status === "fulfilled" ? result.value : null));

@@ -32,6 +32,9 @@ import {
   type Membership,
   type StoredMembership,
 } from "./concord/membership.js";
+// Type-only: the taxonomy belongs to the ingestor, and the store's job is to
+// keep rows, not to know what a `message` is.
+import type { CanonicalEvent } from "./ingest.js";
 
 /**
  * Where a published transcript stands.
@@ -389,6 +392,75 @@ CREATE TABLE IF NOT EXISTS publish_reservations (
   reserved_at INTEGER NOT NULL,
   PRIMARY KEY (kind, scope, subject)
 );
+
+/*
+ * Everything said to this agent, in the order it was accepted.
+ *
+ * The queue is the handover between hearing and acting: a row is durable
+ * before any downstream code observes the event, so a crash mid-turn leaves
+ * evidence of what arrived instead of nothing. payload holds CANONICAL
+ * fields only — see CanonicalEvent in ingest.ts — because a queue of
+ * transport-shaped blobs is one every later reader has to know four protocols
+ * to read.
+ *
+ * claimed_gen/claimed_at are the runner's, which does not exist yet: the
+ * columns are here so that landing it is not a migration.
+ */
+CREATE TABLE IF NOT EXISTS inbound_events (
+  seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+  v           INTEGER NOT NULL,
+  type        TEXT NOT NULL,
+  event_id    TEXT NOT NULL,
+  transport   TEXT NOT NULL,
+  relay       TEXT,
+  room        TEXT NOT NULL,
+  peer        TEXT NOT NULL,
+  thread      TEXT,
+  created_at  INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  payload     TEXT NOT NULL,
+  claimed_gen INTEGER,
+  claimed_at  INTEGER,
+  done_at     INTEGER,
+  outcome     TEXT
+);
+CREATE INDEX IF NOT EXISTS inbound_pending ON inbound_events (seq) WHERE done_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS inbound_identity ON inbound_events (transport, event_id);
+
+/*
+ * What has already been accepted, kept far longer than the queue itself.
+ *
+ * Two tables rather than one because the retentions differ by an order of
+ * magnitude: a queue row is for debugging and a week is plenty, while this is
+ * the replay guard and has to comfortably outlast NIP-17's two-day timestamp
+ * window — a wrap dated yesterday is re-served on every restart, and without
+ * this the same question is answered twice, for money.
+ *
+ * The id is the RUMOR id for nip-17 and Concord: the wrap is a different
+ * envelope on every relay, so deduping on it counts one message four times.
+ */
+CREATE TABLE IF NOT EXISTS inbound_seen (
+  transport TEXT NOT NULL,
+  event_id  TEXT NOT NULL,
+  at        INTEGER NOT NULL,
+  PRIMARY KEY (transport, event_id)
+);
+CREATE INDEX IF NOT EXISTS inbound_seen_at ON inbound_seen (at);
+
+/*
+ * How far each transport has read, per relay and stream.
+ *
+ * concord_cursors generalised: a NIP-17 inbox and a NIP-29 room ask the same
+ * question, and a scheduler will too. Forward-only, for the reason
+ * rememberCursor gives.
+ */
+CREATE TABLE IF NOT EXISTS transport_cursors (
+  transport TEXT NOT NULL,
+  relay     TEXT NOT NULL,
+  stream    TEXT NOT NULL,
+  since     INTEGER NOT NULL,
+  PRIMARY KEY (transport, relay, stream)
+);
 `;
 
 /**
@@ -407,6 +479,48 @@ const OBEYED_HORIZON_SECONDS = 30 * 24 * 60 * 60;
  * short enough that a genuine follow-up next week is nobody's duplicate.
  */
 const PUBLISHED_HORIZON_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * How long an accepted event id is remembered.
+ *
+ * Fifteen times NIP-17's two-day timestamp window, which is the replay this has
+ * to outlast: a restart re-reads the inbox back that far every time.
+ */
+const INBOUND_SEEN_HORIZON_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * How long a settled queue row is kept.
+ *
+ * Only for reading afterwards — "why was that message never answered" is a
+ * question with an answer in the `outcome` column. The dedupe guard is
+ * `inbound_seen`, so pruning here forgets nothing that matters.
+ */
+const INBOUND_DONE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * A queue row, as it came back out of SQLite.
+ *
+ * Deliberately NOT a `CanonicalEvent`: `type` is a string here because the row
+ * may have been written by a newer version of hex, and a cast would turn "a
+ * type this build does not know" into an impossible state the compiler swears
+ * cannot happen.
+ */
+export interface QueuedInbound {
+  seq: number;
+  v: number;
+  type: string;
+  id: string;
+  route: {
+    transport: string;
+    relay?: string;
+    room: string;
+    peer: string;
+    thread?: string;
+  };
+  createdAt: number;
+  observedAt: number;
+  payload: unknown;
+}
 
 /** One row of the publish ledger. */
 export interface PublishedEvent {
@@ -595,6 +709,27 @@ export class HexStore {
            OR generation != COALESCE(
                 (SELECT generation FROM writer_lease WHERE id = 1), -1)`,
     ).run(Math.floor(Date.now() / 1000) - RESERVATION_HORIZON_SECONDS);
+
+    db.prepare(`DELETE FROM inbound_seen WHERE at < ?`).run(
+      Math.floor(Date.now() / 1000) - INBOUND_SEEN_HORIZON_SECONDS,
+    );
+    // Settled rows only: a pending one is owed work however old it is.
+    db.prepare(
+      `DELETE FROM inbound_events WHERE done_at IS NOT NULL AND done_at < ?`,
+    ).run(Math.floor(Date.now() / 1000) - INBOUND_DONE_HORIZON_SECONDS);
+
+    /**
+     * Concord's cursors, carried into the general table.
+     *
+     * Additive and idempotent — an existing `transport_cursors` row wins, so a
+     * home that has already moved on is not walked backwards. `concord_cursors`
+     * is left where it is: dropping an operator's read position to tidy a
+     * schema is not a migration this gets to make.
+     */
+    db.exec(
+      `INSERT OR IGNORE INTO transport_cursors (transport, relay, stream, since)
+         SELECT 'concord', relay, stream, since FROM concord_cursors`,
+    );
 
     return new HexStore(db);
   }
@@ -787,12 +922,23 @@ export class HexStore {
       .run(communityIdHex);
   }
 
-  cursorFor(relay: string, stream: string): number | undefined {
+  /**
+   * How far a transport has read one stream on one relay.
+   *
+   * `relay` is part of the key rather than a detail: two relays serving one
+   * community are at different points in it.
+   */
+  transportCursorFor(
+    transport: string,
+    relay: string,
+    stream: string,
+  ): number | undefined {
     const row = this.db
       .prepare(
-        `SELECT since FROM concord_cursors WHERE relay = ? AND stream = ?`,
+        `SELECT since FROM transport_cursors
+          WHERE transport = ? AND relay = ? AND stream = ?`,
       )
-      .get(relay, stream) as { since?: number } | undefined;
+      .get(transport, relay, stream) as { since?: number } | undefined;
     return row?.since;
   }
 
@@ -803,14 +949,34 @@ export class HexStore {
    * relay serving stored history after a live event would otherwise walk the
    * cursor backwards and re-ingest everything between.
    */
-  rememberCursor(relay: string, stream: string, at: number): void {
+  rememberTransportCursor(
+    transport: string,
+    relay: string,
+    stream: string,
+    at: number,
+  ): void {
     this.db
       .prepare(
-        `INSERT INTO concord_cursors (relay, stream, since)
-         VALUES (?, ?, ?)
-         ON CONFLICT(relay, stream) DO UPDATE SET since = MAX(since, excluded.since)`,
+        `INSERT INTO transport_cursors (transport, relay, stream, since)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(transport, relay, stream)
+           DO UPDATE SET since = MAX(since, excluded.since)`,
       )
-      .run(relay, stream, at);
+      .run(transport, relay, stream, at);
+  }
+
+  /**
+   * Concord's cursors, which are `transport_cursors` rows now.
+   *
+   * Kept as named methods because `ConcordDurability` is the transport's own
+   * seam and has no business knowing there are other transports.
+   */
+  cursorFor(relay: string, stream: string): number | undefined {
+    return this.transportCursorFor("concord", relay, stream);
+  }
+
+  rememberCursor(relay: string, stream: string, at: number): void {
+    this.rememberTransportCursor("concord", relay, stream, at);
   }
 
   sawRumor(rumorId: string): boolean {
@@ -838,6 +1004,114 @@ export class HexStore {
         `INSERT OR IGNORE INTO concord_rumors (rumor_id, at, own) VALUES (?, ?, ?)`,
       )
       .run(rumorId, at, own ? 1 : 0);
+  }
+
+  // ── Inbound queue ─────────────────────────────────────────────────────────
+
+  /**
+   * Accept an event, once.
+   *
+   * The seen-record and the queue row are written in ONE transaction: as two
+   * statements, two deliveries of the same message interleaving between them
+   * both read "not yet" and both enqueue. Returns the row's seq, or undefined
+   * when this (transport, id) has already been accepted inside the horizon.
+   *
+   * Never call this inside `transaction()` — nesting is refused on purpose.
+   */
+  enqueueInbound(event: CanonicalEvent): number | undefined {
+    return this.transaction(() => {
+      const seen = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO inbound_seen (transport, event_id, at)
+           VALUES (?, ?, ?)`,
+        )
+        .run(event.route.transport, event.id, event.observedAt);
+      if (Number(seen.changes) === 0) return undefined;
+      const inserted = this.db
+        .prepare(
+          `INSERT INTO inbound_events
+             (v, type, event_id, transport, relay, room, peer, thread,
+              created_at, observed_at, payload)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          event.v,
+          event.type,
+          event.id,
+          event.route.transport,
+          event.route.relay ?? null,
+          event.route.room,
+          event.route.peer,
+          event.route.thread ?? null,
+          event.createdAt,
+          event.observedAt,
+          JSON.stringify(event.payload),
+        );
+      return Number(inserted.lastInsertRowid);
+    });
+  }
+
+  /** Everything still owed work, oldest first. */
+  pendingInbound(limit = 500): QueuedInbound[] {
+    const rows = this.db
+      .prepare(
+        `SELECT seq, v, type, event_id, transport, relay, room, peer, thread,
+                created_at, observed_at, payload
+           FROM inbound_events WHERE done_at IS NULL ORDER BY seq LIMIT ?`,
+      )
+      .all(limit) as unknown as {
+      seq: number;
+      v: number;
+      type: string;
+      event_id: string;
+      transport: string;
+      relay: string | null;
+      room: string;
+      peer: string;
+      thread: string | null;
+      created_at: number;
+      observed_at: number;
+      payload: string;
+    }[];
+    return rows.map((row) => ({
+      seq: row.seq,
+      v: row.v,
+      // Untrusted: a row written by a newer version may name a type this build
+      // has never heard of. The ingestor decides what to do about that.
+      type: row.type,
+      id: row.event_id,
+      route: {
+        transport: row.transport,
+        relay: row.relay ?? undefined,
+        room: row.room,
+        peer: row.peer,
+        thread: row.thread ?? undefined,
+      },
+      createdAt: row.created_at,
+      observedAt: row.observed_at,
+      payload: JSON.parse(row.payload) as unknown,
+    }));
+  }
+
+  /** Settle one row. `outcome` is `handled`, `ignored`, or `dropped:<reason>`. */
+  finishInbound(
+    seq: number,
+    outcome: string,
+    at = Math.floor(Date.now() / 1000),
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE inbound_events SET done_at = ?, outcome = ? WHERE seq = ?`,
+      )
+      .run(at, outcome, seq);
+  }
+
+  /** What became of one row — for the operator, and for tests. */
+  inboundOutcome(seq: number): string | undefined {
+    const row = this.db
+      .prepare(`SELECT outcome FROM inbound_events WHERE seq = ?`)
+      .get(seq) as { outcome?: string | null } | undefined;
+    return row?.outcome ?? undefined;
   }
 
   close(): void {
