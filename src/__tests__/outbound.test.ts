@@ -289,4 +289,46 @@ describe("Spool", () => {
     });
     owed.stop();
   });
+
+  it("keeps a store failure inside a send out of the process's face", async () => {
+    /**
+     * The ack reaction is sent from a place nothing awaits, and so is the retry
+     * interval. A sqlite write that fails mid-send — a database a Ctrl-C closed
+     * during the turn, a busy one, a full disk — would leave an unhandled
+     * rejection there, and Node's default for that is to end the daemon.
+     */
+    const lines: string[] = [];
+    const dying = transport();
+    dying.impl.react = async () => {
+      // The send is under way; the store goes out from under its bookkeeping.
+      store.close();
+      return "reaction_1";
+    };
+    const closing = spool(dying, { log: (line) => lines.push(line) });
+    await expect(
+      closing.react(inbound(), "\u{1F440}"),
+    ).resolves.toBeUndefined();
+    expect(lines.join("\n")).toContain("is still owed");
+    closing.stop();
+    // The suite's teardown closes it too, and node:sqlite refuses a second one.
+    store = HexStore.open(agentHome(home, AGENT).db);
+  });
+
+  it("does not let the retry interval reject into nothing", async () => {
+    const unhandled: unknown[] = [];
+    const listener = (error: unknown) => unhandled.push(error);
+    process.on("unhandledRejection", listener);
+    const lines: string[] = [];
+    const bus = transport({ failing: true });
+    const owed = spool(bus, { pollMs: 1, log: (line) => lines.push(line) });
+    await owed.reply(inbound(), "owed while the store dies");
+    store.close();
+    // Long enough for the armed interval to fire on a dead store.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    process.off("unhandledRejection", listener);
+    owed.stop();
+    expect(unhandled).toEqual([]);
+    expect(lines.join("\n")).toContain("could not look for owed rows");
+    store = HexStore.open(agentHome(home, AGENT).db);
+  });
 });

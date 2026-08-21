@@ -258,33 +258,52 @@ export class Spool {
     return this.send(row);
   }
 
+  /**
+   * Deliver one row, and never throw doing it.
+   *
+   * A send is reached from places nothing awaits — the ack reaction, the retry
+   * interval — so a store write that fails mid-send (a busy database, disk
+   * full, a `close()` racing an in-flight send on Ctrl-C) would surface as an
+   * unhandled rejection, and Node's default for that is to kill the daemon.
+   * The row keeps whatever state it has and the next pass tries it again.
+   */
   private async send(row: OutboundRow): Promise<string | undefined> {
     // Somebody is already delivering this one; two callers is one duplicate.
     if (this.sending.has(row.id)) return undefined;
     this.sending.add(row.id);
     try {
       return await this.deliverOnce(row);
+    } catch (error) {
+      if (!this.stopFenced(error))
+        this.log(
+          `[hex] a ${row.kind} for ${row.room.slice(0, 12)}… is still owed: ` +
+            `its bookkeeping did not go in: ${message(error)}`,
+        );
+      return undefined;
     } finally {
       this.sending.delete(row.id);
     }
   }
 
+  /**
+   * The lease moved on: nothing here sends again, and it is said once.
+   *
+   * Sending anyway is the double-send the whole fencing discipline exists to
+   * prevent. Returns whether that is what happened, so a caller can tell a
+   * takeover from an ordinary failure.
+   */
+  private stopFenced(error: unknown): boolean {
+    if (!(error instanceof FencedWriteError)) return false;
+    // Said once: the rest of this pass would repeat it per owed row.
+    if (!this.fenced) this.log(`[hex] the spool stopped: ${error.message}`);
+    this.fenced = true;
+    this.stop();
+    return true;
+  }
+
   private async deliverOnce(row: OutboundRow): Promise<string | undefined> {
-    try {
-      if (!this.options.store.beginOutbound(row.id, this.options.generation))
-        return undefined;
-    } catch (error) {
-      // A lease taken over. Sending anyway is the double-send this whole
-      // discipline exists to prevent, so stop the loop and say so.
-      if (error instanceof FencedWriteError) {
-        // Said once: the rest of this pass would repeat it per owed row.
-        if (!this.fenced) this.log(`[hex] the spool stopped: ${error.message}`);
-        this.fenced = true;
-        this.stop();
-        return undefined;
-      }
-      throw error;
-    }
+    if (!this.options.store.beginOutbound(row.id, this.options.generation))
+      return undefined;
     try {
       const sentId = await this.deliver(row);
       this.options.store.outboundSent(row.id, sentId);
@@ -383,7 +402,14 @@ export class Spool {
   private arm(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.drain();
+      // Nothing awaits this one, so a store that fails while reading the owed
+      // rows must be a log line rather than an unhandled rejection.
+      void this.drain().catch((error: unknown) => {
+        if (!this.stopFenced(error))
+          this.log(
+            `[hex] the spool could not look for owed rows: ${message(error)}`,
+          );
+      });
     }, this.options.pollMs ?? DEFAULT_POLL_MS);
     // A backstop must never be the reason a process refuses to exit.
     this.timer.unref?.();

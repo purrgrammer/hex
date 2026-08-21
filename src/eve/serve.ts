@@ -1424,7 +1424,15 @@ export class EveServer {
      */
     const emoji = this.options.ackEmoji ?? "👀";
     if (emoji && this.options.transport.react)
-      void this.spool.react(inbound, emoji);
+      // Not awaited, so the store failing to take the row has to be caught
+      // here: an unhandled rejection is the end of the process.
+      void this.spool
+        .react(inbound, emoji)
+        .catch((error: unknown) =>
+          this.log(
+            `[hex] could not acknowledge ${short(peer)}: ${message(error)}`,
+          ),
+        );
 
     /**
      * The index a terminal event has to beat to end THIS turn.
