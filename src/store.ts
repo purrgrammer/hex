@@ -127,10 +127,18 @@ export interface StoredTranscript {
    * one chain and one `last-seq`, so a group copy beginning at turn twelve is a
    * transcript with a hole nobody can fill.
    */
-  carriage?: "wrapped" | "group";
-  /** The NIP-29 group id this run happens in, for its `h` tag. */
+  carriage?: "wrapped" | "group" | "concord";
+  /**
+   * The room this run happens in: a NIP-29 group id, or — under the `concord`
+   * carriage — a `community:channel` room id. Which it is, is the carriage.
+   */
   group?: string;
-  /** The relay that hosts that group — the only one the group copy goes to. */
+  /**
+   * The relay that hosts that group — the only one the group copy goes to.
+   *
+   * NIP-29 only. A Concord channel's relays come from the membership, which
+   * holds them because the keys and the relays arrive in the same invite.
+   */
   groupRelay?: string;
   /**
    * The running total includes a figure nobody billed.
@@ -656,7 +664,10 @@ export class HexStore {
       channel: parseChannel(row.channel),
       described: row.described === 1,
       subjects: parseSubjects(row.subjects),
-      carriage: row.carriage === "group" ? "group" : undefined,
+      carriage:
+        row.carriage === "group" || row.carriage === "concord"
+          ? row.carriage
+          : undefined,
       group: row.grp == null ? undefined : String(row.grp),
       groupRelay: row.grp_relay == null ? undefined : String(row.grp_relay),
     };

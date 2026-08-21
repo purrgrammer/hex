@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { firstValueFrom } from "rxjs";
 import { filter as rxFilter, take, toArray } from "rxjs/operators";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getEventHash, getPublicKey } from "nostr-tools/pure";
 import { PrivateKeySigner } from "applesauce-signers";
 
 import { createRelays, publishTo } from "../relays.js";
@@ -20,6 +20,7 @@ import {
   wrapSeal,
 } from "../concord/stream.js";
 import {
+  adoptRoot,
   membershipFromBundle,
   type Membership,
 } from "../concord/membership.js";
@@ -319,6 +320,83 @@ describe("ConcordTransport.reply", () => {
     );
     expect(next?.replyToId).toBe(answerId);
     expect(next?.addressesSelf).toBe(true);
+  });
+});
+
+describe("the transcript carriage", () => {
+  function transcriptRumor(tags: string[][] = []) {
+    const rumor = {
+      kind: 1777,
+      content: "a turn",
+      tags,
+      pubkey: hexPubkey,
+      created_at: 1_700_000_000,
+    };
+    return { ...rumor, id: getEventHash(rumor) };
+  }
+
+  it("binds a transcript rumor to the channel, once, before it is hashed", async () => {
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    transport = transportFor(relay.url);
+
+    const room = `${COMMUNITY}:${PUBLIC_CHANNEL}`;
+    const original = transcriptRumor();
+    const bound = transport.bindTranscript(original, room);
+
+    expect(bound.tags).toContainEqual(["channel", PUBLIC_CHANNEL]);
+    expect(bound.tags).toContainEqual(["epoch", "2"]);
+    // Re-hashed, or the id would be a lie about the tags it names.
+    expect(bound.id).not.toBe(original.id);
+    expect(bound.id).toBe(getEventHash(bound as never));
+
+    // Idempotent: two `channel` tags is an ambiguous binding, which every
+    // reader — this transport included — is right to refuse.
+    expect(transport.bindTranscript(bound, room)).toBe(bound);
+  });
+
+  it("publishes on the epoch the rumor committed to, not the newest one", async () => {
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    const held = membership(relay.url);
+    transport = transportFor(relay.url, held);
+
+    const room = `${COMMUNITY}:${PUBLIC_CHANNEL}`;
+    const bound = transport.bindTranscript(transcriptRumor(), room);
+    const epoch2 = channelGroupKey(
+      ROOT,
+      Uint8Array.from(Buffer.from(PUBLIC_CHANNEL, "hex")),
+      2n,
+    );
+
+    // A rotation lands between binding and publishing. Adoption is additive, so
+    // the epoch the id names is still held — and moving the event to the new
+    // address would publish it under an id that claims the old one.
+    adoptRoot(held, { epoch: 3n, key: new Uint8Array(32).fill(0x44) });
+
+    const { delivered } = await transport.carryTranscript(bound, room);
+    expect(delivered.length).toBeGreaterThan(0);
+    const published = relay.received.find(
+      (event) => event.pubkey === epoch2.pk,
+    );
+    expect(published).toBeDefined();
+    expect(openWrap(published!, epoch2).rumorId).toBe(bound.id);
+  });
+
+  it("refuses to carry a rumor bound to another channel", async () => {
+    relay = await startMockRelay({ kind: "normal" });
+    relays = createRelays();
+    transport = transportFor(relay.url);
+
+    // The splice, from the writing side: a keyholder publishing one room's
+    // words under another room's key.
+    const foreign = transcriptRumor([
+      ["channel", PRIVATE_CHANNEL],
+      ["epoch", "5"],
+    ]);
+    await expect(
+      transport.carryTranscript(foreign, `${COMMUNITY}:${PUBLIC_CHANNEL}`),
+    ).rejects.toThrow(/not bound to/);
   });
 });
 

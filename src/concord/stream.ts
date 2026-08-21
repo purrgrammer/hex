@@ -382,3 +382,25 @@ export function checkChannelBinding(
   if (uniqueTag(opened.tags, TAG_EPOCH) !== epoch.toString())
     throw new StreamError("binding-mismatch", "epoch-binding mismatch (splice)");
 }
+
+/**
+ * Read a rumor's own binding back out.
+ *
+ * `checkChannelBinding` answers "does this match what I opened it with", which
+ * is the ingress question. A write asks the other one: an already-bound rumor
+ * has to go to the address it commits to, and only the rumor knows which that
+ * is. Undefined for anything that is not bound to exactly one channel and epoch.
+ */
+export function channelBindingOf(
+  tags: string[][],
+): { channelIdHex: string; epoch: bigint } | undefined {
+  try {
+    const channelIdHex = uniqueTag(tags, TAG_CHANNEL);
+    const epoch = uniqueTag(tags, TAG_EPOCH);
+    if (!channelIdHex || !epoch) return undefined;
+    if (!/^(0|[1-9][0-9]*)$/.test(epoch)) return undefined;
+    return { channelIdHex, epoch: BigInt(epoch) };
+  } catch {
+    return undefined;
+  }
+}

@@ -1173,6 +1173,24 @@ async function main(): Promise<void> {
                   },
                 }
               : undefined,
+            /**
+             * And, for a run in a Concord channel, the same event on the
+             * channel's own stream.
+             *
+             * No relay list here and no signer here: the transport holds the
+             * membership, and the membership holds both the keys and the relays
+             * — they arrive in one invite and there is nowhere else to get
+             * either. Two calls because the binding tags have to be on the
+             * rumor before it is hashed, and only the transport knows them.
+             */
+            concord: communities
+              ? {
+                  bind: (rumor, room) =>
+                    communities!.bindTranscript(rumor, room),
+                  publish: (rumor, room) =>
+                    communities!.carryTranscript(rumor, room),
+                }
+              : undefined,
             deltas: transcriptConfig.deltas,
             deltaRelays: config.relays.dm,
             prices,

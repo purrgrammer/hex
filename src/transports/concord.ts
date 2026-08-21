@@ -46,6 +46,8 @@ import {
   type HexRelays,
 } from "../relays.js";
 import { addressesSelfInGroup } from "../policy.js";
+import { withTags } from "../nostr/encode.js";
+import type { Rumor } from "../nostr/types.js";
 import type { Inbound, Room, Transport } from "./types.js";
 import { bytesToHex, hex32, type GroupKey } from "../concord/derive.js";
 import {
@@ -60,6 +62,7 @@ import {
 } from "../concord/kinds.js";
 import {
   buildRumor,
+  channelBindingOf,
   channelBindingTags,
   checkChannelBinding,
   openWrap,
@@ -826,29 +829,52 @@ export class ConcordTransport implements Transport {
       pubkey: this.options.pubkey,
       ms,
     });
+    const outcomes = await this.carry(rumor, stream.group, membership.relays);
+    if (!outcomes.delivered.length)
+      throw new Error(
+        `no relay of ${membership.name} took the message: ${outcomes.refusals.join("; ")}`,
+      );
+
+    return rumor.id;
+  }
+
+  /**
+   * Seal, wrap and publish one already-built rumor onto one stream.
+   *
+   * The tail of every write this transport makes, and the only place that knows
+   * a wrap is signed locally while a seal costs a signer round-trip. Returns
+   * which relays took it rather than throwing, because a transcript copy that
+   * reached nobody is a chain that stops and a chat message that reached nobody
+   * is an error — the same failure, two different things to do about it.
+   */
+  private async carry(
+    rumor: Rumor,
+    group: GroupKey,
+    relayUrls: string[],
+  ): Promise<{ delivered: string[]; undeliverable: string[]; refusals: string[] }> {
     const seal = await sealRumor(
       rumor,
       KIND_SEAL_ENCRYPTED,
-      stream.group,
+      group,
       this.options.signer,
     );
-    const wrap = wrapSeal(seal, stream.group);
+    const wrap = wrapSeal(seal, group);
 
     const outcomes = await publishTo(
       this.relays,
-      membership.relays,
+      relayUrls,
       wrap,
       this.options.publishTimeoutMs,
     );
-    if (!outcomes.some((outcome) => outcome.ok))
-      throw new Error(
-        `no relay of ${membership.name} took the message: ${outcomes
-          .map((outcome) => outcome.message ?? "rejected")
-          .join("; ")}`,
-      );
-
-    this.remember(rumor.id, true);
-    return rumor.id;
+    const delivered = outcomes.filter((o) => o.ok).map((o) => o.relay);
+    if (delivered.length > 0) this.remember(rumor.id, true);
+    return {
+      delivered,
+      undeliverable: outcomes.filter((o) => !o.ok).map((o) => o.relay),
+      refusals: outcomes
+        .filter((o) => !o.ok)
+        .map((o) => o.message ?? "rejected"),
+    };
   }
 
   /**
@@ -904,6 +930,82 @@ export class ConcordTransport implements Transport {
       ["e", to.id],
       ["p", to.author],
     ]);
+  }
+
+  // ── Carriage ──────────────────────────────────────────────────────────────
+
+  /**
+   * Bind a transcript rumor to the channel it happened in, before it is hashed.
+   *
+   * The Concord half of what `inGroup` does for NIP-29, and it exists for the
+   * same reason: a gift wrap answers "who may read this" with a list of names,
+   * which for a run somebody started in a room of forty people produced a
+   * transcript exactly one of them could open — and that one had not asked the
+   * question. Here the answer is the channel key, so every member reads the run
+   * and no relay learns that a run happened.
+   *
+   * Idempotent, and it has to be: `checkChannelBinding` refuses a rumor with two
+   * `channel` tags, so a retry that stamped twice would mint an event every
+   * reader — this one included — is right to drop.
+   */
+  bindTranscript(rumor: Rumor, roomId: string): Rumor {
+    if (rumor.tags.some((tag) => tag[0] === "channel")) return rumor;
+    const { channel, stream } = this.bindingFor({
+      transport: "concord",
+      id: roomId,
+    });
+    return withTags(rumor, channelBindingTags(channel.idHex, stream.epoch));
+  }
+
+  /**
+   * Publish a bound transcript rumor onto its channel's stream.
+   *
+   * The epoch is read from the rumor's OWN tags rather than from what is current
+   * now: the id commits to an epoch, and a rotation that landed between binding
+   * and publishing must not move the event to an address its id does not claim.
+   * Adoption is additive, so the epoch it names is still held and still writable.
+   */
+  async carryTranscript(
+    rumor: Rumor,
+    roomId: string,
+  ): Promise<{ delivered: string[]; undeliverable: string[] }> {
+    const parsed = parseConcordRoomId(roomId);
+    if (!parsed) throw new Error(`${roomId} is not a Concord room id`);
+    const membership = this.membershipFor(parsed.communityIdHex);
+    if (!membership)
+      throw new Error(
+        `Hex holds no keys for community ${parsed.communityIdHex.slice(0, 8)}…`,
+      );
+    const channel = membership.channels.find(
+      (candidate) => candidate.idHex === parsed.channelIdHex,
+    );
+    if (!channel)
+      throw new Error(
+        `Hex holds no key for channel ${parsed.channelIdHex.slice(0, 8)}…`,
+      );
+
+    // Its own binding, verified rather than trusted: a rumor bound to another
+    // channel would otherwise be published under this one's key, which is the
+    // splice this transport refuses on the way in.
+    const bound = channelBindingOf(rumor.tags);
+    if (!bound || bound.channelIdHex !== channel.idHex)
+      throw new Error(
+        `transcript rumor ${rumor.id.slice(0, 8)}… is not bound to ${channel.name}`,
+      );
+    const stream = channelStreams(membership, channel).find(
+      (candidate) => candidate.epoch === bound.epoch,
+    );
+    if (!stream)
+      throw new Error(
+        `Hex no longer holds epoch ${bound.epoch} of ${channel.name}`,
+      );
+
+    const { delivered, undeliverable } = await this.carry(
+      rumor,
+      stream.group,
+      membership.relays,
+    );
+    return { delivered, undeliverable };
   }
 
   // ── Context ───────────────────────────────────────────────────────────────

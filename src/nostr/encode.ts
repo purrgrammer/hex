@@ -105,7 +105,20 @@ export function parseSessionAddress(
 export function inGroup(rumor: Rumor, group: string | undefined): Rumor {
   if (!group) return rumor;
   if (rumor.tags.some((tag) => tag[0] === "h")) return rumor;
-  return stamp({ ...rumor, tags: [...rumor.tags, ["h", group]] });
+  return withTags(rumor, [["h", group]]);
+}
+
+/**
+ * The same move for a room whose binding is not an `h` tag.
+ *
+ * A Concord channel binds with `channel` and `epoch` rather than `h`, and the
+ * transport is the only layer that knows which — but the re-hash is the same
+ * re-hash, and duplicating `getEventHash` in a transport is how the two drift.
+ * The caller owns idempotence: stamping twice is a different rumor.
+ */
+export function withTags(rumor: Rumor, tags: string[][]): Rumor {
+  if (tags.length === 0) return rumor;
+  return stamp({ ...rumor, tags: [...rumor.tags, ...tags] });
 }
 
 function stamp(rumor: UnsignedRumor): Rumor {

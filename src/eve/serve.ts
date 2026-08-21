@@ -598,8 +598,12 @@ export class EveServer {
    * decision, and asking an operator to make it a second time here would let
    * the two answers disagree.
    */
-  private carriageFor(room?: Room): "wrapped" | "group" {
-    return room?.transport === "nip-29" && room.relay ? "group" : "wrapped";
+  private carriageFor(room?: Room): "wrapped" | "group" | "concord" {
+    if (room?.transport === "nip-29" && room.relay) return "group";
+    // A Concord channel needs no relay here: the membership that holds its keys
+    // holds its relays too, because both arrived in the same invite.
+    if (room?.transport === "concord") return "concord";
+    return "wrapped";
   }
 
   private async grounding(
@@ -1248,6 +1252,7 @@ export class EveServer {
         transcript.group = inbound.room?.id;
         transcript.groupRelay = inbound.room?.relay;
       }
+      if (transcript.carriage === "concord") transcript.group = inbound.room?.id;
       /**
        * What the run is about, lifted off the message that started it.
        *
