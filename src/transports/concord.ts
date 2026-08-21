@@ -48,6 +48,7 @@ import {
 import { addressesSelfInGroup } from "../policy.js";
 import { withTags } from "../nostr/encode.js";
 import type { Rumor } from "../nostr/types.js";
+import { roomKey } from "./types.js";
 import type { Inbound, Room, Transport } from "./types.js";
 import { bytesToHex, hex32, type GroupKey } from "../concord/derive.js";
 import {
@@ -139,7 +140,7 @@ export interface ConcordDurability {
    * reply typed into a thread is usually the person's OWN opening message, not
    * anything Hex wrote.
    */
-  threadIsOurs?(rootId: string): boolean;
+  threadIsOurs?(rootId: string, room: string): boolean;
   /** A membership changed — a rotation was adopted. Persist it. */
   saveMembership(membership: Membership): void;
 }
@@ -550,7 +551,8 @@ export class ConcordTransport implements Transport {
         (this.ownRumorIds.has(inbound.replyToId) ||
           (this.options.durability?.isOwnRumor(inbound.replyToId) ?? false))) ||
       (root !== undefined &&
-        (this.options.durability?.threadIsOurs?.(root) ?? false));
+        (this.options.durability?.threadIsOurs?.(root, roomKey(inbound.room)) ??
+          false));
 
     return {
       ...inbound,

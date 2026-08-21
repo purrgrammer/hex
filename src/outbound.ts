@@ -24,6 +24,7 @@
 import type { Rumor } from "./nostr/types.js";
 import { FencedWriteError } from "./store.js";
 import type { HexStore, OutboundRow } from "./store.js";
+import { roomKey } from "./transports/types.js";
 import type { Inbound } from "./transports/types.js";
 
 /** What the spool needs of a transport: answer a message, acknowledge one. */
@@ -405,11 +406,13 @@ export class Spool {
      * is whatever Hex just said.
      */
     if (to) {
-      const session = this.options.store.threadSession(to.id);
+      const room = roomKey(to.room);
+      const session = this.options.store.threadSession(to.id, room);
       if (session)
         this.options.store.rememberThread(
           sentId,
           session,
+          room,
           Math.floor(this.clock() / 1000),
         );
     }

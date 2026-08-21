@@ -172,7 +172,9 @@ export function afterHolding(
 
 export function laneForMessage(inbound: Inbound, store: HexStore): string {
   const root = inbound.threadRoot ?? inbound.replyToId;
-  const session = root ? store.threadSession(root) : undefined;
+  const session = root
+    ? store.threadSession(root, roomKey(inbound.room))
+    : undefined;
   const owner = session ? store.conversationForSession(session) : undefined;
   if (owner) return `${owner.peer}\u0000${owner.room}`;
   return `${inbound.author}\u0000${roomKey(inbound.room)}`;

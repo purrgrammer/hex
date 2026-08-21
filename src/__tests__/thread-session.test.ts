@@ -35,6 +35,8 @@ const REPLY = "967e23e9f2".padEnd(64, "0");
 const OPERATOR = "7fa56f5d69".padEnd(64, "0");
 const SESSION = "wrun_01M0J1WS9FNEYKWSP620B9VJF4";
 const OTHER_SPEAKER = "aa".repeat(32);
+/** A binding belongs to the room it was made in, so every call names one. */
+const BOUND_ROOM = "concord:community:channel";
 
 /** Exactly the tags the ignored message carried, in its order. */
 const asItArrived = {
@@ -95,44 +97,44 @@ describe("what a thread binding is for", () => {
   });
 
   it("answers 'is this thread ours' only where a run was opened", () => {
-    expect(store.threadIsOurs(ROOT)).toBe(false);
-    store.rememberThread(ROOT, SESSION, 1);
-    expect(store.threadIsOurs(ROOT)).toBe(true);
-    expect(store.threadSession(ROOT)).toBe(SESSION);
+    expect(store.threadIsOurs(ROOT, BOUND_ROOM)).toBe(false);
+    store.rememberThread(ROOT, SESSION, BOUND_ROOM, 1);
+    expect(store.threadIsOurs(ROOT, BOUND_ROOM)).toBe(true);
+    expect(store.threadSession(ROOT, BOUND_ROOM)).toBe(SESSION);
   });
 
   it("keeps two threads in one room on two sessions", () => {
     const other = "bb".repeat(32);
-    store.rememberThread(ROOT, SESSION, 1);
-    store.rememberThread(other, "wrun_OTHER", 2);
-    expect(store.threadSession(ROOT)).toBe(SESSION);
-    expect(store.threadSession(other)).toBe("wrun_OTHER");
+    store.rememberThread(ROOT, SESSION, BOUND_ROOM, 1);
+    store.rememberThread(other, "wrun_OTHER", BOUND_ROOM, 2);
+    expect(store.threadSession(ROOT, BOUND_ROOM)).toBe(SESSION);
+    expect(store.threadSession(other, BOUND_ROOM)).toBe("wrun_OTHER");
   });
 
   it("survives a restart, because the binding outlives the process", () => {
-    store.rememberThread(ROOT, SESSION, 1);
+    store.rememberThread(ROOT, SESSION, BOUND_ROOM, 1);
     store.close();
     store = HexStore.open(join(home, "data.db"));
-    expect(store.threadSession(ROOT)).toBe(SESSION);
+    expect(store.threadSession(ROOT, BOUND_ROOM)).toBe(SESSION);
   });
 
   it("forgets every thread a dead session held", () => {
     const second = "cc".repeat(32);
-    store.rememberThread(ROOT, SESSION, 1);
-    store.rememberThread(second, SESSION, 2);
-    store.rememberThread("dd".repeat(32), "wrun_LIVE", 3);
+    store.rememberThread(ROOT, SESSION, BOUND_ROOM, 1);
+    store.rememberThread(second, SESSION, BOUND_ROOM, 2);
+    store.rememberThread("dd".repeat(32), "wrun_LIVE", BOUND_ROOM, 3);
 
     // What a 409 must do: nothing may resume the refused session again.
     store.forgetThread(SESSION);
-    expect(store.threadSession(ROOT)).toBeUndefined();
-    expect(store.threadSession(second)).toBeUndefined();
-    expect(store.threadSession("dd".repeat(32))).toBe("wrun_LIVE");
+    expect(store.threadSession(ROOT, BOUND_ROOM)).toBeUndefined();
+    expect(store.threadSession(second, BOUND_ROOM)).toBeUndefined();
+    expect(store.threadSession("dd".repeat(32), BOUND_ROOM)).toBe("wrun_LIVE");
   });
 
-  it("rebinds a root rather than growing a second row for it", () => {
-    store.rememberThread(ROOT, SESSION, 1);
-    store.rememberThread(ROOT, "wrun_FRESH", 2);
-    expect(store.threadSession(ROOT)).toBe("wrun_FRESH");
+  it("keeps one row per root rather than growing a second", () => {
+    store.rememberThread(ROOT, SESSION, BOUND_ROOM, 1);
+    store.rememberThread(ROOT, SESSION, BOUND_ROOM, 2);
+    expect(store.threadSession(ROOT, BOUND_ROOM)).toBe(SESSION);
   });
 });
 
@@ -280,7 +282,7 @@ describe("two people, one thread", () => {
     home = mkdtempSync(join(tmpdir(), "thread-lane-"));
     store = HexStore.open(join(home, "data.db"));
     store.rememberConversation(OPERATOR, roomKey(ROOM), SESSION, 1);
-    store.rememberThread(ROOT, SESSION, 1);
+    store.rememberThread(ROOT, SESSION, roomKey(ROOM), 1);
   });
 
   afterEach(() => {

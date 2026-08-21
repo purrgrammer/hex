@@ -1615,7 +1615,7 @@ export class EveServer {
      */
     const root = inbound.threadRoot ?? inbound.replyToId;
     const threaded = root
-      ? this.options.transcript.store.threadSession(root)
+      ? this.options.transcript.store.threadSession(root, roomKey(inbound.room))
       : undefined;
 
     let conversation = inbound.replyToId
@@ -2452,8 +2452,9 @@ export class EveServer {
   private bindThread(inbound: Inbound, sessionId: string): void {
     const at = Math.floor(Date.now() / 1000);
     const store = this.options.transcript.store;
+    const room = roomKey(inbound.room);
     for (const id of [inbound.threadRoot, inbound.replyToId, inbound.id])
-      if (id) store.rememberThread(id, sessionId, at);
+      if (id) store.rememberThread(id, sessionId, room, at);
   }
 
   private forget(key: string, sessionId: string): void {

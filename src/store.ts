@@ -253,6 +253,10 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE TABLE IF NOT EXISTS threads (
   root_id    TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
+  -- The room the binding was made in. A run belongs to a room, so a binding
+  -- that answered a lookup from anywhere would resume one room's history in
+  -- another -- reachable by quoting the id of anything Hex said in public.
+  room       TEXT NOT NULL DEFAULT '',
   at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS threads_session ON threads (session_id);
@@ -798,6 +802,24 @@ export class HexStore {
       db.exec(`ALTER TABLE transcripts ADD COLUMN grp TEXT`);
     if (!columns.includes("grp_relay"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN grp_relay TEXT`);
+
+    /*
+     * `room` arrived after `threads` did, and a binding without one answers for
+     * every room. Backfilled from the session's own conversation rather than
+     * left empty: an existing thread should keep working, and the conversation
+     * row is where the room it belongs to already is.
+     */
+    const threadColumns = (
+      db.prepare(`PRAGMA table_info(threads)`).all() as { name: string }[]
+    ).map((column) => column.name);
+    if (threadColumns.length > 0 && !threadColumns.includes("room")) {
+      db.exec(`ALTER TABLE threads ADD COLUMN room TEXT NOT NULL DEFAULT ''`);
+      db.exec(
+        `UPDATE threads SET room = COALESCE(
+           (SELECT room FROM conversations
+             WHERE conversations.session_id = threads.session_id), '')`,
+      );
+    }
 
     // `raw` arrived after `inbound_events` did, and a row without it cannot be
     // answered after a restart.
@@ -1751,21 +1773,36 @@ export class HexStore {
    * root, not the message: every later reply names the root, but only the first
    * one names the opening message.
    */
-  rememberThread(rootId: string, sessionId: string, at = this.now()): void {
+  rememberThread(
+    rootId: string,
+    sessionId: string,
+    room: string,
+    at = this.now(),
+  ): void {
+    /*
+     * Claimed by whoever gets there first, and never reassigned while it lives.
+     *
+     * The root comes off the incoming event's tags, which means it is chosen by
+     * whoever sent the message. Upserting let a stranger name the root of
+     * somebody else's live thread, have Hex open a run for them, and repoint
+     * that thread at it — so the next reply in it landed in the stranger's
+     * session. A thread is released by `forgetThread` when its run is, and is
+     * claimable again then; that is the only way it moves.
+     */
     this.db
       .prepare(
-        `INSERT INTO threads (root_id, session_id, at) VALUES (?, ?, ?)
-         ON CONFLICT(root_id) DO UPDATE SET session_id = excluded.session_id,
-                                            at = excluded.at`,
+        `INSERT INTO threads (root_id, session_id, room, at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(root_id) DO UPDATE SET at = excluded.at
+           WHERE threads.session_id = excluded.session_id`,
       )
-      .run(rootId, sessionId, at);
+      .run(rootId, sessionId, room, at);
   }
 
   /** The session a thread belongs to, if Hex is in that thread at all. */
-  threadSession(rootId: string): string | undefined {
+  threadSession(rootId: string, room: string): string | undefined {
     const row = this.db
-      .prepare(`SELECT session_id FROM threads WHERE root_id = ?`)
-      .get(rootId) as { session_id: string } | undefined;
+      .prepare(`SELECT session_id FROM threads WHERE root_id = ? AND room = ?`)
+      .get(rootId, room) as { session_id: string } | undefined;
     return row?.session_id;
   }
 
@@ -1775,8 +1812,8 @@ export class HexStore {
    * A binding exists only where a run was opened for that thread, so this is
    * "Hex is talking here", not "Hex saw this".
    */
-  threadIsOurs(rootId: string): boolean {
-    return this.threadSession(rootId) !== undefined;
+  threadIsOurs(rootId: string, room: string): boolean {
+    return this.threadSession(rootId, room) !== undefined;
   }
 
   /** Forget a thread's binding — its session is gone and must not be resumed. */

@@ -12,6 +12,7 @@ import { merge, Observable } from "rxjs";
 import { map as rxMap, filter as rxFilter } from "rxjs/operators";
 import type { NostrEvent } from "nostr-tools";
 import { nip10Root } from "./nip10.js";
+import { roomKey } from "./types.js";
 import {
   GroupMessageFactory,
   ReactionFactory,
@@ -104,7 +105,7 @@ export interface Nip29TransportOptions {
    * anything Hex wrote — so a thread Hex is already running looked like room
    * chatter and demanded the mention be typed again on every message.
    */
-  threadIsOurs?: (id: string) => boolean;
+  threadIsOurs?: (id: string, room: string) => boolean;
 }
 
 /**
@@ -192,9 +193,14 @@ export class Nip29Transport implements Transport {
       (inbound.replyToId !== undefined &&
         (this.ownMessageIds.has(inbound.replyToId) ||
           (this.options.isOwnMessage?.(inbound.replyToId) ?? false))) ||
-      (root !== undefined && (this.options.threadIsOurs?.(root) ?? false)) ||
+      (root !== undefined &&
+        (this.options.threadIsOurs?.(root, roomKey(inbound.room)) ?? false)) ||
       (inbound.replyToId !== undefined &&
-        (this.options.threadIsOurs?.(inbound.replyToId) ?? false));
+        (this.options.threadIsOurs?.(
+          inbound.replyToId,
+          roomKey(inbound.room),
+        ) ??
+          false));
 
     return {
       ...inbound,

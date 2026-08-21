@@ -27,6 +27,7 @@ import { retract } from "./retract.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
 import { loadEnvFile } from "./env-file.js";
 import type { TransportConfig } from "./config.js";
+import { roomKey } from "./transports/types.js";
 import type { Inbound } from "./transports/types.js";
 import { KIND_FILE_MESSAGE, Nip17Transport } from "./transports/nip17.js";
 import { Nip29Transport } from "./transports/nip29.js";
@@ -1132,7 +1133,7 @@ async function main(): Promise<void> {
               since: startedAt,
               // A kind 9 names no thread root, so the parent is the only
               // handle — and the store knows every message Hex has handled.
-              threadIsOurs: (id) => store.threadIsOurs(id),
+              threadIsOurs: (id, room) => store.threadIsOurs(id, room),
               isOwnMessage: (id) => store.isOwnRumor(id),
             })
           : undefined;
@@ -1404,8 +1405,9 @@ async function main(): Promise<void> {
                        */
                       rememberSaid: (id) => {
                         if (!inbound) return;
-                        const session = store.threadSession(inbound.id);
-                        if (session) store.rememberThread(id, session);
+                        const room = roomKey(inbound.room);
+                        const session = store.threadSession(inbound.id, room);
+                        if (session) store.rememberThread(id, session, room);
                       },
                       requestedBy: transcriptConfig.to[0],
                       selfPubkey: resolved.pubkey,
