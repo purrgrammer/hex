@@ -46,6 +46,8 @@ const RUNNER_PBT = `${TESTS}/runner.property.test.ts`;
 const QUIESCENCE_PBT = `${TESTS}/quiescence.property.test.ts`;
 const TRANSPORTS = `${TESTS}/thread-transports.test.ts`;
 const ROOM_TOOLS = `${TESTS}/room-tools.test.ts`;
+const HIJACK = `${TESTS}/thread-hijack.test.ts`;
+const CONFIG = `${TESTS}/config.test.ts`;
 
 type Status = "covered" | "partial" | "gap";
 
@@ -172,6 +174,33 @@ const COVERAGE: Coverage[] = [
       "thread-transports.test.ts for the three shapes, room-tools.test.ts for the answer a room sees — the one the spool never touches",
     ownerFiles: [TRANSPORTS, ROOM_TOOLS],
   },
+  {
+    id: "I15",
+    statement:
+      "a thread belongs to whoever claimed it first, and only answers for the room it was claimed in",
+    status: "covered",
+    owner:
+      "thread-hijack.test.ts — the routing table is writable by anyone, so both rules are security properties rather than tidiness",
+    ownerFiles: [HIJACK],
+  },
+  {
+    id: "I16",
+    statement:
+      "a retry is the same event as the attempt before it, so a redelivery is invisible",
+    status: "covered",
+    owner:
+      "outbound.test.ts stamps every attempt from the row; a relay that accepted and then dropped the socket is the case",
+    ownerFiles: [OUTBOUND],
+  },
+  {
+    id: "I17",
+    statement:
+      "spend is metered durably, per room, and counts turns rather than replies that landed",
+    status: "covered",
+    owner:
+      "runner.test.ts across a restart, plus config.test.ts for the concurrency cap a config that says nothing still gets",
+    ownerFiles: [RUNNER, CONFIG],
+  },
 ];
 
 /**
@@ -208,7 +237,7 @@ describe("the invariant coverage map", () => {
 
   it("names every invariant the plan set out", () => {
     const ids = new Set(COVERAGE.map((c) => c.id));
-    for (let i = 1; i <= 14; i++) expect(ids.has(`I${i}`)).toBe(true);
+    for (let i = 1; i <= 17; i++) expect(ids.has(`I${i}`)).toBe(true);
   });
 
   it("makes every gap say why", () => {
