@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { streamSession, streamUrl } from "../eve/stream.js";
+import { streamSession, streamTailIndex, streamUrl } from "../eve/stream.js";
 import type { EveEnvelope } from "../eve/types.js";
 
 const HOST = "http://127.0.0.1:2000";
@@ -136,5 +136,80 @@ describe("streamSession", () => {
     await expect(
       collect(body([], { status: 404, statusText: "Not Found" })),
     ).rejects.toThrow(/404/);
+  });
+});
+
+/**
+ * The tail without the stream.
+ *
+ * The one thing a consumer cannot work out for itself: hex's own cursor is
+ * written by its own reader, so "has this session moved past us" can only be
+ * answered by the side that stores the events.
+ */
+describe("streamTailIndex", () => {
+  /** A response with headers and a body that would never end. */
+  function probe(init: ResponseInit & { tailIndex?: number } = {}) {
+    const calls: { url: string; aborted: () => boolean }[] = [];
+    const impl = (async (url: string | URL, init2?: RequestInit) => {
+      const signal = init2?.signal;
+      calls.push({
+        url: String(url),
+        aborted: () => signal?.aborted === true,
+      });
+      return {
+        ok: (init.status ?? 200) < 400,
+        status: init.status ?? 200,
+        statusText: init.statusText ?? "OK",
+        headers: new Headers(
+          init.tailIndex === undefined
+            ? {}
+            : { "x-eve-stream-tail-index": String(init.tailIndex) },
+        ),
+        body: (async function* () {
+          await new Promise(() => {});
+        })(),
+      };
+    }) as unknown as typeof fetch;
+    return { impl, calls };
+  }
+
+  it("asks from where the caller is and reads the header", async () => {
+    const { impl, calls } = probe({ tailIndex: 41 });
+    expect(
+      await streamTailIndex({
+        host: HOST,
+        sessionId: SESSION,
+        from: 12,
+        fetchImpl: impl,
+      }),
+    ).toBe(41);
+    expect(calls[0]!.url).toBe(
+      `${HOST}/eve/v1/session/${SESSION}/stream?startIndex=12&includeTailIndex=1`,
+    );
+    // The endpoint is a live follow: a probe that left the body open would leak
+    // one hanging request per session per sweep.
+    expect(calls[0]!.aborted()).toBe(true);
+  });
+
+  it("says nothing rather than zero when the host names no tail", async () => {
+    const { impl } = probe();
+    expect(
+      await streamTailIndex({
+        host: HOST,
+        sessionId: SESSION,
+        fetchImpl: impl,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("says nothing on a status, which is not a stream that moved", async () => {
+    const { impl } = probe({ status: 503, statusText: "Unavailable" });
+    expect(
+      await streamTailIndex({
+        host: HOST,
+        sessionId: SESSION,
+        fetchImpl: impl,
+      }),
+    ).toBeUndefined();
   });
 });

@@ -434,8 +434,10 @@ describe("what counts as already being read", () => {
  *
  * The reader stays registered — so the sweep skips the session as "already
  * being read" — while the stream it claims to be reading moves on without it.
- * Gap detection is the tell: the stored cursor is ahead of anything this
- * process's reader delivered, and silence is not completion.
+ * The tell has to come from the RUNTIME: hex's stored cursor is written by the
+ * very reader whose mark it would be compared against, so it is never ahead of
+ * one and a drop looks exactly like a healthy follow. So: ask the stream where
+ * it has got to, and only about a reader that has gone quiet.
  */
 describe("a reader that stopped delivering", () => {
   let home: string;
@@ -454,10 +456,17 @@ describe("a reader that stopped delivering", () => {
   /**
    * `heldEve`, except that only the FIRST read is held: the forced reconcile is
    * itself a read, and a fake that held every one would hang it for a minute.
+   *
+   * A tail probe (`includeTailIndex=1`) is answered from `tail` in headers and
+   * counts as neither a read nor the held one — which is the endpoint's own
+   * behaviour, since the probe is a request whose body is thrown away.
    */
   function heldOnceEve() {
     const encoder = new TextEncoder();
     const reads: number[] = [];
+    const probes: number[] = [];
+    /** Where the run has actually got to, as only the runtime knows. */
+    const state = { tail: undefined as number | undefined };
     let open!: () => void;
     const opened = new Promise<void>((resolve) => (open = resolve));
     let release!: () => void;
@@ -472,9 +481,22 @@ describe("a reader that stopped delivering", () => {
           statusText: "OK",
           json: async () => ({ ok: true, sessionId: SESSION }),
         };
-      const from = Number(
-        new URL(String(url)).searchParams.get("startIndex") ?? 0,
-      );
+      const query = new URL(String(url)).searchParams;
+      const from = Number(query.get("startIndex") ?? 0);
+      if (query.get("includeTailIndex") === "1") {
+        probes.push(from);
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          headers: new Headers(
+            state.tail === undefined
+              ? {}
+              : { "x-eve-stream-tail-index": String(state.tail) },
+          ),
+          body: (async function* () {})(),
+        };
+      }
       reads.push(from);
       const hold = first;
       first = false;
@@ -500,16 +522,31 @@ describe("a reader that stopped delivering", () => {
       };
     }) as unknown as typeof fetch;
 
-    return { impl, reads, opened, release };
+    return { impl, reads, probes, state, opened, release };
   }
 
-  function server(eve: ReturnType<typeof heldOnceEve>) {
+  function server(
+    eve: ReturnType<typeof heldOnceEve>,
+    options?: { gapSilenceMs?: number; blind?: boolean },
+  ) {
+    const eveRuntime = new EveRuntime({ host: HOST, fetchImpl: eve.impl });
+    // A driver that cannot say where its stream is: the optional method absent,
+    // which is the only thing that tells the two cases apart.
+    const runtime = options?.blind
+      ? (Object.assign(Object.create(EveRuntime.prototype) as EveRuntime, {
+          ...eveRuntime,
+          tailIndex: undefined,
+        }) as never)
+      : eveRuntime;
     return new EveServer({
-      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
+      runtime,
       transport: transport() as never,
       drainQuietMs: 50,
       // The sweep is driven by hand here; a timer would race the assertions.
       sweepMs: 0,
+      // Zero unless a test is about the silence gate itself: a mark that only
+      // just moved is a reader keeping up, not a gap.
+      gapSilenceMs: options?.gapSilenceMs ?? 0,
       transcript: {
         agentPubkey: AGENT,
         slug: "hex",
@@ -523,13 +560,6 @@ describe("a reader that stopped delivering", () => {
     });
   }
 
-  /** Move the stored cursor the way a run carrying on without us would. */
-  function advanceTail(to: number) {
-    const record = store.transcriptFor(SESSION);
-    expect(record).toBeTruthy();
-    store.saveTranscript({ ...record!, streamIndex: to }, fenceFor(store));
-  }
-
   it("reports the gap and forces a read of the session anyway", async () => {
     const eve = heldOnceEve();
     const hex = server(eve);
@@ -537,14 +567,18 @@ describe("a reader that stopped delivering", () => {
     const working = hex.runTurn(inbound("m1", "do the long thing"));
     await eve.opened;
 
-    advanceTail(500);
+    // The run carried on without us. Nothing touches the stored cursor — no
+    // production path does, which is why the cursor cannot be the signal.
+    eve.state.tail = 500;
+    const rowBefore = store.transcriptFor(SESSION)?.streamIndex;
 
-    const gaps = hex.detectGaps();
+    const gaps = await hex.detectGaps();
     expect(gaps.length).toBe(1);
     expect(gaps[0]!.sessionId).toBe(SESSION);
     expect(gaps[0]!.tailIndex).toBe(500);
     expect(gaps[0]!.deliveredIndex).toBeLessThanOrEqual(CUT_OFF.length);
     expect(gaps[0]!.sinceMs).toBeGreaterThanOrEqual(0);
+    expect(store.transcriptFor(SESSION)?.streamIndex).toBe(rowBefore);
 
     // The reader is still registered, so the ordinary sweep would leave this
     // session alone forever. The gap sweep reads it regardless, and counts it.
@@ -570,18 +604,59 @@ describe("a reader that stopped delivering", () => {
     await working;
   });
 
-  it("says nothing about a follow that is keeping up", async () => {
+  /**
+   * The tail is ahead of the mark on every healthy turn — each delivered event
+   * is a relay round trip and the run keeps emitting during it. Without the
+   * silence gate the sweep would open a second reader on a working follow every
+   * few minutes, which is the one thing the publish ledger exists to prevent.
+   */
+  it("says nothing about a reader that is merely behind the tail", async () => {
+    const eve = heldOnceEve();
+    const hex = server(eve, { gapSilenceMs: 60_000 });
+
+    const working = hex.runTurn(inbound("m1", "do the long thing"));
+    await eve.opened;
+    eve.state.tail = 500;
+
+    expect(await hex.detectGaps()).toEqual([]);
+    // Not even asked: a mark that just moved settles it without the runtime.
+    expect(eve.probes).toEqual([]);
+
+    eve.release();
+    await working;
+  });
+
+  it("says nothing when the stream is where the reader left it", async () => {
     const eve = heldOnceEve();
     const hex = server(eve);
 
     const working = hex.runTurn(inbound("m1", "do the long thing"));
     await eve.opened;
 
-    expect(hex.detectGaps()).toEqual([]);
-    const before = eve.reads.length;
-    expect(await hex.sweepGaps()).toEqual([]);
-    expect(eve.reads.length).toBe(before);
-    expect(hex.gapsDetected).toBe(0);
+    // What the reader has delivered, as the runtime's own tail. Equal, not
+    // ahead: the two numbers are in the same index space, and an off-by-one
+    // here would report a gap on every quiet session.
+    eve.state.tail = 500;
+    const delivered = (await hex.detectGaps())[0]!.deliveredIndex;
+    eve.state.tail = delivered;
+
+    expect(await hex.detectGaps()).toEqual([]);
+
+    eve.release();
+    await working;
+  });
+
+  /** A runtime that cannot say where its stream is cannot be second-guessed. */
+  it("says nothing when the runtime cannot name its tail", async () => {
+    const eve = heldOnceEve();
+    const hex = server(eve, { blind: true });
+
+    const working = hex.runTurn(inbound("m1", "do the long thing"));
+    await eve.opened;
+    eve.state.tail = 500;
+
+    expect(await hex.detectGaps()).toEqual([]);
+    expect(eve.probes).toEqual([]);
 
     eve.release();
     await working;
@@ -596,8 +671,8 @@ describe("a reader that stopped delivering", () => {
     await eve.opened;
     eve.release();
     await working;
-    advanceTail(500);
+    eve.state.tail = 500;
 
-    expect(hex.detectGaps()).toEqual([]);
+    expect(await hex.detectGaps()).toEqual([]);
   });
 });

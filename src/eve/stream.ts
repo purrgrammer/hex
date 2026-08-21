@@ -109,3 +109,48 @@ export async function* streamSession(
     }
   }
 }
+
+/**
+ * Where the session's stream actually is, without reading it.
+ *
+ * The endpoint names the last stored event in `x-eve-stream-tail-index` when
+ * asked, so the tail is one request's headers: `startIndex` is set to what the
+ * caller already has so the body it aborts is empty. Bounded and non-throwing
+ * by the caller's choice — a runtime that cannot be reached has not told us
+ * anything, which is not the same as a stream that moved on.
+ */
+export async function streamTailIndex(options: {
+  host: string;
+  sessionId: string;
+  /** Where the asker already is, so the aborted body carries nothing. */
+  from?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}): Promise<number | undefined> {
+  const doFetch = options.fetchImpl ?? fetch;
+  const own = new AbortController();
+  const signals = [own.signal, AbortSignal.timeout(options.timeoutMs ?? 5_000)];
+  if (options.signal) signals.push(options.signal);
+  const url = streamUrl({
+    host: options.host,
+    sessionId: options.sessionId,
+    startIndex: options.from,
+    untilTail: true,
+  });
+  try {
+    const response = await doFetch(url, {
+      headers: { accept: "application/x-ndjson" },
+      signal: AbortSignal.any(signals),
+    });
+    if (!response.ok) return undefined;
+    const header = response.headers.get("x-eve-stream-tail-index");
+    // `Number(null)` is 0, which would read as "the stream is empty".
+    if (header === null) return undefined;
+    const raw = Number(header);
+    return Number.isSafeInteger(raw) ? raw : undefined;
+  } finally {
+    // The request is a live follow: left open it leaks a body per probe.
+    own.abort();
+  }
+}

@@ -170,6 +170,14 @@ export interface ServeOptions {
    * next restart — which is what happened, for eleven hours.
    */
   sweepMs?: number;
+  /**
+   * How long a registered reader may hand over nothing before it is doubted.
+   *
+   * A healthy follow trails the tail all the time — every event it delivers is
+   * a relay round trip, and the run keeps emitting during it — so a tail ahead
+   * of the mark is only a gap once the mark has also stopped moving.
+   */
+  gapSilenceMs?: number;
   log?: (line: string) => void;
   signal?: AbortSignal;
 }
@@ -177,8 +185,9 @@ export interface ServeOptions {
 /**
  * A followed session whose stream moved while the reader on it stood still.
  *
- * `tailIndex` is the stored cursor, `deliveredIndex` what this process's reader
- * has actually handed over, `sinceMs` how long that mark has been stuck.
+ * `tailIndex` is where the RUNTIME's stream is, `deliveredIndex` what this
+ * process's reader has actually handed over, `sinceMs` how long that mark has
+ * been stuck.
  */
 export interface GapReport {
   sessionId: string;
@@ -210,6 +219,15 @@ const DEFAULT_SWEEP_MS = 5 * 60 * 1000;
  * so without a deadline a reconcile inherits the run's whole remaining length.
  */
 const RECONCILE_MS = 60 * 1000;
+
+/**
+ * How long a reader may deliver nothing before the tail is asked about.
+ *
+ * Well past any single publish, which is what a healthy reader stalls on, and
+ * well short of the sweep's own period, so a real drop is caught on the first
+ * tick after it happens.
+ */
+const DEFAULT_GAP_SILENCE_MS = 90 * 1000;
 
 /**
  * Every tool id the bridge could ever serve, in the spelling a runtime uses.
@@ -497,24 +515,41 @@ export class EveServer {
   /**
    * Sessions whose stream moved while the reader on them delivered nothing.
    *
-   * The stored cursor only ever moves forward, and only a reader moves it, so a
-   * row ahead of this process's own mark means something else advanced the
-   * stream: the follow here is dropped, and silence is not completion. Pure —
-   * `sweepGaps` is the half that warns and reads.
+   * The tail is asked of the RUNTIME, not of the stored cursor: that cursor is
+   * only ever written by the same readers whose marks it would be compared
+   * against, so it can never be ahead of one and the comparison never fires.
+   * Two conditions, and both are needed — a healthy follow is often behind the
+   * tail while it publishes, so the mark must ALSO have stopped moving. Reads
+   * nothing but the deliveries and the runtime; `sweepGaps` is the half that
+   * warns and re-reads.
    */
-  detectGaps(): GapReport[] {
+  async detectGaps(): Promise<GapReport[]> {
+    const ask = this.options.runtime.tailIndex?.bind(this.options.runtime);
+    if (!ask) return [];
+    const silence = this.options.gapSilenceMs ?? DEFAULT_GAP_SILENCE_MS;
     const now = Date.now();
     const reports: GapReport[] = [];
     for (const [sessionId, mark] of this.deliveries) {
       if ((this.readers.get(sessionId) ?? 0) <= 0) continue;
-      const tail =
-        this.options.transcript.store.transcriptFor(sessionId)?.streamIndex;
+      const sinceMs = now - mark.at;
+      if (sinceMs < silence) continue;
+      let tail: number | undefined;
+      try {
+        tail = await ask(sessionId, mark.index);
+      } catch (error) {
+        // A runtime that cannot be asked has said nothing, and nothing is not
+        // a gap: one unreachable session must not stop the rest being checked.
+        this.log(
+          `[hex] could not ask where ${sessionId} has got to: ${message(error)}`,
+        );
+        continue;
+      }
       if (tail === undefined || tail <= mark.index) continue;
       reports.push({
         sessionId,
         tailIndex: tail,
         deliveredIndex: mark.index,
-        sinceMs: now - mark.at,
+        sinceMs,
       });
     }
     return reports;
@@ -530,7 +565,7 @@ export class EveServer {
    * writes fail loudly instead of forking the chain.
    */
   async sweepGaps(): Promise<GapReport[]> {
-    const gaps = this.detectGaps();
+    const gaps = await this.detectGaps();
     for (const gap of gaps) {
       this.gaps += 1;
       this.log(

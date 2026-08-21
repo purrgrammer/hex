@@ -106,6 +106,21 @@ export interface Runtime {
     options: { startIndex?: number; signal?: AbortSignal },
   ): AsyncIterable<IndexedRuntimeEvent>;
 
+  /**
+   * The index of the last event the stream has stored, without reading it.
+   *
+   * The only honest answer to "has this session moved while our reader stood
+   * still": hex's own cursor is written by that same reader, so comparing them
+   * can never disagree. Optional — a runtime that cannot say leaves a dropped
+   * follow invisible until the next restart, so a driver should implement it.
+   * `undefined` means "could not say", never "nothing there".
+   */
+  tailIndex?(
+    session: string,
+    /** Where the asker already is, so a driver need not fetch what it has. */
+    from?: number,
+  ): Promise<number | undefined>;
+
   /** Absent when the runtime cannot say. The snapshot is then not published. */
   describe?(): Promise<RuntimeDescription | undefined>;
 

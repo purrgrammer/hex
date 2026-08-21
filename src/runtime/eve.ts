@@ -10,7 +10,7 @@
  * not the code inside it.
  */
 
-import { streamSession } from "../eve/stream.js";
+import { streamSession, streamTailIndex } from "../eve/stream.js";
 import { readAgentInfo } from "../eve/info.js";
 import type {
   IndexedRuntimeEvent,
@@ -116,6 +116,16 @@ export class EveRuntime implements Runtime {
       sessionId: session,
       startIndex: options.startIndex,
       signal: options.signal,
+      fetchImpl: this.options.fetchImpl,
+    });
+  }
+
+  async tailIndex(session: string, from?: number): Promise<number | undefined> {
+    return await streamTailIndex({
+      host: this.options.host,
+      sessionId: session,
+      from,
+      signal: this.options.signal,
       fetchImpl: this.options.fetchImpl,
     });
   }
