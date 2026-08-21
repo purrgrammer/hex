@@ -492,3 +492,100 @@ describe("grants at the call, not just the listing", () => {
     expect(result.output).toBe("RAN");
   });
 });
+
+describe("publishing from inside a room", () => {
+  /** A publish surface that records what actually reached it. */
+  function publisher(took: Record<string, unknown>[]) {
+    return {
+      list: () => [
+        { name: "nostr.publish", description: "publish", parameters: {} },
+        { name: "nostr.sign", description: "sign", parameters: {} },
+      ],
+      handles: (name: string) =>
+        name === "nostr.publish" || name === "nostr.sign",
+      call: async (_name: string, args: Record<string, unknown>) => {
+        took.push(args);
+        return { ok: true, output: "PUBLISHED" };
+      },
+    };
+  }
+
+  function inRoom(took: Record<string, unknown>[]) {
+    return new RoomTools({
+      transport: transport(),
+      incoming: INBOUND,
+      publish: publisher(took) as never,
+    });
+  }
+
+  it("refuses to answer the room on the open network", async () => {
+    // Measured, not imagined: asked a question in a private channel and told
+    // to "post it here", a run signed the answer as a bare kind 9 and
+    // published it to three public relays.
+    const took: Record<string, unknown>[] = [];
+    const result = await inRoom(took).call({
+      name: "nostr.publish",
+      arguments: { kind: 9, content: "the answer" },
+    });
+    expect(result.ok).toBe(false);
+    // The refusal is the teaching moment: it names the door that was there.
+    expect(result.output).toContain(RESPOND_TOOL);
+    expect(took).toEqual([]);
+  });
+
+  it("refuses a kind the model invented", async () => {
+    // One of the three real leaks was kind 9411, which is not a kind. No
+    // denylist can enumerate what a model might make up, which is the whole
+    // reason this is an allowlist.
+    const took: Record<string, unknown>[] = [];
+    const result = await inRoom(took).call({
+      name: "nostr.publish",
+      arguments: { kind: 9411, content: "found it: the fix is …" },
+    });
+    expect(result.ok).toBe(false);
+    expect(took).toEqual([]);
+  });
+
+  it("bounds signing exactly as it bounds publishing", async () => {
+    // A signed event is one relay call from being published by whoever holds
+    // it, so a tool that signs what it will not publish is a loophole.
+    const took: Record<string, unknown>[] = [];
+    const result = await inRoom(took).call({
+      name: "nostr.sign",
+      arguments: { kind: 9, content: "the answer" },
+    });
+    expect(result.ok).toBe(false);
+    expect(took).toEqual([]);
+  });
+
+  it("still files the work the room asked for", async () => {
+    // The point is not to stop an agent publishing. A patch, an issue and the
+    // statuses that close them are addressed to a repository, are public
+    // whoever files them, and are how the work gets handed in at all.
+    const took: Record<string, unknown>[] = [];
+    const tools = inRoom(took);
+    for (const kind of [1617, 1621, 1631]) {
+      const result = await tools.call({
+        name: "nostr.publish",
+        arguments: { kind, content: "work" },
+      });
+      expect(result.output).toBe("PUBLISHED");
+    }
+    expect(took).toHaveLength(3);
+  });
+
+  it("leaves a run with no room alone", async () => {
+    // A control-plane run has nowhere to speak and no chat tool to be
+    // redirected to. None of this is about it.
+    const took: Record<string, unknown>[] = [];
+    const tools = new RoomTools({
+      transport: transport(),
+      publish: publisher(took) as never,
+    });
+    const result = await tools.call({
+      name: "nostr.publish",
+      arguments: { kind: 1, content: "a note" },
+    });
+    expect(result.output).toBe("PUBLISHED");
+  });
+});
