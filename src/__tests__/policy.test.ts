@@ -39,15 +39,33 @@ function inbound(overrides: Partial<Inbound> = {}): Inbound {
 }
 
 describe("mentionsName", () => {
-  it("matches on a word boundary, case-insensitively", () => {
-    expect(mentionsName("Hex, help", ["hex"])).toBe(true);
-    expect(mentionsName("ask HEX about it", ["hex"])).toBe(true);
+  it("refuses a bare name, because nobody types @ by accident", () => {
+    /**
+     * The rule: a mention is EXPLICIT or it is not a mention.
+     *
+     * Saying the bare name used to count, and in a room named after the agent
+     * that means ordinary conversation about it starts a paid turn. This is not
+     * hypothetical — "hex is just a bot you run on your computer or what?" was
+     * answered, at cost, by somebody talking ABOUT Hex rather than to it.
+     */
+    expect(mentionsName("Hex, help", ["hex"])).toBe(false);
+    expect(mentionsName("ask HEX about it", ["hex"])).toBe(false);
+    expect(
+      mentionsName("hex is just a bot you run on your computer or what?", [
+        "hex",
+      ]),
+    ).toBe(false);
+  });
+
+  it("matches the @ form, case-insensitively", () => {
+    expect(mentionsName("@Hex, help", ["hex"])).toBe(true);
+    expect(mentionsName("ask @HEX about it", ["hex"])).toBe(true);
   });
 
   it("does not match inside a longer word", () => {
-    // "hexadecimal" is not a summons.
-    expect(mentionsName("print it in hexadecimal", ["hex"])).toBe(false);
-    expect(mentionsName("vertex please", ["hex"])).toBe(false);
+    // "@hexadecimal" is not a summons either.
+    expect(mentionsName("print it in @hexadecimal", ["hex"])).toBe(false);
+    expect(mentionsName("ping @vertex please", ["hex"])).toBe(false);
   });
 
   it("matches an @-prefixed token, which \\b cannot", () => {
@@ -65,8 +83,14 @@ describe("mentionsName", () => {
     expect(mentionsName("@hexagon ping", ["hex"])).toBe(false);
   });
 
-  it("does not treat a bare name as an @ mention when the token spells the @", () => {
+  it("reads a token the same whether or not it spells the @", () => {
+    // Both configure the NAME; the text is what has to carry the `@`. An
+    // operator cannot accidentally configure the loose form, because there
+    // isn't one.
     expect(mentionsName("hex", ["@hex"])).toBe(false);
+    expect(mentionsName("hex", ["hex"])).toBe(false);
+    expect(mentionsName("@hex", ["@hex"])).toBe(true);
+    expect(mentionsName("@hex", ["hex"])).toBe(true);
   });
 
   it("is false with no configured names", () => {

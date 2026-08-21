@@ -14,25 +14,32 @@ import type { Inbound } from "./transports/types.js";
 /**
  * Does this text address Hex by name?
  *
- * Word-boundary and case-insensitive, because "hexadecimal" is not a summons.
- * The boundary is asserted with lookarounds rather than `\b`, since a token may
- * start with `@` and `\b@hex` never matches — `@` is already a non-word
- * character.
+ * A mention has to be EXPLICIT: the text carries `@name`, or it is not a
+ * summons. Saying the bare name used to count, and in a room named after the
+ * agent that means ordinary conversation about it starts a paid turn — "hex is
+ * just a bot you run on your computer or what?" was answered, at cost, by a
+ * person who was talking about Hex rather than to it. Nobody types `@` by
+ * accident.
  *
- * A BARE token matches with or without an `@`: someone who configures
- * `["hex"]` and then gets `@hex` in the room must not be met with silence,
- * which is the least debuggable failure this agent has. A token that spells the
- * `@` out is taken at its word and matches only the @-form.
+ * A configured token is the NAME, with or without the `@` spelled out; either
+ * way the text needs one. So `["hex"]` and `["@hex"]` mean the same thing, and
+ * an operator cannot accidentally configure the loose form.
+ *
+ * Word-boundary and case-insensitive, because `@hexagon` is not a summons
+ * either. The boundary is asserted with lookarounds rather than `\b`, since
+ * `\b@hex` never matches — `@` is already a non-word character.
+ *
+ * This is one of three ways to reach Hex, and the narrowest. A `p` tag naming
+ * it counts (`tagsSelf`), which is what every client's mention picker writes;
+ * and a reply in a thread Hex is already running counts, which is what makes a
+ * conversation a conversation.
  */
 export function mentionsName(text: string, mentions: string[]): boolean {
   return mentions.some((token) => {
-    const trimmed = token.trim();
-    if (!trimmed) return false;
-    const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = trimmed.startsWith("@")
-      ? new RegExp(`(?<![\\w@])${escaped}(?![\\w])`, "iu")
-      : new RegExp(`(?<![\\w@])@?${escaped}(?![\\w])`, "iu");
-    return pattern.test(text);
+    const name = token.trim().replace(/^@+/, "");
+    if (!name) return false;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?<![\\w@])@${escaped}(?![\\w])`, "iu").test(text);
   });
 }
 
