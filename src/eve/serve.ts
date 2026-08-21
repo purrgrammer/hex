@@ -28,6 +28,7 @@
  * its job — it writes down what happened.
  */
 
+import { nip19 } from "nostr-tools";
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
 import { Spool } from "../outbound.js";
 import { asRecord, payload, stringField } from "./types.js";
@@ -317,6 +318,28 @@ const SUBJECT_TAGS = new Set(["a", "e", "p", "r", "i"]);
 export function refusesWork(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
   return /\b4\d\d\b/.test(text);
+}
+
+/**
+ * A message from someone the run has not been told about, said in their name.
+ *
+ * A thread is one session whoever is speaking, so in a group the second person
+ * to answer arrives on a run grounded entirely in the first: with nothing said,
+ * their words read as the same person changing their mind. `open` has a context
+ * door for this and `send` has none, so the only channel left is the message
+ * itself — and a `nostr:` reference is one the runtime can resolve to a name
+ * with the tools it already has.
+ *
+ * Only when the speaker is someone else. The ordinary case is one person in
+ * their own session, and prefixing every line of that would be noise.
+ */
+export function attributed(
+  text: string,
+  author: string,
+  owner: string | undefined,
+): string {
+  if (owner === undefined || owner === author) return text;
+  return `nostr:${nip19.npubEncode(author)} says:\n\n${text}`;
 }
 
 function subjectsOf(inbound: Inbound, addressed: string[] = []): string[][] {
@@ -1748,7 +1771,16 @@ export class EveServer {
       boundary = await this.drain(conversation);
       if (host) this.options.tools?.bridge.bind(conversation.sessionId, host);
       try {
-        await this.sendMessage(conversation.sessionId, inbound.text);
+        await this.sendMessage(
+          conversation.sessionId,
+          attributed(
+            inbound.text,
+            inbound.author,
+            this.options.transcript.store.conversationForSession(
+              conversation.sessionId,
+            )?.peer,
+          ),
+        );
         this.log(
           `[hex] ${short(peer)} → continuing eve session ${conversation.sessionId}`,
         );

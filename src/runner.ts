@@ -131,6 +131,28 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Which lane a message belongs to: the conversation, as the store keys it.
+ *
+ * Not the session, even though a lane IS a session's serialisation domain —
+ * the first message of a conversation has no session yet, and keying on one
+ * would put it in a different lane from the control events that arrive about
+ * it moments later. `conversationForSession` is the other half: a control
+ * lands on the same key.
+ *
+ * A bound thread reaches its own session whoever is speaking, so in a group
+ * two people answering in one thread are one session and must be one lane.
+ * Keyed on the author alone they were two, and the runner dispatched both at
+ * once: two turns sent into one session, two readers of one stream.
+ */
+export function laneForMessage(inbound: Inbound, store: HexStore): string {
+  const root = inbound.threadRoot ?? inbound.replyToId;
+  const session = root ? store.threadSession(root) : undefined;
+  const owner = session ? store.conversationForSession(session) : undefined;
+  if (owner) return `${owner.peer}\u0000${owner.room}`;
+  return `${inbound.author}\u0000${roomKey(inbound.room)}`;
+}
+
 export class Runner {
   private readonly lanes = new Map<string, Lane>();
   /** Room key -> the seconds at which a reply landed inside this hour. */
@@ -202,19 +224,6 @@ export class Runner {
       : { inTurn: false };
   }
 
-  /**
-   * Which lane a message belongs to: the conversation, as the store keys it.
-   *
-   * Not the session, even though a lane IS a session's serialisation domain —
-   * the first message of a conversation has no session yet, and keying on one
-   * would put it in a different lane from the control events that arrive about
-   * it moments later. `conversationForSession` is the other half: a control
-   * lands on the same key.
-   */
-  private laneForMessage(inbound: Inbound): string {
-    return `${inbound.author}\u0000${roomKey(inbound.room)}`;
-  }
-
   /** Which lane an instruction belongs to. */
   private laneForControl(control: SessionControl): string {
     const store = this.options.store;
@@ -277,7 +286,7 @@ export class Runner {
       return;
     }
 
-    const key = this.laneForMessage(inbound);
+    const key = laneForMessage(inbound, this.options.store);
     const lane = this.lane(key);
     const event = canonicalEvent(queued.event, "message");
     const laneState = this.state(lane);

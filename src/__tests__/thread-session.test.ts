@@ -16,8 +16,12 @@ import { join } from "node:path";
 
 import { HexStore } from "../store.js";
 import { replyTargetOf, threadRootOf } from "../transports/concord.js";
-import { refusesWork } from "../eve/serve.js";
+import { nip19 } from "nostr-tools";
+
+import { attributed, refusesWork } from "../eve/serve.js";
 import { whyIgnored } from "../policy-table.js";
+import { laneForMessage } from "../runner.js";
+import { roomKey } from "../transports/types.js";
 import { KIND_COMMENT, KIND_MESSAGE } from "../concord/kinds.js";
 import {
   carrierFor,
@@ -30,6 +34,7 @@ const ROOT = "8f44c425c3".padEnd(64, "0");
 const REPLY = "967e23e9f2".padEnd(64, "0");
 const OPERATOR = "7fa56f5d69".padEnd(64, "0");
 const SESSION = "wrun_01M0J1WS9FNEYKWSP620B9VJF4";
+const OTHER_SPEAKER = "aa".repeat(32);
 
 /** Exactly the tags the ignored message carried, in its order. */
 const asItArrived = {
@@ -230,5 +235,99 @@ describe("a message crossing the durable queue", () => {
   it("falls back to the parent only when the protocol names no root", () => {
     const { threadRoot: _root, ...unthreaded } = inbound;
     expect(messageEvent(unthreaded, 2).route.thread).toBe(inbound.replyToId);
+  });
+});
+/**
+ * A lane is a session's serialisation domain, and a thread is what reaches a
+ * session — so a thread is what the lane has to be named by.
+ *
+ * In a group two people answering in one thread are one session. Keyed on the
+ * author, they were two lanes, and the runner is free to dispatch two lanes at
+ * once: two turns sent into one session and two readers of one stream, which
+ * publishes its turns twice. Keyed on the thread's own conversation, a control
+ * for that session lands on the same key too.
+ */
+describe("two people, one thread", () => {
+  let home: string;
+  let store: HexStore;
+
+  const ROOM = { transport: "concord" as const, id: "community:channel" };
+  const OTHER = "aa".repeat(32);
+  const lane = (peer: string) => `${peer}\u0000${roomKey(ROOM)}`;
+
+  const reply = (author: string, root?: string) =>
+    ({
+      id: "cc".repeat(32),
+      author,
+      text: "and another thing",
+      createdAt: 1,
+      room: ROOM,
+      addressesSelf: true,
+      replyToId: "dd".repeat(32),
+      ...(root ? { threadRoot: root } : {}),
+      event: {
+        id: "cc".repeat(32),
+        pubkey: author,
+        kind: KIND_COMMENT,
+        tags: [],
+        content: "",
+        created_at: 1,
+        sig: "",
+      },
+    }) as never;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "thread-lane-"));
+    store = HexStore.open(join(home, "data.db"));
+    store.rememberConversation(OPERATOR, roomKey(ROOM), SESSION, 1);
+    store.rememberThread(ROOT, SESSION, 1);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("puts every speaker in the thread on one lane", () => {
+    expect(laneForMessage(reply(OTHER, ROOT), store)).toBe(
+      laneForMessage(reply(OPERATOR, ROOT), store),
+    );
+  });
+
+  it("names that lane after the session's own conversation", () => {
+    // The same key a control for this session resolves to.
+    expect(laneForMessage(reply(OTHER, ROOT), store)).toBe(lane(OPERATOR));
+  });
+
+  it("keeps an unbound thread on its own speaker's lane", () => {
+    // Nothing to serialise against yet: no session, so no shared stream, and
+    // the room names itself the way the store keys a fresh conversation.
+    expect(laneForMessage(reply(OTHER, "ee".repeat(32)), store)).toBe(
+      lane(OTHER),
+    );
+  });
+});
+/**
+ * One session, two speakers — so the session has to be told which is talking.
+ *
+ * The run is grounded in whoever opened it. A second person answering in the
+ * same thread reaches the same session, and with nothing said their words read
+ * as the first person changing their mind.
+ */
+describe("a second speaker in someone else's run", () => {
+  it("says who is talking, as something the runtime can resolve", () => {
+    const said = attributed("and another thing", OTHER_SPEAKER, OPERATOR);
+    expect(said).toContain("and another thing");
+    expect(said).toContain(`nostr:${nip19.npubEncode(OTHER_SPEAKER)}`);
+  });
+
+  it("leaves the owner's own words exactly as they were", () => {
+    // The ordinary case is one person in their own session; prefixing every
+    // line of that would be noise the model has to read past.
+    expect(attributed("carry on", OPERATOR, OPERATOR)).toBe("carry on");
+  });
+
+  it("says nothing when the session has no owner on record", () => {
+    expect(attributed("carry on", OTHER_SPEAKER, undefined)).toBe("carry on");
   });
 });

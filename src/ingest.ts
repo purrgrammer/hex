@@ -59,21 +59,48 @@ export interface EventRoute {
   thread?: string;
 }
 
-/** A message's canonical fields. No transport payloads, ever. */
-export interface MessagePayload {
-  text: string;
-  /** Set by the TRANSPORT, which is the only layer that knows the tag shape. */
-  addressesSelf: boolean;
-  replyToId?: string;
-  /**
-   * The thread this hangs under, when the protocol names one.
-   *
-   * Distinct from `replyToId`, which is the immediate parent. Only the root is
-   * common to every message in a thread, so it — not the parent — is what
-   * "which conversation is this" has to be keyed on. Dropping it here once
-   * meant every reply in a thread opened a new session.
-   */
-  threadRoot?: string;
+/**
+ * What the row carries about a message OUTSIDE its payload: the identity, the
+ * route, the clock, and the event itself.
+ */
+type CarriedByTheRow = "id" | "author" | "createdAt" | "room" | "event";
+
+/**
+ * A message's canonical fields. No transport payloads, ever.
+ *
+ * Derived from `Inbound` rather than restated, so a field added there does not
+ * compile until someone has decided whether the queue carries it. `threadRoot`
+ * was added and silently not carried, and since the queue is the only path a
+ * message takes to the runtime, every reply arrived with no thread.
+ */
+export type MessagePayload = Omit<Inbound, CarriedByTheRow>;
+
+/**
+ * Every payload field, named once.
+ *
+ * The type alone was not enough: an OPTIONAL field added to `Inbound` widens
+ * `MessagePayload` without breaking a hand-written literal that omits it, which
+ * is exactly the shape `threadRoot` had. `Required` makes the manifest
+ * exhaustive, so the new field has to be listed here before anything compiles,
+ * and both directions of the round trip are driven off this one list.
+ */
+const PAYLOAD_FIELDS: { [K in keyof Required<MessagePayload>]: true } = {
+  text: true,
+  addressesSelf: true,
+  replyToId: true,
+  threadRoot: true,
+};
+
+const PAYLOAD_KEYS = Object.keys(PAYLOAD_FIELDS) as (keyof MessagePayload)[];
+
+/** The carried fields, copied off a message. Undefined is left out, not stored. */
+function payloadOf(inbound: Inbound): MessagePayload {
+  const payload: Record<string, unknown> = {};
+  for (const key of PAYLOAD_KEYS) {
+    const value = inbound[key];
+    if (value !== undefined) payload[key] = value;
+  }
+  return payload as MessagePayload;
 }
 
 /** A control event's canonical fields: the instruction, already authorised. */
@@ -146,12 +173,7 @@ export function messageEvent(
   inbound: Inbound,
   observedAt = now(),
 ): CanonicalEvent {
-  const payload: MessagePayload = {
-    text: inbound.text,
-    addressesSelf: inbound.addressesSelf,
-    replyToId: inbound.replyToId,
-    threadRoot: inbound.threadRoot,
-  };
+  const payload = payloadOf(inbound);
   return {
     v: HEX_EVENT_VERSION,
     type: "message",
@@ -208,6 +230,12 @@ export function controlEvent(
 export function carrierFor(row: QueuedInbound): Inbound | undefined {
   if (row.raw === undefined || row.raw === null) return undefined;
   const payload = (row.payload ?? {}) as Partial<MessagePayload>;
+  const carried: Record<string, unknown> = {};
+  // Off the manifest, so a field the row carries cannot be forgotten here
+  // either. An absent one stays absent rather than becoming an explicit
+  // undefined, which a spread would turn into a present key.
+  for (const key of PAYLOAD_KEYS)
+    if (payload[key] !== undefined) carried[key] = payload[key];
   return {
     id: row.id,
     author: row.route.peer,
@@ -219,12 +247,7 @@ export function carrierFor(row: QueuedInbound): Inbound | undefined {
       ...(row.route.relay !== undefined ? { relay: row.route.relay } : {}),
     },
     addressesSelf: payload.addressesSelf ?? false,
-    ...(payload.replyToId !== undefined
-      ? { replyToId: payload.replyToId }
-      : {}),
-    ...(payload.threadRoot !== undefined
-      ? { threadRoot: payload.threadRoot }
-      : {}),
+    ...carried,
     event: row.raw,
   } as unknown as Inbound;
 }
