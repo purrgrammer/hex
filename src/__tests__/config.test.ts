@@ -467,3 +467,19 @@ describe("a config that still names mentions", () => {
     expect(() => parseConfig(minimal)).not.toThrow();
   });
 });
+
+/**
+ * The prompt has one home, and it is not here.
+ *
+ * A definition's content is "the system prompt itself — what the agent was
+ * told". A copy in a config file is a second claim about one fact, and this
+ * deployment had three of them, all different, with the model reading none of
+ * the two being published.
+ */
+describe("a config that still names instructions", () => {
+  it("is refused, and says where the prompt lives now", () => {
+    expect(() =>
+      parseConfig({ ...minimal, instructions: "./instructions.md" }),
+    ).toThrow(/lives with the runtime/);
+  });
+});

@@ -5,7 +5,6 @@
       "env": "HEX_NSEC"
     }
   },
-  "instructions": "./instructions.md",
   "mentions": [
     "hex",
     "@hex"

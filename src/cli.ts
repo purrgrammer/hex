@@ -61,6 +61,7 @@ import { GitTools } from "./tools/git-tools.js";
 import { NgitTools } from "./tools/ngit-tools.js";
 import { Ingestor } from "./ingest.js";
 import { Runner } from "./runner.js";
+import { readAgentInfo } from "./eve/info.js";
 
 const USAGE = `hex — a transport-agnostic agent for Nostr groups
 
@@ -976,13 +977,29 @@ async function main(): Promise<void> {
           `to      ${transcriptConfig.to.map((p) => nip19.npubEncode(p).slice(0, 16) + "…").join(", ")}`,
         );
 
-        if (transcriptConfig.announce)
+        if (transcriptConfig.announce) {
+          /*
+           * The prompt comes from the RUNTIME, which is the only thing that
+           * knows it.
+           *
+           * A definition's content is defined as "the system prompt itself —
+           * what the agent was told", so a hand-maintained copy in a config
+           * file is a second claim about one fact. There were three of them
+           * here and all three differed; the model had read none of the two
+           * that were being published. Asked rather than configured, there is
+           * nothing to drift.
+           */
+          const info = await readAgentInfo({ host }).catch(() => undefined);
           await transcript.announce({
             name: config.profile.name ?? transcriptConfig.slug,
             about: config.profile.about,
             picture: config.profile.picture,
-            instructions: loaded.instructions || undefined,
+            // Absent rather than guessed. A prompt is published whole or left
+            // empty; a stale one read as current is worse than none.
+            instructions: info?.instructions,
+            tools: info?.tools,
           });
+        }
 
         // Interrupting a follow is not the session ending — Eve keeps running —
         // so the head says `aborted`, which is "nobody is watching any more".

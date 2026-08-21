@@ -10,8 +10,6 @@ export interface LoadedConfig {
   path: string;
   /** Its directory — every relative path in the config resolves against this. */
   baseDir: string;
-  /** `instructions` file contents, or "" when none was configured. */
-  instructions: string;
 }
 
 export async function loadConfig(path: string): Promise<LoadedConfig> {
@@ -28,19 +26,5 @@ export async function loadConfig(path: string): Promise<LoadedConfig> {
   const config = parseConfigText(text);
   const baseDir = dirname(full);
 
-  let instructions = "";
-  if (config.instructions) {
-    const instructionsPath = resolve(baseDir, config.instructions);
-    try {
-      instructions = await readFile(instructionsPath, "utf8");
-    } catch (error) {
-      throw new ConfigError(
-        `instructions file cannot be read (${instructionsPath}): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-  }
-
-  return { config, path: full, baseDir, instructions };
+  return { config, path: full, baseDir };
 }

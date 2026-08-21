@@ -272,8 +272,6 @@ export interface StateConfig {
 
 export interface HexConfig {
   identity: { signer: SignerConfig };
-  /** Path to the instructions file, resolved against the config file's dir. */
-  instructions?: string;
   /** Names Hex answers to, beyond a p-tag. */
   relays: RelayRoles;
   profile: ProfileConfig;
@@ -859,6 +857,25 @@ function parseTransports(value: unknown): TransportConfig[] {
  * ignoring it would silently narrow who can reach an agent, and an operator
  * should hear that from the config rather than from a quiet room.
  */
+/**
+ * `instructions` is gone: the runtime holds the prompt, and only it knows.
+ *
+ * A definition's content is "the system prompt itself — what the agent was
+ * told", so a copy in a config file is a second claim about one fact. There
+ * were three of them in this deployment and all three differed; the model had
+ * read none of the two being published. Asked of the runtime instead, there is
+ * nothing to drift.
+ */
+function refuseInstructions(value: unknown): void {
+  if (value === undefined) return;
+  throw new ConfigError(
+    "instructions is no longer a setting: the prompt lives with the runtime " +
+      "that uses it, and Hex asks for it rather than keeping a copy that can " +
+      "go stale. Remove the key; put the prompt in the runtime's own " +
+      "instructions file.",
+  );
+}
+
 function refuseMentions(value: unknown): void {
   if (value === undefined) return;
   throw new ConfigError(
@@ -970,6 +987,8 @@ export function parseConfig(input: unknown): HexConfig {
     raw,
     [
       "identity",
+      // Kept in the list so a config that still names it gets the specific
+      // refusal below rather than a generic "unknown key".
       "instructions",
       // Kept in the list on purpose: a config that still names it gets the
       // specific refusal below rather than a generic "unknown key".
@@ -989,6 +1008,7 @@ export function parseConfig(input: unknown): HexConfig {
   );
 
   refuseMentions(raw.mentions);
+  refuseInstructions(raw.instructions);
 
   const identity = requireRecord(raw.identity, "identity");
   rejectUnknown(identity, ["signer"], "identity");
@@ -1035,7 +1055,6 @@ export function parseConfig(input: unknown): HexConfig {
 
   const config: HexConfig = {
     identity: { signer: parseSigner(identity.signer) },
-    instructions: optionalString(raw.instructions, "instructions"),
     relays: parseRelays(raw.relays),
     profile: parseProfile(raw.profile),
     limits,

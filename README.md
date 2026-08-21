@@ -5,8 +5,9 @@ group, and it answers there. Every run is published as signed events, so what it
 did is readable afterwards — and verifiable by anyone.
 
 Hex is the Nostr half of an agent: one key, one config, three transports, and a
-durable queue between the room and the work. The model runs elsewhere. Hex is
-what the runtime has no opinion about.
+durable queue between the room and the work. The loop runs in a runtime beside
+it — `agent/` in this repo defines that agent; `src/` is the gateway. Hex is what
+the runtime has no opinion about.
 
 ```bash
 export HEX_NSEC=nsec1…
@@ -21,13 +22,13 @@ websockets open — so it belongs on a host that can keep one alive.
 
 ## What it does
 
-| | |
-| --- | --- |
-| **Reaches** | NIP-17 private messages · NIP-29 relay groups · Concord communities |
-| **Answers** | one session per thread, one turn at a time, metered per room |
+|               |                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------- |
+| **Reaches**   | NIP-17 private messages · NIP-29 relay groups · Concord communities                         |
+| **Answers**   | one session per thread, one turn at a time, metered per room                                |
 | **Publishes** | signed transcripts — a turn per message, live deltas, a head that says where the run stands |
-| **Controls** | start, answer, steer, stop, compact or clear a session over kind 1779 |
-| **Survives** | a killed process, a relay that lies, a message served four times |
+| **Controls**  | start, answer, steer, stop, compact or clear a session over kind 1779                       |
+| **Survives**  | a killed process, a relay that lies, a message served four times                            |
 
 ## Addressing
 
@@ -60,28 +61,28 @@ machine share nothing. One writer at a time, enforced by an expiring lease.
 
 ## Commands
 
-| | |
-| --- | --- |
-| `hex whoami` | resolve the signer, print pubkey and npub |
-| `hex check` | validate the config and dial every relay in every role |
-| `hex announce` | publish kind 0, 10002 and 10050 from config |
-| `hex join` | request to join the configured NIP-29 groups |
-| `hex concord` | accept waiting invites, list communities and channels |
-| `hex send` · `hex dm` | say something unprompted |
-| `hex eve <session>` | follow one runtime session and publish it |
-| `hex serve` | answer messages, publishing each run as it happens |
-| `hex stop` | retire sessions and close their heads |
-| `hex rm` | ask relays to forget events Hex published |
+|                       |                                                        |
+| --------------------- | ------------------------------------------------------ |
+| `hex whoami`          | resolve the signer, print pubkey and npub              |
+| `hex check`           | validate the config and dial every relay in every role |
+| `hex announce`        | publish kind 0, 10002 and 10050 from config            |
+| `hex join`            | request to join the configured NIP-29 groups           |
+| `hex concord`         | accept waiting invites, list communities and channels  |
+| `hex send` · `hex dm` | say something unprompted                               |
+| `hex eve <session>`   | follow one runtime session and publish it              |
+| `hex serve`           | answer messages, publishing each run as it happens     |
+| `hex stop`            | retire sessions and close their heads                  |
+| `hex rm`              | ask relays to forget events Hex published              |
 
 ## Tools
 
-| | |
-| --- | --- |
-| `chat.respond` `chat.react` | speak in the room, acknowledge a message |
-| `chat.who` `chat.history` | who is asking, and what was said before |
-| `nostr.help` `nostr.req` `nostr.resolve` | read the spec, query relays, resolve an entity |
-| `nostr.publish` `nostr.sign` `nostr.rm` | write to Nostr — off unless configured |
-| `git.*` | NIP-34 issues, patches, state, proposals, merge |
+|                                          |                                                 |
+| ---------------------------------------- | ----------------------------------------------- |
+| `chat.respond` `chat.react`              | speak in the room, acknowledge a message        |
+| `chat.who` `chat.history`                | who is asking, and what was said before         |
+| `nostr.help` `nostr.req` `nostr.resolve` | read the spec, query relays, resolve an entity  |
+| `nostr.publish` `nostr.sign` `nostr.rm`  | write to Nostr — off unless configured          |
+| `git.*`                                  | NIP-34 issues, patches, state, proposals, merge |
 
 Writing tools are absent unless `tools.publish` says so, and some kinds stay
 refused until the operator names them. A proposal is filed once: a durable ledger
@@ -92,10 +93,21 @@ refuses a repeat of the same subject to the same repository.
 Absent-by-default everywhere else, but these carry values, because "no limit" is
 not a safe default for anything that spends money.
 
-| | |
-| --- | --- |
-| `limits.repliesPerRoomPerHour` | 20 — counted on disk, so a restart does not reset it |
-| `limits.maxConcurrentTurns` | 4 — excess waits in its lane rather than being dropped |
+|                                |                                                        |
+| ------------------------------ | ------------------------------------------------------ |
+| `limits.repliesPerRoomPerHour` | 20 — counted on disk, so a restart does not reset it   |
+| `limits.maxConcurrentTurns`    | 4 — excess waits in its lane rather than being dropped |
+
+## Layout
+
+|          |                                                        |
+| -------- | ------------------------------------------------------ |
+| `src/`   | the gateway — transports, queue, runner, spool, tools  |
+| `agent/` | the agent itself — prompt, tool wiring, sandbox, model |
+| `spec/`  | the NIP this implements                                |
+
+The runtime is a devDependency, so installing Hex does not install an agent
+loop. `agent/` is run by that runtime, not built by this package.
 
 ## Docs
 

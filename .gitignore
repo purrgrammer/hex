@@ -16,3 +16,7 @@ dist/
 
 # Agent worktrees and local tooling state.
 .claude/
+
+# Eve runtime state, written where the agent runs.
+.eve/
+.output/
