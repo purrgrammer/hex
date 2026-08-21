@@ -282,3 +282,85 @@ describe("against a relay, and across a restart", () => {
     }
   });
 });
+
+/**
+ * The false positive that would have bitten hardest.
+ *
+ * Every conventional-commit patch to a repository opens on the same two
+ * significant words — "patch fix" — so the opening rule would refuse the second
+ * unrelated fix of the day. Patches lean on the two exact rules instead.
+ */
+describe("patch subjects are not prose", () => {
+  const patch = (subject: string, line: string) =>
+    ({
+      kind: 1617,
+      content: [
+        "From 9ca208fe5dcaf0e3d725e1d41f1548508a813c63 Mon Sep 17 00:00:00 2001",
+        "From: Hex <hex@example.com>",
+        "Date: Wed, 20 Aug 2026 17:00:00 +0000",
+        `Subject: ${subject}`,
+        "",
+        "---",
+        " src/thing.ts | 2 +-",
+        "",
+        "diff --git a/src/thing.ts b/src/thing.ts",
+        "index 1111111..2222222 100644",
+        "--- a/src/thing.ts",
+        "+++ b/src/thing.ts",
+        "@@ -1,3 +1,3 @@",
+        " const before = 1;",
+        "-const wrong = true;",
+        `+const ${line} = true;`,
+        " const after = 2;",
+        "-- ",
+        "2.53.0",
+        "",
+      ].join("\n"),
+      tags: [["a", REPO]],
+    }) as Record<string, unknown>;
+
+  it("allows two different fixes whose subjects begin the same way", async () => {
+    const book = ledger();
+    book.rememberPublished({
+      id: "d".repeat(64),
+      kind: 1617,
+      scope: REPO,
+      subject: normaliseSubject("[PATCH] fix: the first thing"),
+      sha256: "1".repeat(64),
+      at: Math.floor(Date.now() / 1000),
+    });
+
+    const result = await new PublishTools({
+      signer: signerFromSecret(secret),
+      pubkey,
+      relays: createRelays(),
+      publishRelays: [],
+      ledger: book,
+    }).call(PUBLISH_TOOL, patch("[PATCH] fix: a completely other thing", "other"));
+
+    expect(result.output).toBe("no relay to publish to");
+  });
+
+  it("still refuses the same patch subject", async () => {
+    const book = ledger();
+    book.rememberPublished({
+      id: "e".repeat(64),
+      kind: 1617,
+      scope: REPO,
+      subject: normaliseSubject("[PATCH] fix: the first thing"),
+      sha256: "1".repeat(64),
+      at: Math.floor(Date.now() / 1000),
+    });
+
+    const result = await new PublishTools({
+      signer: signerFromSecret(secret),
+      pubkey,
+      relays: createRelays(),
+      publishRelays: [],
+      ledger: book,
+    }).call(PUBLISH_TOOL, patch("[PATCH] fix: the first thing", "first"));
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("the same subject");
+  });
+});

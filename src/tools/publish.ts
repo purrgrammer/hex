@@ -95,6 +95,18 @@ const ONE_PER_THING: readonly number[] = [1617, 1618, 1621];
 /** How much of a subject's opening has to match. See `duplicateOf`. */
 const OPENING_WORDS = 2;
 
+/**
+ * The kinds whose subjects are prose, so their opening means something.
+ *
+ * Not patches. A patch subject is `[PATCH] fix: …`, and after noise removal
+ * every conventional-commit patch to a repository opens on the same two words —
+ * "patch fix" — which would refuse the second unrelated fix of the day. Patches
+ * are covered by the two exact rules instead, and covered well: a re-executed
+ * turn regenerating the same patch produces the same bytes and the same
+ * subject, because it is the same commit.
+ */
+const PROSE_SUBJECTS: readonly number[] = [1618, 1621];
+
 /** How far back a duplicate is still a duplicate. */
 const DEFAULT_DUPLICATE_WINDOW_MS = 6 * 60 * 60 * 1000;
 
@@ -134,7 +146,8 @@ function significant(subject: string): string[] {
  *
  * 1. The same bytes. Certain.
  * 2. The same subject once normalised. Certain enough.
- * 3. The same opening — the first two words that are not noise. This is the one
+ * 3. The same opening — the first two words that are not noise, for the kinds
+ *    whose subjects are prose. This is the one
  *    that earns its keep, and the only reason it is set as low as two: the two
  *    "Memory lives in ..." issues diverged at the third significant word, share
  *    three words out of fourteen, and would clear no similarity threshold that
@@ -148,6 +161,7 @@ function significant(subject: string): string[] {
  * on four relays that a maintainer triages by hand.
  */
 function duplicateOf(
+  kind: number,
   candidate: { subject: string; sha256: string },
   earlier: readonly { id: string; subject: string; sha256: string }[],
 ): { id: string; why: string } | undefined {
@@ -167,6 +181,7 @@ function duplicateOf(
       .split(" ")
       .filter((word) => word.length > 0 && !NOISE.has(word));
     if (
+      PROSE_SUBJECTS.includes(kind) &&
       opening.length === OPENING_WORDS &&
       words.length > OPENING_WORDS &&
       theirs.length > OPENING_WORDS &&
@@ -561,6 +576,7 @@ export class PublishTools {
     if (earlier.length === 0) return undefined;
 
     const hit = duplicateOf(
+      template.kind,
       {
         subject: PublishTools.subjectOf(template),
         sha256: createHash("sha256")
