@@ -13,6 +13,7 @@ function inbound(text = "hello"): Inbound {
     text,
     createdAt: 1,
     room: { transport: "nip-17", id: "b".repeat(64) },
+    tagsSelf: true,
     addressesSelf: true,
     event: {
       id: "a".repeat(64),

@@ -41,7 +41,12 @@ export {
   type AnnounceResult,
   type EventTemplate,
 } from "./identity.js";
-export { tagsSelf, addressesSelfInGroup } from "./policy.js";
+export { tagsSelf } from "./policy.js";
+export {
+  addresses,
+  NOTHING_REMEMBERED,
+  type AddressingBindings,
+} from "./addressing.js";
 export {
   Runner,
   type RunnerOptions,

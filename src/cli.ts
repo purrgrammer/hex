@@ -1129,10 +1129,6 @@ async function main(): Promise<void> {
               pubkey: resolved.pubkey,
               groups: groups.groups,
               since: startedAt,
-              // A kind 9 names no thread root, so the parent is the only
-              // handle — and the store knows every message Hex has handled.
-              threadIsOurs: (id, room) => store.threadIsOurs(id, room),
-              isOwnMessage: (id) => store.isOwnRumor(id),
             })
           : undefined;
 

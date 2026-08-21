@@ -72,8 +72,8 @@ describe("Nip29Transport.start", () => {
       relay: relay.url,
     });
     expect(inbound!.author).toBe(author);
-    // The transport decides this — it is the layer that knows the tag shape.
-    expect(inbound!.addressesSelf).toBe(true);
+    // The tag is the fact the transport owns; the decision is addressing.ts's.
+    expect(inbound!.tagsSelf).toBe(true);
   });
 
   it("marks a message that names nobody as not addressing Hex", async () => {
@@ -85,10 +85,10 @@ describe("Nip29Transport.start", () => {
     const [inbound] = await firstValueFrom(
       transportFor(relay.url).start().pipe(take(1), toArray()),
     );
-    expect(inbound!.addressesSelf).toBe(false);
+    expect(inbound!.tagsSelf).toBe(false);
   });
 
-  it("addresses Hex on a p-tag with no name in the text", async () => {
+  it("reports a p-tag naming Hex", async () => {
     relay = await startMockRelay({
       kind: "normal",
       events: [message("thoughts?", GROUP, [["p", pubkey]])],
@@ -97,7 +97,7 @@ describe("Nip29Transport.start", () => {
     const [inbound] = await firstValueFrom(
       transportFor(relay.url).start().pipe(take(1), toArray()),
     );
-    expect(inbound!.addressesSelf).toBe(true);
+    expect(inbound!.tagsSelf).toBe(true);
   });
 
   it("drops a message for a group that is not configured", async () => {
@@ -169,6 +169,7 @@ describe("Nip29Transport.reply", () => {
       text: event.content,
       createdAt: event.created_at,
       room: { transport: "nip-29", id: GROUP, relay: url },
+      tagsSelf: true,
       addressesSelf: true,
       event,
     };
@@ -215,7 +216,7 @@ describe("Nip29Transport.reply", () => {
     ).rejects.toThrow(/did not accept the reply/);
   });
 
-  it("treats a reply to its own message as addressing it", async () => {
+  it("reports the message a reply quotes, so addressing can use it", async () => {
     // Nobody repeats the bot's name in their second sentence. Without this, every
     // exchange dies after one turn.
     relay = await startMockRelay({ kind: "normal" });
@@ -246,11 +247,15 @@ describe("Nip29Transport.reply", () => {
       ),
     );
 
-    // No mention, no p-tag — and still addressed, because it continues the
-    // conversation Hex is already in.
+    /*
+     * The `q` off the wire, which is what only a transport can read. No mention
+     * and no p-tag, so nothing here addresses Hex on its own — whether quoting
+     * something Hex wrote does is `addressing.ts`'s call, and it needs no relay
+     * to state. See addressing.test.ts.
+     */
     expect(inbound.text).not.toContain("hex");
     expect(inbound.replyToId).toBe(own);
-    expect(inbound.addressesSelf).toBe(true);
+    expect(inbound.tagsSelf).toBe(false);
   });
 
   it("does not treat a reply to somebody else as addressing it", async () => {
@@ -262,7 +267,7 @@ describe("Nip29Transport.reply", () => {
     const [inbound] = await firstValueFrom(
       transportFor(relay.url).start().pipe(take(1), toArray()),
     );
-    expect(inbound!.addressesSelf).toBe(false);
+    expect(inbound!.tagsSelf).toBe(false);
   });
 
   it("reacts with an h-tagged kind 7 pointing at the message", async () => {

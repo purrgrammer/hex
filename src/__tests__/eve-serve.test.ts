@@ -128,6 +128,7 @@ function inbound(id: string, text: string, replyToId?: string): Inbound {
     replyToId,
     createdAt: 1000,
     room: { transport: "nip-17", id: PEER },
+    tagsSelf: true,
     addressesSelf: true,
     event: {
       id,

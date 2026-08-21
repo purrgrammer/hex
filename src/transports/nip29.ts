@@ -12,7 +12,6 @@ import { merge, Observable } from "rxjs";
 import { map as rxMap, filter as rxFilter } from "rxjs/operators";
 import type { NostrEvent } from "nostr-tools";
 import { nip10Root } from "./nip10.js";
-import { roomKey } from "./types.js";
 import {
   GroupMessageFactory,
   ReactionFactory,
@@ -25,7 +24,7 @@ import {
   subscribe,
   type HexRelays,
 } from "../relays.js";
-import { addressesSelfInGroup } from "../policy.js";
+import { tagsSelf } from "../policy.js";
 import type { Inbound, Room, Transport } from "./types.js";
 
 /** A group chat message. */
@@ -95,15 +94,6 @@ export interface Nip29TransportOptions {
    * again on every restart.
    */
   isOwnMessage?: (id: string) => boolean;
-  /**
-   * Whether a thread already belongs to a run of Hex's.
-   *
-   * The half `isOwnMessage` cannot answer. In a group, a reply threads onto the
-   * message it answers — which is usually the PERSON'S own opening mention, not
-   * anything Hex wrote — so a thread Hex is already running looked like room
-   * chatter and demanded the mention be typed again on every message.
-   */
-  threadIsOurs?: (id: string, room: string) => boolean;
 }
 
 /**
@@ -165,6 +155,9 @@ export class Nip29Transport implements Transport {
       text: event.content,
       createdAt: event.created_at,
       room,
+      tagsSelf: tagsSelf(event.tags, this.options.pubkey),
+      // Resolved on the way into the queue, where the bindings are. A transport
+      // knows tags; whether this continues something of Hex's is not a tag.
       addressesSelf: false,
       // A kind-9 reply quotes its parent with `q` (NIP-C7), which is what
       // grimoire writes and reads; `e` is the fallback.
@@ -176,36 +169,7 @@ export class Nip29Transport implements Transport {
     };
     // The transport decides this: it is the layer that knows the tag shape, and
     // the only one that knows which messages are Hex's own.
-    /*
-     * Three ways a kind 9 continues something rather than starting it: it
-     * quotes a message Hex wrote, in this run or an earlier one, or it hangs
-     * under a thread Hex already has a session for.
-     *
-     * The third is what makes a group thread usable. Without a root tag the
-     * only handle is the parent, so this asks the store about the parent — and
-     * the store knows it, because every message Hex handles is bound to its
-     * session too.
-     */
-    const root = inbound.threadRoot ?? inbound.replyToId;
-    const continuesConversation =
-      (inbound.replyToId !== undefined &&
-        (this.ownMessageIds.has(inbound.replyToId) ||
-          (this.options.isOwnMessage?.(inbound.replyToId) ?? false))) ||
-      (root !== undefined &&
-        (this.options.threadIsOurs?.(root, roomKey(inbound.room)) ?? false)) ||
-      (inbound.replyToId !== undefined &&
-        (this.options.threadIsOurs?.(
-          inbound.replyToId,
-          roomKey(inbound.room),
-        ) ??
-          false));
-
-    return {
-      ...inbound,
-      addressesSelf:
-        continuesConversation ||
-        addressesSelfInGroup(inbound, this.options.pubkey),
-    };
+    return inbound;
   }
 
   /** Remember something Hex said, so a reply to it counts as addressed. */

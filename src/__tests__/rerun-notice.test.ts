@@ -96,7 +96,9 @@ describe("a turn that ends twice", () => {
   it("says it once, not once per redelivery", async () => {
     const run = transcript("wrun_NOISY");
     for (let at = 0; at < 5; at += 1) await run.handle(completed("turn_0"));
-    expect(said.filter((line) => line.includes("more than once"))).toHaveLength(1);
+    expect(said.filter((line) => line.includes("more than once"))).toHaveLength(
+      1,
+    );
   });
 
   it("says nothing when each turn ends once", async () => {

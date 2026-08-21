@@ -143,6 +143,7 @@ describe("Nip17Transport.reply", () => {
       text: "hex?",
       createdAt: 1000,
       room: { transport: "nip-17", id: peerPubkey },
+      tagsSelf: true,
       addressesSelf: true,
       event: {
         id,

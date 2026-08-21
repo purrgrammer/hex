@@ -137,7 +137,8 @@ describe("ConcordTransport.start", () => {
     );
     expect(inbound?.text).toBe("are you there?");
     expect(inbound?.author).toBe(member);
-    expect(inbound?.addressesSelf).toBe(true);
+    // The tag is the fact; `addressing.ts` turns facts into the decision.
+    expect(inbound?.tagsSelf).toBe(true);
     // A channel id means nothing without its community: both travel in the id.
     expect(inbound?.room.id).toBe(`${COMMUNITY}:${PUBLIC_CHANNEL}`);
     expect(inbound?.room.label).toContain("grimoire");
@@ -156,7 +157,8 @@ describe("ConcordTransport.start", () => {
     );
     // The `p` tag rides the ENCRYPTED rumor, so it addresses Hex without
     // telling the relay that anybody addressed anybody.
-    expect(inbound?.addressesSelf).toBe(true);
+    // The tag is the fact; `addressing.ts` turns facts into the decision.
+    expect(inbound?.tagsSelf).toBe(true);
   });
 
   it("reads a private channel with the key the invite granted", async () => {
@@ -263,7 +265,7 @@ describe("ConcordTransport.reply", () => {
     expect(opened.tags).toContainEqual(["epoch", "2"]);
   });
 
-  it("treats a reply in a thread it is running as addressed to it", async () => {
+  it("reports the thread a reply hangs under, and that nothing names Hex", async () => {
     /**
      * The live miss. A thread whose ROOT is the operator's own mention: the
      * follow-up threads onto that root, so its parent is their message and not
@@ -277,7 +279,8 @@ describe("ConcordTransport.reply", () => {
 
     const stream = transport.start();
     const [inbound] = await firstValueFrom(stream.pipe(take(1), toArray()));
-    expect(inbound?.addressesSelf).toBe(true);
+    // The tag is the fact; `addressing.ts` turns facts into the decision.
+    expect(inbound?.tagsSelf).toBe(true);
 
     const root = inbound!.id;
     const followUp = buildRumor({
@@ -315,10 +318,7 @@ describe("ConcordTransport.reply", () => {
         rememberCursor: () => {},
         sawRumor: () => false,
         rememberRumor: () => {},
-        // Hex wrote none of it — the parent is the operator's own message.
         isOwnRumor: () => false,
-        // But it opened a run for that thread, and that is what decides.
-        threadIsOurs: (id) => id === root,
         saveMembership: () => {},
       },
     });
@@ -329,11 +329,20 @@ describe("ConcordTransport.reply", () => {
         toArray(),
       ),
     );
+    /*
+     * The FACTS, which is all a transport owes anybody now.
+     *
+     * Whether this addresses Hex is decided from these plus what the store
+     * remembers, in `addressing.ts` — and that is the whole reason the decision
+     * moved: it can be stated there without a relay, a key and a wrap.
+     */
     expect(next?.threadRoot).toBe(root);
-    expect(next?.addressesSelf).toBe(true);
+    expect(next?.replyToId).toBe(root);
+    // Nothing here names Hex. The thread is what will.
+    expect(next?.tagsSelf).toBe(false);
   });
 
-  it("treats a reply to its own message as addressed to it", async () => {
+  it("reports the message a reply quotes, wrap and restart included", async () => {
     const opening = await memberMessage("hex, hello");
     relay = await startMockRelay({ kind: "normal", events: [opening.wrap] });
     relays = createRelays();
@@ -392,8 +401,13 @@ describe("ConcordTransport.reply", () => {
         toArray(),
       ),
     );
+    /*
+     * The parent, off a wrap, after a restart — which is the part only a
+     * transport can be asked for. Whether quoting something Hex wrote counts as
+     * addressing it is `addressing.ts`'s call now; see addressing.test.ts.
+     */
     expect(next?.replyToId).toBe(answerId);
-    expect(next?.addressesSelf).toBe(true);
+    expect(next?.tagsSelf).toBe(false);
   });
 });
 

@@ -40,10 +40,7 @@ async function send(
     kind: KIND_MESSAGE,
     content,
     tags: [
-      ...channelBindingTags(
-        "04".repeat(32),
-        EPOCH,
-      ),
+      ...channelBindingTags("04".repeat(32), EPOCH),
       ...(options.tags ?? []),
     ],
     pubkey: author,

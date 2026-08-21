@@ -18,7 +18,15 @@ const AUTHOR = "a".repeat(64);
 const ID = "b".repeat(64);
 
 const event = (kind: number, tags: string[][] = []): NostrEvent =>
-  ({ id: ID, pubkey: AUTHOR, kind, tags, content: "", created_at: 1, sig: "" }) as NostrEvent;
+  ({
+    id: ID,
+    pubkey: AUTHOR,
+    kind,
+    tags,
+    content: "",
+    created_at: 1,
+    sig: "",
+  }) as NostrEvent;
 
 describe("pointerFor", () => {
   it("returns an nevent that actually decodes, carrying kind and author", () => {
@@ -47,7 +55,9 @@ describe("pointerFor", () => {
 
   it("survives an addressable event with no d tag", () => {
     const { naddr } = pointerFor(event(30617), []);
-    expect((nip19.decode(naddr!).data as nip19.AddressPointer).identifier).toBe("");
+    expect((nip19.decode(naddr!).data as nip19.AddressPointer).identifier).toBe(
+      "",
+    );
   });
 
   it("keeps at most three relay hints, so the pointer stays pasteable", () => {

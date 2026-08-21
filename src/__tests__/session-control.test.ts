@@ -27,10 +27,7 @@ describe("session control", () => {
     });
 
     expect(rumor.kind).toBe(KIND_SESSION_CONTROL);
-    expect(rumor.tags).toContainEqual([
-      "a",
-      `31777:${AGENT}:${SESSION}`,
-    ]);
+    expect(rumor.tags).toContainEqual(["a", `31777:${AGENT}:${SESSION}`]);
     // The agent finds it by `p` and files it by `a`, so it needs both.
     expect(rumor.tags).toContainEqual(["p", AGENT]);
 
@@ -73,7 +70,10 @@ describe("session control", () => {
   });
 
   it("puts a steer's message in content, where a message belongs", () => {
-    const rumor = control({ command: "steer", text: "actually, do the other one" });
+    const rumor = control({
+      command: "steer",
+      text: "actually, do the other one",
+    });
     expect(rumor.content).toBe("actually, do the other one");
     const read = parseSessionControl(rumor, expected);
     expect(read && "control" in read && read.control.text).toBe(

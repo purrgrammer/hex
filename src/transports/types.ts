@@ -28,9 +28,17 @@ export interface Inbound {
   createdAt: number;
   room: Room;
   /**
-   * Whether this message addresses Hex. Set by the TRANSPORT, which is the only
-   * layer that knows the protocol's tag shape; `policy` reads it and never
-   * recomputes it, so the two cannot disagree.
+   * What the TAGS say: a `p` tag naming Hex, or a room that is a private
+   * conversation with it. A fact about the event, which is why the transport —
+   * the only layer that knows the protocol's tag shape — is the one that sets
+   * it.
+   */
+  tagsSelf: boolean;
+  /**
+   * Whether this message is FOR Hex, which the tags alone cannot answer: a
+   * reply continues something of Hex's, and what Hex is doing is durable state.
+   * Resolved once by `addresses()` on the way into the queue, and read
+   * everywhere after. See `addressing.ts`.
    */
   addressesSelf: boolean;
   /**

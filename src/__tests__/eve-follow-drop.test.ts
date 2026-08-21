@@ -75,6 +75,7 @@ function inbound(id: string, text: string): Inbound {
     text,
     createdAt: 1000,
     room: { transport: "nip-17", id: PEER },
+    tagsSelf: true,
     addressesSelf: true,
     event: {
       id,

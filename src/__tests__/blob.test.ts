@@ -18,7 +18,11 @@ describe("clipJson", () => {
       content: "x".repeat(2_000),
       tags: [["a", "30617:abc:grimoire"]],
     }));
-    const raw = JSON.stringify({ filter: { kinds: [1621] }, matched: 40, events });
+    const raw = JSON.stringify({
+      filter: { kinds: [1621] },
+      matched: 40,
+      events,
+    });
     expect(raw.length).toBeGreaterThan(4_000);
 
     const clipped = clipJson(raw, 4_000);

@@ -44,6 +44,7 @@ function inbound(overrides: Partial<Inbound> = {}): Inbound {
     text,
     createdAt: event.created_at,
     room: overrides.room ?? ROOM,
+    tagsSelf: overrides.tagsSelf ?? overrides.addressesSelf ?? true,
     addressesSelf: overrides.addressesSelf ?? true,
     event,
     ...overrides,

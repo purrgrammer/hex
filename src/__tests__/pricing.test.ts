@@ -33,7 +33,10 @@ function host(body: unknown = TABLE, ok = true) {
 describe("Prices", () => {
   it("prices a model the runtime names with a provider prefix", async () => {
     const eve = host();
-    const prices = new Prices({ url: "https://example/models", fetchImpl: eve.impl });
+    const prices = new Prices({
+      url: "https://example/models",
+      fetchImpl: eve.impl,
+    });
     await prices.load();
 
     // Eve reports `ppq/moonshotai/kimi-k3`; the table knows the tail.
@@ -46,10 +49,17 @@ describe("Prices", () => {
 
   it("says nothing for a model it has no price for", async () => {
     const eve = host();
-    const prices = new Prices({ url: "https://example/models", fetchImpl: eve.impl });
+    const prices = new Prices({
+      url: "https://example/models",
+      fetchImpl: eve.impl,
+    });
     await prices.load();
-    expect(prices.estimate("no-price", { input: 10, output: 10 })).toBeUndefined();
-    expect(prices.estimate("never-heard-of-it", { input: 10, output: 10 })).toBeUndefined();
+    expect(
+      prices.estimate("no-price", { input: 10, output: 10 }),
+    ).toBeUndefined();
+    expect(
+      prices.estimate("never-heard-of-it", { input: 10, output: 10 }),
+    ).toBeUndefined();
   });
 
   it("survives an endpoint that is down, and does not hammer it", async () => {
@@ -58,11 +68,16 @@ describe("Prices", () => {
      * would be a far worse bug than a missing cost.
      */
     const eve = host({}, false);
-    const prices = new Prices({ url: "https://example/models", fetchImpl: eve.impl });
+    const prices = new Prices({
+      url: "https://example/models",
+      fetchImpl: eve.impl,
+    });
     await prices.load();
     await prices.load();
     expect(eve.calls()).toBe(1);
-    expect(prices.estimate("anything", { input: 10, output: 10 })).toBeUndefined();
+    expect(
+      prices.estimate("anything", { input: 10, output: 10 }),
+    ).toBeUndefined();
   });
 });
 
@@ -119,7 +134,10 @@ describe("cache-aware estimates", () => {
       cacheWrite: 1_000,
     });
     // 1k fresh at $3, plus 1k written at 1.25x.
-    expect(Number(priced!.amount)).toBeCloseTo((1_000 * 3 + 1_000 * 3.75) / 1_000_000, 6);
+    expect(Number(priced!.amount)).toBeCloseTo(
+      (1_000 * 3 + 1_000 * 3.75) / 1_000_000,
+      6,
+    );
   });
 
   it("gives a provider it has never heard of no discount at all", async () => {

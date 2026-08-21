@@ -16,7 +16,13 @@
 import type { ControlOutcome } from "./eve/serve.js";
 import type { SessionControl } from "./nostr/decode-control.js";
 import type { HexStore, QueuedInbound } from "./store.js";
+import { roomKey } from "./transports/types.js";
 import type { Inbound, TransportName } from "./transports/types.js";
+import {
+  addresses,
+  NOTHING_REMEMBERED,
+  type AddressingBindings,
+} from "./addressing.js";
 
 /**
  * What can arrive.
@@ -86,6 +92,11 @@ export type MessagePayload = Omit<Inbound, CarriedByTheRow>;
  */
 const PAYLOAD_FIELDS: { [K in keyof Required<MessagePayload>]: true } = {
   text: true,
+  // Both, on purpose: the fact the transport saw and the answer that was
+  // resolved from it. A row that carries only the answer cannot be re-decided
+  // when the rule changes, and cannot explain itself when somebody asks why a
+  // message was ignored.
+  tagsSelf: true,
   addressesSelf: true,
   replyToId: true,
   threadRoot: true,
@@ -168,12 +179,25 @@ function now(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-/** A room message, flattened to what any policy can reason about. */
+/**
+ * A room message, flattened to what any policy can reason about.
+ *
+ * `bindings` is where "is this for me" gets its second half. A transport can
+ * see a `p` tag; it cannot see which threads Hex is answering in, and asking it
+ * to look put a database read inside the layer that owns tag shapes. Resolved
+ * here instead, once, on the way to becoming a row — after which the answer is
+ * a stored fact and nothing recomputes it.
+ */
 export function messageEvent(
   inbound: Inbound,
   observedAt = now(),
+  bindings: AddressingBindings = NOTHING_REMEMBERED,
 ): CanonicalEvent {
-  const payload = payloadOf(inbound);
+  const resolved: Inbound = {
+    ...inbound,
+    addressesSelf: addresses(inbound, roomKey(inbound.room), bindings),
+  };
+  const payload = payloadOf(resolved);
   return {
     v: HEX_EVENT_VERSION,
     type: "message",
@@ -328,6 +352,18 @@ export function settleControl(
 }
 
 export class Ingestor {
+  /**
+   * What "is this for me" is answered against.
+   *
+   * The store, which is the only thing that knows which threads Hex is
+   * answering in — and which the transports used to reach into to answer this
+   * for themselves.
+   */
+  private readonly bindings: AddressingBindings = {
+    threadIsOurs: (rootId, room) =>
+      this.options.store.threadIsOurs(rootId, room),
+    isOwnMessage: (id) => this.options.store.isOwnRumor(id),
+  };
   /** Rows handed to `dispatch` and not yet settled. Never dispatched twice. */
   private readonly inFlight = new Set<number>();
   private timer?: ReturnType<typeof setInterval>;
@@ -345,7 +381,7 @@ export class Ingestor {
    * purpose: four relays serving one wrap is the normal case, not an event.
    */
   accept(inbound: Inbound, observedAt?: number): number | undefined {
-    const event = messageEvent(inbound, observedAt);
+    const event = messageEvent(inbound, observedAt, this.bindings);
     const seq = this.options.store.enqueueInbound(event);
     if (seq === undefined) return undefined;
     this.drain();

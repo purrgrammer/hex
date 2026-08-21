@@ -64,6 +64,7 @@ function groupMessage(id: string, text = "hex?"): Inbound {
     text,
     createdAt: 1_700_000_000,
     room: { transport: "nip-29", id: "bitcoin", relay: "wss://relay.example/" },
+    tagsSelf: true,
     addressesSelf: true,
     event: { id, pubkey: peerPubkey, tags: [] } as unknown as NostrEvent,
   };

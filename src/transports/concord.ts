@@ -45,10 +45,9 @@ import {
   subscribe,
   type HexRelays,
 } from "../relays.js";
-import { addressesSelfInGroup } from "../policy.js";
+import { tagsSelf } from "../policy.js";
 import { withTags } from "../nostr/encode.js";
 import type { Rumor } from "../nostr/types.js";
-import { roomKey } from "./types.js";
 import type { Inbound, Room, Transport } from "./types.js";
 import { bytesToHex, hex32, type GroupKey } from "../concord/derive.js";
 import {
@@ -132,15 +131,6 @@ export interface ConcordDurability {
   rememberRumor(rumorId: string, own: boolean, at: number): void;
   /** Did Hex write this rumor? Answered across restarts, unlike the memory set. */
   isOwnRumor(rumorId: string): boolean;
-  /**
-   * Is this thread one Hex is already in — does its root have a session?
-   *
-   * What makes a threaded conversation a conversation. Without it, every
-   * message after the first has to repeat the mention, because the parent of a
-   * reply typed into a thread is usually the person's OWN opening message, not
-   * anything Hex wrote.
-   */
-  threadIsOurs?(rootId: string, room: string): boolean;
   /** A membership changed — a rotation was adopted. Persist it. */
   saveMembership(membership: Membership): void;
 }
@@ -537,6 +527,8 @@ export class ConcordTransport implements Transport {
       text: opened.content,
       createdAt: opened.createdAt,
       room: this.roomFor(binding),
+      tagsSelf: tagsSelf(opened.tags, this.options.pubkey),
+      // Resolved on the way into the queue, where the bindings are.
       addressesSelf: false,
       ...(replyToId ? { replyToId } : {}),
       ...(threadRoot ? { threadRoot } : {}),
@@ -560,31 +552,7 @@ export class ConcordTransport implements Transport {
       },
     };
 
-    /**
-     * Three ways a message continues something rather than starting it: it
-     * replies to a rumor Hex wrote, in this run or an earlier one, or it hangs
-     * under a thread Hex already has a session for.
-     *
-     * The third is the one that makes threads usable. Reply to a thread whose
-     * root was the operator's own mention and the parent is THEIR message, not
-     * Hex's — so the first two tests both say no, and every follow-up would
-     * need the mention typed again.
-     */
-    const root = inbound.threadRoot ?? inbound.replyToId;
-    const continuesConversation =
-      (inbound.replyToId !== undefined &&
-        (this.ownRumorIds.has(inbound.replyToId) ||
-          (this.options.durability?.isOwnRumor(inbound.replyToId) ?? false))) ||
-      (root !== undefined &&
-        (this.options.durability?.threadIsOurs?.(root, roomKey(inbound.room)) ??
-          false));
-
-    return {
-      ...inbound,
-      addressesSelf:
-        continuesConversation ||
-        addressesSelfInGroup(inbound, this.options.pubkey),
-    };
+    return inbound;
   }
 
   private alreadySeen(rumorId: string): boolean {
@@ -1188,6 +1156,7 @@ export class ConcordTransport implements Transport {
         text: opened.content,
         createdAt: opened.createdAt,
         room,
+        tagsSelf: tagsSelf(opened.tags, this.options.pubkey),
         addressesSelf: false,
         ...(replyToId ? { replyToId } : {}),
         event: {

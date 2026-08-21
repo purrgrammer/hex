@@ -262,7 +262,9 @@ describe("against a relay, and across a restart", () => {
 
       const first = await open().call(
         PUBLISH_TOOL,
-        issue("Memory lives in Eve, not in the key — swapping eve.host loses everything"),
+        issue(
+          "Memory lives in Eve, not in the key — swapping eve.host loses everything",
+        ),
       );
       expect(first.ok).toBe(true);
       expect(relay.received).toHaveLength(1);
@@ -271,7 +273,9 @@ describe("against a relay, and across a restart", () => {
       // which under re-execution is exactly when the twin gets composed.
       const twin = await open().call(
         PUBLISH_TOOL,
-        issue("Memory lives in whichever Eve is running, not in the agent's own home"),
+        issue(
+          "Memory lives in whichever Eve is running, not in the agent's own home",
+        ),
       );
       expect(twin.ok).toBe(false);
       expect(twin.output).toContain(JSON.parse(first.output).id);
@@ -336,7 +340,10 @@ describe("patch subjects are not prose", () => {
       relays: createRelays(),
       publishRelays: [],
       ledger: book,
-    }).call(PUBLISH_TOOL, patch("[PATCH] fix: a completely other thing", "other"));
+    }).call(
+      PUBLISH_TOOL,
+      patch("[PATCH] fix: a completely other thing", "other"),
+    );
 
     expect(result.output).toBe("no relay to publish to");
   });

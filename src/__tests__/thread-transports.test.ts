@@ -9,27 +9,16 @@
  * grimoire writes rather than from what the NIPs permit.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
-import { firstValueFrom } from "rxjs";
-import { take, toArray } from "rxjs/operators";
-import {
-  finalizeEvent,
-  generateSecretKey,
-  getPublicKey,
-} from "nostr-tools/pure";
-import { PrivateKeySigner } from "applesauce-signers";
+import { describe, it, expect } from "vitest";
 
-import { createRelays } from "../relays.js";
 import { nip10Parent, nip10Root } from "../transports/nip10.js";
 import {
-  Nip29Transport,
   KIND_GROUP_MESSAGE,
   replyTarget,
   threadRoot,
 } from "../transports/nip29.js";
 import { replyTargetOf, threadRootOf } from "../transports/concord.js";
 import { KIND_COMMENT } from "../concord/kinds.js";
-import { startMockRelay, type MockRelay } from "./mock-relay.js";
 
 const ROOT = "11".repeat(32);
 const PARENT = "22".repeat(32);
@@ -170,75 +159,5 @@ describe("a kind 9, which is how NIP-29 threads", () => {
       ["e", ROOT, "", "root"],
     ]);
     expect(replyTarget(both)).toBe(PARENT);
-  });
-});
-
-describe("a NIP-29 reply with no mention in it", () => {
-  const key = generateSecretKey();
-  const pubkey = getPublicKey(key);
-  const signer = PrivateKeySigner.fromKey(key);
-  const authorKey = generateSecretKey();
-  const GROUP = "NkeVhXuWHGKKJCpn";
-
-  let relay: MockRelay | undefined;
-  let relays: ReturnType<typeof createRelays> | undefined;
-
-  afterEach(async () => {
-    relays?.close();
-    relays = undefined;
-    await relay?.close();
-    relay = undefined;
-  });
-
-  const quoting = (parent: string, content: string) =>
-    finalizeEvent(
-      {
-        kind: KIND_GROUP_MESSAGE,
-        content,
-        created_at: 2000,
-        tags: [
-          ["h", GROUP],
-          ["q", parent, "wss://groups.0xchat.com/"],
-        ],
-      },
-      authorKey,
-    );
-
-  async function inboundFor(threadIsOurs?: (id: string) => boolean) {
-    relays = createRelays();
-    const transport = new Nip29Transport({
-      relays,
-      signer,
-      pubkey,
-      groups: [{ relay: relay!.url, id: GROUP }],
-      since: 0,
-      publishTimeoutMs: 1000,
-      ...(threadIsOurs ? { threadIsOurs } : {}),
-    });
-    const [inbound] = await firstValueFrom(
-      transport.start().pipe(take(1), toArray()),
-    );
-    return inbound!;
-  }
-
-  it("addresses Hex when it hangs under a thread Hex is running", async () => {
-    relay = await startMockRelay({
-      kind: "normal",
-      events: [quoting(PARENT, "no mention this time — carry on")],
-    });
-    // The store's answer: this id belongs to a run. The parent is the only
-    // handle a kind 9 offers, and it is enough.
-    const inbound = await inboundFor((id) => id === PARENT);
-    expect(inbound.addressesSelf).toBe(true);
-  });
-
-  it("is still room chatter when the thread belongs to nobody", async () => {
-    relay = await startMockRelay({
-      kind: "normal",
-      events: [quoting(OTHER, "two people talking about something else")],
-    });
-    const inbound = await inboundFor(() => false);
-    // Answering this would be Hex joining a conversation it was not in.
-    expect(inbound.addressesSelf).toBe(false);
   });
 });

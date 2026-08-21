@@ -107,6 +107,7 @@ const inboundFor = (id: string): Inbound =>
     text: "?",
     createdAt: 1,
     room: { transport: "nip-29", id: "room" },
+    tagsSelf: true,
     addressesSelf: true,
     event: {
       id,

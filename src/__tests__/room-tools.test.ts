@@ -24,6 +24,7 @@ const INBOUND: Inbound = {
   text: "hex?",
   createdAt: 1000,
   room: ROOM,
+  tagsSelf: true,
   addressesSelf: true,
   event: {
     id: "event-1",

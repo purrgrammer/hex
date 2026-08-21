@@ -47,6 +47,7 @@ const QUIESCENCE_PBT = `${TESTS}/quiescence.property.test.ts`;
 const TRANSPORTS = `${TESTS}/thread-transports.test.ts`;
 const ROOM_TOOLS = `${TESTS}/room-tools.test.ts`;
 const HIJACK = `${TESTS}/thread-hijack.test.ts`;
+const ADDRESSING = `${TESTS}/addressing.test.ts`;
 const CONFIG = `${TESTS}/config.test.ts`;
 
 type Status = "covered" | "partial" | "gap";
@@ -153,8 +154,8 @@ const COVERAGE: Coverage[] = [
       "a reply in a thread hex is running addresses hex, mention or not",
     status: "covered",
     owner:
-      "thread-session.test.ts, concord-transport.test.ts, and thread-transports.test.ts for the NIP-29 case it was reported in",
-    ownerFiles: [THREAD, CONCORD, TRANSPORTS],
+      "addressing.test.ts states the rule as a pure function; the transports are tested for the facts it reads, and thread-session.test.ts for the bindings it reads them against",
+    ownerFiles: [ADDRESSING, THREAD, CONCORD, TRANSPORTS],
   },
   {
     id: "I13",

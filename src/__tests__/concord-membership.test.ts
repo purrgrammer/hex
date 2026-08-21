@@ -66,7 +66,9 @@ describe("a membership is the keys, and nothing else", () => {
 
   it("keeps every held epoch readable when a rotation lands", () => {
     const held = membershipFromBundle(bundle(), [{ id: PUBLIC_CHANNEL }]);
-    const before = channelStreams(held, held.channels[1]!).map((s) => s.group.pk);
+    const before = channelStreams(held, held.channels[1]!).map(
+      (s) => s.group.pk,
+    );
     expect(before).toHaveLength(1);
 
     adoptRoot(held, { epoch: 3n, key: new Uint8Array(32).fill(0x44) });
@@ -91,9 +93,7 @@ describe("a membership is the keys, and nothing else", () => {
     expect(currentStream(held, held.channels[0]!)?.epoch).toBe(6n);
     expect(held.channels[0]!.keys).toHaveLength(3);
     expect(
-      bytesToHex(
-        held.channels[0]!.keys.find((key) => key.epoch === 6n)!.key,
-      ),
+      bytesToHex(held.channels[0]!.keys.find((key) => key.epoch === 6n)!.key),
     ).toBe(bytesToHex(low));
     expect(currentStream(held, held.channels[0]!)!.group.pk).toMatch(
       /^[0-9a-f]{64}$/,
@@ -106,9 +106,9 @@ describe("a membership is the keys, and nothing else", () => {
     // A stale invite carries keys the community has already rotated past.
     expect(currentStream(held, held.channels[0]!)).toBeDefined();
     expect(held.roots.map((root) => root.epoch)).toContain(5n);
-    expect([...held.roots].sort((a, b) => (a.epoch > b.epoch ? -1 : 1))[0]?.epoch).toBe(
-      5n,
-    );
+    expect(
+      [...held.roots].sort((a, b) => (a.epoch > b.epoch ? -1 : 1))[0]?.epoch,
+    ).toBe(5n);
   });
 
   it("survives a restart with its keys intact", () => {
@@ -124,12 +124,16 @@ describe("a membership is the keys, and nothing else", () => {
 describe("a rotation is only adopted when it extends what is held", () => {
   it("recognises its own continuity, a gap, and a fork", () => {
     const commit = bytesToHex(epochKeyCommitment(2n, ROOT));
-    expect(checkContinuity({ prevEpoch: 2n, prevCommit: commit }, 2n, ROOT)).toEqual(
-      { ok: true },
-    );
+    expect(
+      checkContinuity({ prevEpoch: 2n, prevCommit: commit }, 2n, ROOT),
+    ).toEqual({ ok: true });
     // A rotation chained onto an epoch we never reached: fetch the gap first.
     expect(
-      checkContinuity({ prevEpoch: 4n, prevCommit: commit }, 2n, ROOT).valueOf(),
+      checkContinuity(
+        { prevEpoch: 4n, prevCommit: commit },
+        2n,
+        ROOT,
+      ).valueOf(),
     ).toMatchObject({ ok: false, reason: "gap" });
     // Same epoch, different prior key: a fork, or garbage.
     expect(
@@ -149,7 +153,9 @@ describe("a rotation is only adopted when it extends what is held", () => {
     new DataView(plain.buffer).setBigUint64(32, 6n, false);
     plain.set(new Uint8Array(32).fill(0x77), 40);
 
-    expect(bytesToHex(decodeWrappedKey(plain, scope, 6n))).toBe("77".repeat(32));
+    expect(bytesToHex(decodeWrappedKey(plain, scope, 6n))).toBe(
+      "77".repeat(32),
+    );
     // The scope and epoch live inside the ciphertext, which is what makes a
     // blob unspliceable onto a channel it was not minted for.
     expect(() => decodeWrappedKey(plain, other, 6n)).toThrow(/scope mismatch/);
@@ -160,9 +166,9 @@ describe("a rotation is only adopted when it extends what is held", () => {
 describe("invites", () => {
   it("refuses a bundle whose owner does not reproduce its community_id", () => {
     expect(() => validateBundle(bundle())).not.toThrow();
-    expect(() =>
-      validateBundle(bundle({ owner: "0e".repeat(32) })),
-    ).toThrow(/does not reproduce/);
+    expect(() => validateBundle(bundle({ owner: "0e".repeat(32) }))).toThrow(
+      /does not reproduce/,
+    );
   });
 
   it("reads a link's fragment without sending it anywhere", () => {
@@ -178,7 +184,9 @@ describe("invites", () => {
 
     // Anything that is not recognisably an invite falls through rather than
     // throwing, so a caller can try its other parsers.
-    expect(parseInviteLink("https://example.test/not-an-invite")).toBeUndefined();
+    expect(
+      parseInviteLink("https://example.test/not-an-invite"),
+    ).toBeUndefined();
   });
 
   it("refuses a truncated or over-long fragment", () => {
@@ -207,7 +215,9 @@ describe("what the store has to remember", () => {
     // There is nothing to re-fetch: this row is the only copy of what Hex
     // holds, and a rotation that was not written down is a room it cannot
     // re-enter.
-    expect(membershipFromStored(stored!).roots.map((r) => r.epoch)).toContain(3n);
+    expect(membershipFromStored(stored!).roots.map((r) => r.epoch)).toContain(
+      3n,
+    );
 
     store.rememberCursor("wss://relay.example/", "aa".repeat(32), 100);
     store.rememberCursor("wss://relay.example/", "aa".repeat(32), 50);
