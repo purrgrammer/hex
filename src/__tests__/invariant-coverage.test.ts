@@ -42,6 +42,7 @@ const THREAD = `${TESTS}/thread-session.test.ts`;
 const CONCORD = `${TESTS}/concord-transport.test.ts`;
 const STORE_PBT = `${TESTS}/store.property.test.ts`;
 const POLICY_PBT = `${TESTS}/policy.property.test.ts`;
+const RUNNER_PBT = `${TESTS}/runner.property.test.ts`;
 
 type Status = "covered" | "partial" | "gap";
 
@@ -121,10 +122,10 @@ const COVERAGE: Coverage[] = [
   {
     id: "I9",
     statement: "PENDING_CAP bounds a lane and never evicts a control",
-    status: "partial",
+    status: "covered",
     owner:
-      "runner.test.ts covers the ordinary evictions; the all-controls branch is unasserted",
-    ownerFiles: [RUNNER],
+      "runner.test.ts for the ordinary evictions, runner.property.test.ts over arbitrary lines — including the all-controls branch an example never reached",
+    ownerFiles: [RUNNER, RUNNER_PBT],
   },
   {
     id: "I10",
@@ -172,6 +173,7 @@ const SENTINELS: Record<string, string[]> = {
   I5: [INVARIANTS, STORE_PBT],
   I6: [INVARIANTS, STORE_PBT],
   I7: [POLICY_PBT],
+  I9: [RUNNER_PBT],
   I13: [POLICY_PBT],
 };
 

@@ -97,7 +97,7 @@ const HOUR_SECS = 3600;
  * for every message forever. The OLDEST goes, because the newest is the one
  * still worth answering.
  */
-const PENDING_CAP = 20;
+export const PENDING_CAP = 20;
 
 /** One conversation's serialisation domain. */
 interface Lane {
@@ -145,6 +145,31 @@ function message(error: unknown): string {
  * Keyed on the author alone they were two, and the runner dispatched both at
  * once: two turns sent into one session, two readers of one stream.
  */
+/**
+ * The line after one more event joins it, and what fell out.
+ *
+ * Pure, and separate from the lane it belongs to, because the rule it encodes
+ * is the whole of invariant I9 and is worth being able to state over an
+ * arbitrary line rather than over the four an example test thought of.
+ */
+export function afterHolding(
+  line: readonly QueuedEvent[],
+  queued: QueuedEvent,
+): { pending: QueuedEvent[]; dropped: QueuedEvent[] } {
+  const pending = [...line, queued];
+  const dropped: QueuedEvent[] = [];
+  while (pending.length > PENDING_CAP) {
+    const at = pending.findIndex((held) => held.type !== "control");
+    // Nothing but controls: the line is allowed to grow, because the operator
+    // pressed every one of them and a dropped row is gone for good.
+    if (at === -1) break;
+    const [out] = pending.splice(at, 1);
+    if (!out) break;
+    dropped.push(out);
+  }
+  return { pending, dropped };
+}
+
 export function laneForMessage(inbound: Inbound, store: HexStore): string {
   const root = inbound.threadRoot ?? inbound.replyToId;
   const session = root ? store.threadSession(root) : undefined;
@@ -376,16 +401,13 @@ export class Runner {
    * operator pressed all of them.
    */
   private hold(lane: Lane, queued: QueuedEvent): void {
-    lane.pending.push(queued);
-    while (lane.pending.length > PENDING_CAP) {
-      const at = lane.pending.findIndex((held) => held.type !== "control");
-      if (at === -1) return;
-      const [dropped] = lane.pending.splice(at, 1);
-      if (!dropped) return;
+    const { pending, dropped } = afterHolding(lane.pending, queued);
+    lane.pending = pending;
+    for (const row of dropped) {
       this.log(
-        `[hex] queued event ${dropped.seq} fell out of a full lane — dropped`,
+        `[hex] queued event ${row.seq} fell out of a full lane — dropped`,
       );
-      this.options.queue.finish(dropped.seq, "dropped:overflow");
+      this.options.queue.finish(row.seq, "dropped:overflow");
     }
   }
 
