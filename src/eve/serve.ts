@@ -1285,31 +1285,51 @@ export class EveServer {
   }
 
   /**
-   * Take a message that arrived while this correspondent's turn was running.
+   * Stop what this correspondent's conversation is doing. Nothing else.
    *
    * A private message during a turn means "not that — this": there is nobody
-   * else in the conversation and no other reason to type. So the running turn is
-   * cancelled and this one takes over. Eve steers on its own when a message is
-   * sent into an active turn, but the send cannot happen until the queue drains,
-   * and the queue does not drain until the running turn ends — so the cancel is
-   * asked for FIRST, out of band, and the ordinary path takes it from there.
+   * else in the conversation and no other reason to type. Eve steers on its own
+   * once a message reaches it, but the send cannot happen until the queue
+   * drains, and the queue does not drain until the running turn ends — so the
+   * cancel is asked for out of band, here.
+   *
+   * The turn that takes over is NOT started here, and that separation is the
+   * point: the abandoned turn is still reading the session's stream until its
+   * own call returns, and a second reader publishes those turns again under the
+   * same `seq`. The runner waits for it and then calls `runTurn` itself.
    *
    * Fire and forget: Eve answers `accepted` or `no_active_turn`, both of which
-   * mean "carry on", and a cancel that does not land leaves the message queued
-   * rather than lost.
+   * mean "carry on".
    */
-  async interrupt(inbound: Inbound): Promise<void> {
+  async abandon(inbound: Inbound): Promise<void> {
     const conversation = this.conversations.get(conversationKey(inbound));
-    if (conversation)
-      await this.options.runtime.cancel(conversation.sessionId).then(
-        () =>
-          this.log(`[hex] ${short(inbound.author)} interrupted their own turn`),
-        (error: unknown) =>
-          this.log(
-            `[hex] could not cancel the running turn: ${message(error)}`,
-          ),
-      );
-    return this.turn(inbound);
+    if (!conversation) return;
+    await this.cancelling(conversation.sessionId, short(inbound.author));
+  }
+
+  /**
+   * Stop the run an instruction is about, out of band and before its turn.
+   *
+   * A `cancel` is the operator's stop button, and held behind the very turn it
+   * names it does nothing until that turn ends on its own — at which point it
+   * is a no-op. So the runtime hears the stop NOW, while the instruction itself
+   * still waits its turn in the lane: carrying it out reads the session's
+   * stream, and the turn being stopped is still reading it.
+   */
+  async abandonSession(control: SessionControl): Promise<void> {
+    const record = this.options.transcript.store.transcriptForNostrId(
+      control.session,
+    );
+    if (!record) return;
+    await this.cancelling(record.sessionId, short(control.operator));
+  }
+
+  private async cancelling(sessionId: string, who: string): Promise<void> {
+    await this.options.runtime.cancel(sessionId).then(
+      () => this.log(`[hex] ${who} interrupted the running turn`),
+      (error: unknown) =>
+        this.log(`[hex] could not cancel the running turn: ${message(error)}`),
+    );
   }
 
   private async turn(inbound: Inbound): Promise<void> {

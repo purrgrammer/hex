@@ -85,9 +85,15 @@ function target() {
       calls.push(`turn ${message.id}`);
       await settle(`turn ${message.id}`);
     },
-    interrupt: async (message) => {
-      calls.push(`interrupt ${message.id}`);
-      await settle(`interrupt ${message.id}`);
+    /**
+     * Recorded and answered at once, so a test that sees `abandon` but not the
+     * turn behind it is seeing the wait, not a slow fake.
+     */
+    abandon: async (message) => {
+      calls.push(`abandon ${message.id}`);
+    },
+    abandonSession: async (instruction) => {
+      calls.push(`stop ${instruction.id}`);
     },
     applyControl: async (instruction) => {
       calls.push(`control ${instruction.id}`);
@@ -199,10 +205,12 @@ describe("Runner", () => {
     ingest.acceptControl(control({ id: "c1", session: nostrId }));
     await tick();
 
-    // The message is running; the control about the same session is waiting.
-    expect(bus.calls).toEqual(["turn m1"]);
+    // The message is running; the control about the same session is waiting,
+    // having asked the runtime to stop the turn on its way into the line.
+    expect(bus.calls).toEqual(["turn m1", "stop c1"]);
+    expect(bus.running()).toEqual(["turn m1"]);
     await bus.finish("turn m1");
-    expect(bus.calls).toEqual(["turn m1", "control c1"]);
+    expect(bus.calls).toEqual(["turn m1", "stop c1", "control c1"]);
     expect(bus.running()).toEqual(["control c1"]);
   });
 
@@ -252,32 +260,129 @@ describe("Runner", () => {
     expect(bus.calls).toEqual(["turn m1", "turn m2"]);
   });
 
-  it("lets the turn holder steer, and does not free the lane behind them", async () => {
+  it("lets the turn holder steer, and waits for the turn it abandons", async () => {
+    /**
+     * The steering turn must not start until the abandoned one has RETURNED.
+     * The map this class replaced awaited it; for one commit nothing did, and
+     * two turns read one session's stream at once — the abandoned follow could
+     * see the new turn's `turn.completed` and publish its own reply, which is
+     * the two-readers failure this whole file exists to prevent.
+     */
     const bus = target();
     const { ingest } = runner(bus);
     ingest.accept(inbound({ id: "m1" }));
     await tick();
     ingest.accept(inbound({ id: "m2" }));
     await tick();
-    expect(bus.calls).toEqual(["turn m1", "interrupt m2"]);
+    // Asked to stop, and nothing more: `turn m1` is still the only reader.
+    expect(bus.calls).toEqual(["turn m1", "abandon m2"]);
+    expect(bus.running()).toEqual(["turn m1"]);
+
+    await bus.finish("turn m1");
+    expect(bus.calls).toEqual(["turn m1", "abandon m2", "turn m2"]);
 
     /**
      * The cancelled turn's own ending must not free its successor's claim.
      * When it did, the lane sat open for the length of the handover — long
      * enough for a third message to start a turn the pending interrupt killed.
      */
-    await bus.finish("turn m1");
     ingest.accept(inbound({ id: "m3", room: GROUP }));
     ingest.accept(inbound({ id: "m4" }));
     await tick();
-    // m4 lands on the DM lane, which the steer still holds: an interrupt is
+    // m4 lands on the DM lane, which the steer still holds: an `abandon` is
     // what a held lane produces, and `turn m4` is what a freed one would.
     expect(bus.calls).toEqual([
       "turn m1",
-      "interrupt m2",
+      "abandon m2",
+      "turn m2",
       "turn m3",
-      "interrupt m4",
+      "abandon m4",
     ]);
+    expect(bus.running().sort()).toEqual(["turn m2", "turn m3"]);
+  });
+
+  it("stops a runaway turn when the operator asks, before the stop's turn", async () => {
+    /**
+     * The stop button has to work while the work it targets is still running.
+     * Queued behind that turn and nothing else, it landed on a turn that had
+     * already ended by itself — and if the turn never ended, never at all.
+     *
+     * The instruction still waits its turn: carrying it out reads the session's
+     * stream, which the turn being stopped is still reading. Only the ASK is
+     * out of band, and it is what makes the turn end.
+     */
+    const nostrId = "e".repeat(64);
+    transcriptRow("wrun_5", nostrId);
+    store.rememberConversation(PEER, roomKey(GROUP), "wrun_5", 1000);
+
+    const bus = target();
+    const { ingest } = runner(bus);
+    ingest.accept(inbound({ id: "m1", room: GROUP }));
+    await tick();
+    const stop = ingest.acceptControl(
+      control({ id: "c1", session: nostrId, command: "cancel" }),
+    )!;
+    await tick();
+
+    expect(bus.calls).toEqual(["turn m1", "stop c1"]);
+    // Not dispatched, and not settled either: it is owed until it obeys.
+    expect(store.inboundOutcome(stop)).toBeUndefined();
+
+    // A verb that only reads waits in silence — there is nothing to abort.
+    const other = ingest.acceptControl(
+      control({ id: "c2", session: nostrId, command: "compact" }),
+    )!;
+    await tick();
+    expect(bus.calls).toEqual(["turn m1", "stop c1"]);
+    expect(store.inboundOutcome(other)).toBeUndefined();
+
+    await bus.finish("turn m1");
+    expect(bus.calls).toEqual(["turn m1", "stop c1", "control c1"]);
+  });
+
+  it("puts a control-plane start and the steer that follows it in one lane", async () => {
+    /**
+     * The lane was derived from the conversation row alone, and a `start` has
+     * not written one yet: the start ran in `session\0<id>` and the steer that
+     * came minutes later resolved to `<operator>\0` — an idle lane — and
+     * dispatched at once. `obey` then built a second transcript over the live
+     * session, because a control-plane run is deliberately absent from the
+     * conversations map, so the seq chain had two writers.
+     */
+    const nostrId = "f".repeat(64);
+    const bus = target();
+    const { ingest } = runner(bus);
+    ingest.acceptControl(
+      control({
+        id: "cs",
+        session: nostrId,
+        command: "start",
+        text: "read the room",
+      }),
+    );
+    await tick();
+    expect(bus.calls).toEqual(["control cs"]);
+
+    // What `start` publishes while it runs: the head, and its conversation row
+    // — an operator and no room.
+    transcriptRow("wrun_6", nostrId);
+    store.rememberConversation(PEER, "", "wrun_6", 1000);
+
+    const steer = ingest.acceptControl(
+      control({
+        id: "c2",
+        session: nostrId,
+        command: "steer",
+        text: "and now",
+      }),
+    )!;
+    await tick();
+    // Held behind the start, not run alongside it.
+    expect(bus.calls).toEqual(["control cs"]);
+    expect(store.inboundOutcome(steer)).toBeUndefined();
+
+    await bus.finish("control cs");
+    expect(bus.calls).toEqual(["control cs", "control c2"]);
   });
 
   it("drops the oldest of a full lane, and says so in the row", async () => {
@@ -318,7 +423,7 @@ describe("Runner", () => {
     expect(store.inboundOutcome(held)).toBeUndefined();
     await bus.finish("turn m0");
     // The control is still first in line, and it is what runs next.
-    expect(bus.calls).toEqual(["turn m0", "control c7"]);
+    expect(bus.calls).toEqual(["turn m0", "stop c7", "control c7"]);
   });
 
   it("caps how many turns run at once, and starts the next when one ends", async () => {

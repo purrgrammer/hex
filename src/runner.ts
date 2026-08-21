@@ -37,10 +37,18 @@ import type { Inbound } from "./transports/types.js";
 export interface RunnerTarget {
   /** Answer a message. One call at a time per conversation — that is our job. */
   runTurn(inbound: Inbound): Promise<void>;
-  /** Abandon what is running in this conversation and answer this instead. */
-  interrupt(inbound: Inbound): Promise<void>;
   /** Carry out an instruction. `unavailable` leaves it owed. */
   applyControl(control: SessionControl): Promise<ControlOutcome>;
+  /**
+   * Ask what is running in this conversation to stop. Reads no stream.
+   *
+   * Only asks. Whatever replaces the abandoned work is a separate dispatch this
+   * class starts once the abandoned one has actually returned — an overlap here
+   * is two readers of one stream, which is what this class exists to prevent.
+   */
+  abandon(inbound: Inbound): Promise<void>;
+  /** The same, for the run an instruction names. */
+  abandonSession(control: SessionControl): Promise<void>;
 }
 
 /** What the runner needs of the queue: the settle half of it. */
@@ -92,11 +100,31 @@ const PENDING_CAP = 20;
 
 /** One conversation's serialisation domain. */
 interface Lane {
-  /** The event being acted on, or nothing. `seq` is which one. */
-  running?: { seq: number; peer: string; room?: string };
+  /**
+   * The event being acted on, or nothing. `seq` is which one.
+   *
+   * `done` settles when that dispatch has RETURNED — bookkeeping included. It
+   * is what a steer waits for: until then the abandoned turn is still reading
+   * the session's stream, and a second reader publishes its turns twice.
+   */
+  running?: {
+    seq: number;
+    peer: string;
+    room?: string;
+    done: Promise<void>;
+  };
   /** Waiting their turn, oldest first: followups and collected events. */
   pending: QueuedEvent[];
 }
+
+/**
+ * The instructions that must reach the runtime before their turn in the lane.
+ *
+ * A stop held behind the turn it names does nothing until that turn ends by
+ * itself, at which point there is nothing left to stop. Every other verb reads
+ * the session's stream — waiting IS the fix for those.
+ */
+const ABORTS_THE_TURN = new Set(["cancel", "reset"]);
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -194,8 +222,18 @@ export class Runner {
       ? store.conversationForSession(record.sessionId)
       : undefined;
     if (conversation) return `${conversation.peer}\u0000${conversation.room}`;
-    // A session with no conversation row: a control-plane run, or a `start`
-    // that has not published anything yet. It still gets a lane of its own.
+    /**
+     * A `start` has published nothing yet, so name the lane it WILL resolve to.
+     *
+     * `start` remembers its conversation as (operator, no room), which is what
+     * every later control for that session reads back. Derived from the row
+     * alone, a start ran in `session\0<id>` while the steer that followed it
+     * landed in an idle `<operator>\0` lane and forked the stream. No message
+     * lane can collide with this key: `roomKey` is never empty.
+     */
+    if (control.command === "start") return `${control.operator}\u0000`;
+    // A session this process never published: refused without reading anything,
+    // so a lane of its own costs nothing.
     return `session\u0000${control.session}`;
   }
 
@@ -274,10 +312,26 @@ export class Runner {
       this.options.queue.finish(queued.seq, "ignored");
       return;
     }
-    // An instruction waits for the turn it is about, rather than reading that
-    // session's stream alongside it. That wait IS the fix this phase is for.
-    if (lane.running) this.hold(lane, queued);
-    else this.beginControl(key, lane, queued);
+    if (lane.running) {
+      /**
+       * An instruction waits for the turn it is about, rather than reading that
+       * session's stream alongside it. That wait IS the fix this phase is for.
+       *
+       * But a stop that only waits is not a stop: the turn it names would run
+       * to its own end, and the instruction would land on a settled target. So
+       * the runtime is asked to abort NOW — that reads no stream — while the
+       * instruction itself still takes its turn in the lane.
+       */
+      if (ABORTS_THE_TURN.has(instruction.command))
+        void this.options.target
+          .abandonSession(instruction)
+          .catch((error: unknown) =>
+            this.log(
+              `[hex] could not stop the running turn: ${message(error)}`,
+            ),
+          );
+      this.hold(lane, queued);
+    } else this.beginControl(key, lane, queued);
   }
 
   /**
@@ -343,15 +397,7 @@ export class Runner {
       return;
     }
 
-    /**
-     * The lane's holder changes BEFORE the interrupt is awaited.
-     *
-     * The turn being abandoned still runs its own ending, and that ending must
-     * not free its successor's claim — which is exactly what left a room open
-     * for the length of a handover, long enough for a third message to start a
-     * turn the pending interrupt then killed. `ending` is guarded on `seq`.
-     */
-    lane.running = { seq: queued.seq, peer: inbound.author, room };
+    const abandoned = lane.running;
     this.turns += 1;
     // Settled at the start, not at the end: a turn is fire-and-forget and the
     // row records that the event was acted on, not what the answer said.
@@ -361,23 +407,56 @@ export class Runner {
     );
 
     const run = steer
-      ? this.options.target.interrupt(inbound)
+      ? this.handover(abandoned, inbound)
       : this.options.target.runTurn(inbound);
-    void run.then(
+    const done = run.then(
       () => this.ending(key, queued.seq, room, true),
       (error: unknown) => {
         this.log(`[hex] the turn failed: ${message(error)}`);
         this.ending(key, queued.seq, room, false);
       },
     );
+    /**
+     * The lane's holder changes BEFORE the handover is awaited.
+     *
+     * The turn being abandoned still runs its own ending, and that ending must
+     * not free its successor's claim — which is exactly what left a room open
+     * for the length of a handover, long enough for a third message to start a
+     * turn the pending interrupt then killed. `ending` is guarded on `seq`, and
+     * it cannot have run yet: the `then` above is a microtask.
+     */
+    lane.running = { seq: queued.seq, peer: inbound.author, room, done };
+  }
+
+  /**
+   * Take a lane over from the turn that holds it.
+   *
+   * Ask it to stop, then WAIT for it. Only asking is what the map this class
+   * replaced already did better: the abandoned turn keeps following the
+   * session's stream until its call returns, and a second reader publishes
+   * every turn between them twice under one `seq`. A cancel is best effort —
+   * Eve answers `no_active_turn` for a turn that already ended — so the wait is
+   * what makes the handover safe, not the cancel.
+   */
+  private async handover(
+    abandoned: Lane["running"],
+    inbound: Inbound,
+  ): Promise<void> {
+    await this.options.target
+      .abandon(inbound)
+      .catch((error: unknown) =>
+        this.log(`[hex] could not stop the running turn: ${message(error)}`),
+      );
+    // Its failure is its own business; this turn runs either way.
+    await abandoned?.done.catch(() => {});
+    await this.options.target.runTurn(inbound);
   }
 
   /** Carry out one instruction. Does not count against the turn cap: an
    * operator's stop button has to work while everything is busy. */
   private beginControl(key: string, lane: Lane, queued: QueuedEvent): void {
     const { instruction } = queued.event.payload as ControlPayload;
-    lane.running = { seq: queued.seq, peer: instruction.operator };
-    void this.options.target.applyControl(instruction).then(
+    const done = this.options.target.applyControl(instruction).then(
       (outcome) => {
         // An instruction that did not land stays PENDING on purpose: the row is
         // the only thing that can bring it back, now that the queue's dedupe
@@ -393,6 +472,7 @@ export class Runner {
         this.ending(key, queued.seq);
       },
     );
+    lane.running = { seq: queued.seq, peer: instruction.operator, done };
   }
 
   /**

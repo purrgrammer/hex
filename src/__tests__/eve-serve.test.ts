@@ -299,20 +299,20 @@ describe("EveServer", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-/**
- * Rewind a session's cursor the way a kill does: the row on disk lags because
- * the batched save never happened. `saveTranscript` now refuses to walk a
- * cursor backwards — which is the point — so the lagging row is written raw.
- */
-function rewindOnDisk(sessionId: string, streamIndex: number) {
-  const raw = new DatabaseSync(agentHome(home, AGENT).db);
-  raw
-    .prepare(
-      `UPDATE transcripts SET status = 'active', stream_index = ? WHERE session_id = ?`,
-    )
-    .run(streamIndex, sessionId);
-  raw.close();
-}
+  /**
+   * Rewind a session's cursor the way a kill does: the row on disk lags because
+   * the batched save never happened. `saveTranscript` now refuses to walk a
+   * cursor backwards — which is the point — so the lagging row is written raw.
+   */
+  function rewindOnDisk(sessionId: string, streamIndex: number) {
+    const raw = new DatabaseSync(agentHome(home, AGENT).db);
+    raw
+      .prepare(
+        `UPDATE transcripts SET status = 'active', stream_index = ? WHERE session_id = ?`,
+      )
+      .run(streamIndex, sessionId);
+    raw.close();
+  }
 
   function server(
     eve: ReturnType<typeof fakeEve>,
@@ -861,9 +861,14 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
     const server_ = server(eve, bus, sink().impl);
 
     await server_.runTurn(inbound("msg-1", "first"));
-    await server_.interrupt(
-      inbound("msg-2", "never mind — this instead", "msg-1"),
-    );
+    /**
+     * Two calls, in the runner's order: the stop is asked for out of band, and
+     * the turn that takes over is started only once the abandoned one has
+     * returned. Here that is the same tick; under the runner it is a wait.
+     */
+    const second = inbound("msg-2", "never mind — this instead", "msg-1");
+    await server_.abandon(second);
+    await server_.runTurn(second);
 
     expect(eve.posts.map((post) => post.path)).toEqual([
       "/eve/v1/session",
@@ -1718,7 +1723,10 @@ function rewindOnDisk(sessionId: string, streamIndex: number) {
       const eve = fakeEve(FIRST_TURN, 8, undefined, SECOND_TURN, true);
       const hex = server(eve, transport(), sink().impl);
       await hex.runTurn(inbound("msg-1", "first"));
-      const stop = { ...stopFor(store.transcriptFor(eve.session)!.nostrId), id: "c-kill" };
+      const stop = {
+        ...stopFor(store.transcriptFor(eve.session)!.nostrId),
+        id: "c-kill",
+      };
 
       const live = fenceFor(store).generation;
       const dead = runnerFor(hex, { generation: live - 1, settle: false });
