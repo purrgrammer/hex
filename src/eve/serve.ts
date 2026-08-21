@@ -29,6 +29,7 @@
  */
 
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
+import { Spool } from "../outbound.js";
 import { asRecord, payload, stringField } from "./types.js";
 import { sessionAddress, sessionPointer } from "../nostr/encode.js";
 import { TERMINAL_STATUSES } from "../nostr/types.js";
@@ -449,7 +450,34 @@ export class EveServer {
    */
   private readonly obeyed = seenOnce(500);
 
-  constructor(private readonly options: ServeOptions) {}
+  /**
+   * Everything this server owes the network, durable before it is attempted.
+   *
+   * Built here rather than passed in: it needs the store, the lease generation,
+   * the transport and the rumor sink, and this class already holds all four —
+   * wiring them a second time somewhere else is a second place they disagree.
+   */
+  private readonly spool: Spool;
+
+  constructor(private readonly options: ServeOptions) {
+    this.spool = new Spool({
+      store: options.transcript.store,
+      generation: options.transcript.fence.generation,
+      transport: options.transport,
+      sink: options.transcript.sink,
+      log: options.log,
+    });
+  }
+
+  /**
+   * A transcript's options, with the spool it owes partial wraps to.
+   *
+   * One spool for the whole server: a transcript is per session, and a spool
+   * per transcript is a retry loop per session.
+   */
+  private transcriptOptions(): ServeOptions["transcript"] {
+    return { ...this.options.transcript, spool: this.spool };
+  }
 
   private log(line: string): void {
     this.options.log?.(line);
@@ -494,6 +522,17 @@ export class EveServer {
      */
     claimingWork?: boolean;
   }): Promise<void> {
+    /**
+     * Send what the last run never managed to, before taking new work.
+     *
+     * A reply is owed by a row, and a row only moves when something looks at
+     * it. A spool that woke on the next outgoing message would leave the last
+     * process's owed answers sitting there for as long as nobody wrote in —
+     * which is precisely the case a crash between turn-end and delivery leaves
+     * behind.
+     */
+    await this.spool.start();
+
     const open = this.options.transcript.store
       .openTranscripts()
       .filter((record) => !this.reading(record.sessionId))
@@ -516,7 +555,7 @@ export class EveServer {
       const conversation: Conversation = {
         sessionId: record.sessionId,
         transcript: new EveTranscript(
-          { ...this.options.transcript },
+          this.transcriptOptions(),
           record.sessionId,
         ),
         finished: new Set(),
@@ -776,7 +815,7 @@ export class EveServer {
         }),
       );
       const transcript = new EveTranscript(
-        { ...this.options.transcript },
+        this.transcriptOptions(),
         sessionId,
         control.session,
       );
@@ -887,7 +926,7 @@ export class EveServer {
     );
     const transcript =
       conversation?.transcript ??
-      new EveTranscript({ ...this.options.transcript }, sessionId);
+      new EveTranscript(this.transcriptOptions(), sessionId);
     // `aborted`, not `done`: a session retired by its operator did not finish
     // what it was doing, and a reader deserves the difference.
     await transcript.close("aborted");
@@ -1043,10 +1082,7 @@ export class EveServer {
       record.sessionId,
     ) ?? {
       sessionId: record.sessionId,
-      transcript: new EveTranscript(
-        { ...this.options.transcript },
-        record.sessionId,
-      ),
+      transcript: new EveTranscript(this.transcriptOptions(), record.sessionId),
       finished: new Set(),
     };
     let boundary: Boundary | undefined;
@@ -1382,18 +1418,13 @@ export class EveServer {
      * Say "seen" before doing anything slow.
      *
      * Sent first and never awaited into the turn's critical path: a relay that
-     * will not take a reaction must not stop the work. A failed ack is logged and
-     * the turn goes on.
+     * will not take a reaction must not stop the work. Through the spool, so
+     * one that was refused is retried rather than lost — and the spool is
+     * where its failure is reported.
      */
     const emoji = this.options.ackEmoji ?? "👀";
     if (emoji && this.options.transport.react)
-      void this.options.transport
-        .react(inbound, emoji)
-        .catch((error: unknown) =>
-          this.log(
-            `[hex] could not acknowledge ${short(peer)}: ${message(error)}`,
-          ),
-        );
+      void this.spool.react(inbound, emoji);
 
     /**
      * The index a terminal event has to beat to end THIS turn.
@@ -1430,10 +1461,7 @@ export class EveServer {
           inbound.room,
         ),
       );
-      const transcript = new EveTranscript(
-        { ...this.options.transcript },
-        sessionId,
-      );
+      const transcript = new EveTranscript(this.transcriptOptions(), sessionId);
       /**
        * The message that started it, named on the head before anything publishes.
        *
@@ -1553,12 +1581,16 @@ export class EveServer {
       return;
     }
 
-    try {
-      const id = await this.options.transport.reply(inbound, answer);
-      this.log(`[hex] answered ${short(peer)} as ${id.slice(0, 12)}…`);
-    } catch (error) {
-      this.log(`[hex] could not answer ${short(peer)}: ${message(error)}`);
-    }
+    /**
+     * Through the spool, so an answer no relay took is still owed.
+     *
+     * The turn is over and the money is spent by the time this runs, and a
+     * reply lost here used to be lost for good: the person was left with
+     * silence and the failure was a log line only the operator ever sees.
+     */
+    const id = await this.spool.reply(inbound, answer);
+    if (id) this.log(`[hex] answered ${short(peer)} as ${id.slice(0, 12)}…`);
+    else this.log(`[hex] the answer for ${short(peer)} is owed, not lost`);
   }
 
   /**
@@ -1714,13 +1746,10 @@ export class EveServer {
       return;
     }
     if (this.options.reply === false || !answer) return;
-    try {
-      await this.options.transport.reply(inbound, answer);
-    } catch (error) {
+    if (!(await this.spool.reply(inbound, answer)))
       this.log(
-        `[hex] could not answer ${short(inbound.author)}: ${message(error)}`,
+        `[hex] the answer for ${short(inbound.author)} is owed, not lost`,
       );
-    }
   }
 
   /**
@@ -1762,26 +1791,26 @@ export class EveServer {
       else lines.push("", "Reply here, or open the session to answer there:");
       lines.push(address);
 
-      try {
-        const id = await this.options.transport.reply(
-          inbound,
-          lines.join("\n"),
-        );
-        this.options.transcript.store.rememberQuestion(
-          id,
-          conversation.sessionId,
-          question.requestId,
-          Math.floor(Date.now() / 1000),
-        );
+      /**
+       * The request travels WITH the row, so a question that lands on the
+       * third attempt is still answerable in the room. Remembering it here
+       * would tie the mapping to a delivery that happened in this process.
+       */
+      const id = await this.spool.reply(inbound, lines.join("\n"), {
+        remember: {
+          sessionId: conversation.sessionId,
+          requestId: question.requestId,
+        },
+      });
+      if (id)
         this.log(
           `[hex] asked ${short(inbound.author)} ${question.requestId} as ${id.slice(0, 12)}…`,
         );
-      } catch (error) {
-        // The run stays parked either way; what is lost is the person knowing.
+      else
+        // The run stays parked either way; what is owed is the person knowing.
         this.log(
-          `[hex] could not put ${question.requestId} to ${short(inbound.author)}: ${message(error)}`,
+          `[hex] ${question.requestId} has not reached ${short(inbound.author)} yet`,
         );
-      }
     }
   }
 
@@ -2041,7 +2070,7 @@ export class EveServer {
     if (!sessionId) return undefined;
     const conversation: Conversation = {
       sessionId,
-      transcript: new EveTranscript({ ...this.options.transcript }, sessionId),
+      transcript: new EveTranscript(this.transcriptOptions(), sessionId),
       /**
        * Nothing is known to have ended, because this process did not watch it.
        *
@@ -2188,6 +2217,8 @@ export class EveServer {
   async close(): Promise<void> {
     if (this.sweeping) clearInterval(this.sweeping);
     this.sweeping = undefined;
+    // Whatever is still owed stays owed, in its rows: the next start sends it.
+    this.spool.stop();
     for (const conversation of this.conversations.values())
       await conversation.transcript.close();
   }

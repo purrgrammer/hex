@@ -542,6 +542,41 @@ describe("Runner", () => {
       expect(store.inboundClaim(seq)).toBe(generation);
     });
 
+    it("does not answer a message whose answer is already owed", async () => {
+      /**
+       * The redelivery hole, closed by the spool. A message row a dead
+       * generation claimed can be handed to the next one, and the turn behind
+       * it may already have run — its answer spooled and waiting for a relay.
+       * Asking again costs a second run of a model and answers one question
+       * twice; the outbound row is the marker that says not to.
+       */
+      const bus = target();
+      // A queue that never settles: the process died before it could.
+      const { ingest } = runner(bus, { queue: { finish: () => {} } });
+      const message = inbound({ id: "m7" });
+      const seq = ingest.accept(message)!;
+      await tick();
+      expect(bus.calls).toEqual(["turn m7"]);
+      expect(store.inboundOutcome(seq)).toBeUndefined();
+      store.enqueueOutbound({
+        inboundSeq: seq,
+        kind: "reply",
+        transport: "nip-17",
+        room: PEER,
+        payload: { to: message, text: "already composed" },
+      });
+
+      // The same row, offered to the next generation the way a restart does.
+      const revived = target();
+      const second = runner(revived, {
+        generation: store.acquireWriterLease({ takeover: true }).generation,
+      });
+      second.ingest.drain();
+      await tick();
+      expect(revived.calls).toEqual([]);
+      expect(store.inboundOutcome(seq)).toBe("handled");
+    });
+
     it("leaves an instruction that did not land owed", async () => {
       const nostrId = "c".repeat(64);
       transcriptRow("wrun_3", nostrId);

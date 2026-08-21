@@ -44,6 +44,7 @@ import type {
 import { isKnownPart, TERMINAL_STATUSES } from "../nostr/types.js";
 import type { Prices } from "./pricing.js";
 import type { HexStore, StoredTranscript } from "../store.js";
+import type { WrapSpool } from "../outbound.js";
 import {
   outputText,
   payload,
@@ -129,6 +130,14 @@ export interface EveTranscriptOptions {
    */
   fence: { generation: number };
   sink: RumorSink;
+  /**
+   * Where a wrap that reached SOME recipients and not others is owed.
+   *
+   * Only that case: everything else this publisher sends is replayable from
+   * the stream it reads, which is why the transcript path has no spool of its
+   * own. Absent means a partial delivery is logged and nothing more.
+   */
+  spool?: WrapSpool;
   /**
    * Where a group run's events also go. Absent means they only ever wrap.
    *
@@ -1792,6 +1801,23 @@ export class EveTranscript {
       if (undeliverable.length > 0)
         this.log(
           `[hex] transcript ${what} did not reach ${undeliverable.length} recipient(s)`,
+        );
+      /**
+       * A PARTIAL delivery is the one case the spool is for.
+       *
+       * Reaching nobody freezes the cursor below, and a restart replays and
+       * republishes the whole event — owing it as well would publish it twice.
+       * Reaching some advances the cursor, so nothing ever replays it, and the
+       * recipients who are missing it would never get it. Deltas are excluded:
+       * they are dropped by the relay by design, and one redelivered minutes
+       * later is noise about a turn that has long since ended.
+       */
+      if (!ephemeral && delivered.length > 0 && undeliverable.length > 0)
+        this.options.spool?.owe(
+          rumor,
+          undeliverable,
+          this.record.nostrId,
+          what,
         );
       if (delivered.length === 0) {
         /**

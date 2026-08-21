@@ -294,7 +294,8 @@ export class Ingestor {
   /**
    * Start draining, and retire what the last run left behind.
    *
-   * A pending message from a dead process is dropped rather than re-run:
+   * A pending message from a dead process is dropped rather than re-run —
+   * settled instead when the spool already owes its answer:
    * nobody is waiting for that answer, it costs money, and redelivering into a
    * writer that has not been fenced is the duplicate-publish bug. A pending
    * CONTROL is redelivered, because a relay used to redeliver it and the
@@ -312,6 +313,20 @@ export class Ingestor {
           `[hex] control ${row.seq} was never carried out and is too old to try — dropped`,
         );
         this.options.store.finishInbound(row.seq, "dropped:expired");
+        continue;
+      }
+      /**
+       * Unless it was already answered, and it is the ANSWER that is owed.
+       *
+       * The spool's row is the durable record that this message's turn ran, so
+       * calling this one "dropped" would say in the log that a question went
+       * unanswered while its answer is on its way out of the spool.
+       */
+      if (this.options.store.outboundRepliedTo(row.seq)) {
+        this.log(
+          `[hex] queued message ${row.seq} was answered by an earlier run — its reply is owed, not another turn`,
+        );
+        this.options.store.finishInbound(row.seq, "handled");
         continue;
       }
       this.log(

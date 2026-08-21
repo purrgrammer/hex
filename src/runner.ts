@@ -238,11 +238,28 @@ export class Runner {
   }
 
   private offerMessage(queued: QueuedEvent): void {
+    /**
+     * An answer to this row was already composed, so it is not asked again.
+     *
+     * The idempotency marker a gateway usually gets from a client-supplied key
+     * and hex cannot: the spool's row IS the record that the turn happened.
+     * Without it, a row redelivered after a crash — claimed under a generation
+     * that is gone, settled by nothing — buys a second run of a turn whose
+     * answer is already owed or already sent. Replies only; the ack reaction is
+     * spooled before the turn starts and says nothing about it.
+     */
+    if (this.options.store.outboundRepliedTo(queued.seq)) {
+      this.log(
+        `[hex] queued message ${queued.seq} already has an answer owed — not run again`,
+      );
+      this.options.queue.finish(queued.seq, "handled");
+      return;
+    }
     const inbound = queued.carrier;
     if (!inbound) {
       // A row from a previous run: the canonical fields cannot be replied to,
-      // only the transport's own object can. Phase G is what makes an owed
-      // answer survive; until then nobody is waiting for this one.
+      // only the transport's own object can. An answer that WAS composed is
+      // owed by the spool above, not by this row.
       this.log(`[hex] queued message ${queued.seq} has no carrier — dropped`);
       this.options.queue.finish(queued.seq, "dropped:restart");
       return;

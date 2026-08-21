@@ -22,6 +22,8 @@ function fenceFor(store: HexStore): { generation: number } {
 
 const AGENT = "9".repeat(64);
 const OPERATOR = "1".repeat(64);
+/** A second reader of the same run, for the partial-delivery case. */
+const READER = "2".repeat(64);
 const SESSION = "ses_01KYJBZA88B4M9XN3RTC5FDGHJ";
 
 function sink(options: { deliver?: () => boolean; slow?: boolean } = {}) {
@@ -1102,7 +1104,8 @@ describe("EveTranscript", () => {
       .filter((s) => s.rumor.kind === 21777)
       .map((s) => s.rumor.id);
     expect(deltaIds.length).toBeGreaterThan(0);
-    for (const id of deltaIds) expect(carried.map((c) => c.id)).not.toContain(id);
+    for (const id of deltaIds)
+      expect(carried.map((c) => c.id)).not.toContain(id);
 
     // And the carriage survives the restart, or a resumed run would quietly
     // fall back to wrapping and the channel's chain would stop mid-session.
@@ -1155,6 +1158,83 @@ describe("EveTranscript", () => {
     expect(attempts).toHaveLength(1);
     // And the wrapped copy carried on regardless.
     expect(sent.some((s) => s.rumor.kind === 1777)).toBe(true);
+    store.close();
+  });
+
+  it("owes a wrap to the recipient it did not reach, and only that one", async () => {
+    /**
+     * The one case in this file the spool is for. Reaching NOBODY freezes the
+     * cursor, and a restart replays and republishes the whole event — owing it
+     * as well would publish it twice. Reaching SOME advances the cursor, so
+     * nothing ever replays it and whoever is missing it never gets it at all.
+     * Only that second case comes here.
+     */
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const owed: { rumor: Rumor; recipients: string[] }[] = [];
+    const partial: RumorSink = {
+      publishRumor: async (_rumor, recipients) => ({
+        delivered: recipients.filter((peer) => peer === OPERATOR),
+        undeliverable: recipients.filter((peer) => peer !== OPERATOR),
+      }),
+    };
+    const pub = publisher(store, partial, SESSION, {
+      recipients: [OPERATOR, READER],
+      spool: {
+        owe: (rumor: Rumor, recipients: string[]) =>
+          owed.push({ rumor, recipients }),
+      },
+    });
+
+    let index = 0;
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "message.completed",
+        data: { turnId: "turn_0", message: "One." },
+      },
+      ++index,
+    );
+
+    expect(owed.length).toBeGreaterThan(0);
+    // The second reader, and never the operator who already has it.
+    for (const entry of owed) expect(entry.recipients).toEqual([READER]);
+    store.close();
+  });
+
+  it("owes nothing when a wrap reached nobody, because the stream replays it", async () => {
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const owed: string[][] = [];
+    const nowhere: RumorSink = {
+      publishRumor: async (_rumor, recipients) => ({
+        delivered: [],
+        undeliverable: recipients,
+      }),
+    };
+    const pub = publisher(store, nowhere, SESSION, {
+      recipients: [OPERATOR, READER],
+      spool: {
+        owe: (_rumor: Rumor, recipients: string[]) => owed.push(recipients),
+      },
+    });
+
+    let index = 0;
+    await pub.handle(
+      { type: "turn.started", data: { turnId: "turn_0" } },
+      ++index,
+    );
+    await pub.handle(
+      {
+        type: "message.completed",
+        data: { turnId: "turn_0", message: "One." },
+      },
+      ++index,
+    );
+
+    // The cursor is frozen instead, which is what makes the restart republish.
+    expect(owed).toEqual([]);
     store.close();
   });
 

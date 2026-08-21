@@ -461,6 +461,40 @@ CREATE TABLE IF NOT EXISTS transport_cursors (
   since     INTEGER NOT NULL,
   PRIMARY KEY (transport, relay, stream)
 );
+
+/*
+ * What this agent still owes the network.
+ *
+ * The transcript is NOT here: Eve's indexed stream is already a durable
+ * outbound queue — the cursor only advances on a publish that landed, and a
+ * restart replays what it did not — so a spool beside it would be a second
+ * source of truth for the same events. What IS here is everything composed
+ * once and then lost on failure: a reply, an ack reaction, and the gift wrap
+ * of a transcript event that reached some recipients but not all (the partial
+ * case, which advances the cursor and is therefore never replayed).
+ *
+ * payload carries the whole inbound message (or rumor) as JSON, because a reply
+ * is not composable from canonical fields alone — a NIP-29 reply threads onto
+ * the raw event — and a row has to be sendable by a process that never saw it.
+ */
+CREATE TABLE IF NOT EXISTS outbound (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  inbound_seq INTEGER,
+  kind        TEXT NOT NULL,
+  transport   TEXT NOT NULL,
+  relay       TEXT,
+  room        TEXT NOT NULL,
+  recipient   TEXT,
+  payload     TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  claimed_gen INTEGER,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  sent_at     INTEGER,
+  sent_id     TEXT,
+  last_error  TEXT
+);
+CREATE INDEX IF NOT EXISTS outbound_pending ON outbound (id) WHERE sent_at IS NULL;
+CREATE INDEX IF NOT EXISTS outbound_inbound ON outbound (inbound_seq);
 `;
 
 /**
@@ -498,6 +532,14 @@ const INBOUND_SEEN_HORIZON_SECONDS = 30 * 24 * 60 * 60;
 const INBOUND_DONE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 
 /**
+ * How long a delivered outbound row is kept.
+ *
+ * Same reasoning as the queue's: only for reading afterwards. A row that never
+ * went is never pruned — it is still owed, however old.
+ */
+const OUTBOUND_SENT_HORIZON_SECONDS = 7 * 24 * 60 * 60;
+
+/**
  * A queue row, as it came back out of SQLite.
  *
  * Deliberately NOT a `CanonicalEvent`: `type` is a string here because the row
@@ -520,6 +562,48 @@ export interface QueuedInbound {
   createdAt: number;
   observedAt: number;
   payload: unknown;
+}
+
+/**
+ * Something owed to the network, as it goes in.
+ *
+ * `room` is what the row is about rather than where it goes — a wrap's is the
+ * session it belongs to — so an operator reading the spool can see which
+ * conversation is stuck.
+ */
+export interface OutboundSpec {
+  /** The queue row this answers, when it answers one. */
+  inboundSeq?: number;
+  kind: "reply" | "reaction" | "wrap";
+  transport: string;
+  relay?: string;
+  room: string;
+  /** Per-recipient for a wrap, so partial delivery retries only who is left. */
+  recipient?: string;
+  payload: unknown;
+}
+
+/**
+ * The same row, read back.
+ *
+ * `kind` is a string here, not the union: a row may have been spooled by a
+ * newer hex that can send a kind this one has never heard of.
+ */
+export interface OutboundRow extends Omit<OutboundSpec, "kind"> {
+  id: number;
+  kind: string;
+  createdAt: number;
+  attempts: number;
+  lastError?: string;
+}
+
+/** What became of one spooled row. */
+export interface OutboundState {
+  attempts: number;
+  sentAt?: number;
+  sentId?: string;
+  lastError?: string;
+  claimedGen?: number;
 }
 
 /** One row of the publish ledger. */
@@ -717,6 +801,10 @@ export class HexStore {
     db.prepare(
       `DELETE FROM inbound_events WHERE done_at IS NOT NULL AND done_at < ?`,
     ).run(Math.floor(Date.now() / 1000) - INBOUND_DONE_HORIZON_SECONDS);
+    // Delivered rows only: an owed one stays owed for as long as it takes.
+    db.prepare(
+      `DELETE FROM outbound WHERE sent_at IS NOT NULL AND sent_at < ?`,
+    ).run(Math.floor(Date.now() / 1000) - OUTBOUND_SENT_HORIZON_SECONDS);
 
     /**
      * Concord's cursors, carried into the general table.
@@ -1152,6 +1240,206 @@ export class HexStore {
       .prepare(`SELECT outcome FROM inbound_events WHERE seq = ?`)
       .get(seq) as { outcome?: string | null } | undefined;
     return row?.outcome ?? undefined;
+  }
+
+  /** The queue row one accepted event landed in, if this home has it. */
+  inboundSeqFor(transport: string, eventId: string): number | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT seq FROM inbound_events WHERE transport = ? AND event_id = ?`,
+      )
+      .get(transport, eventId) as { seq?: number } | undefined;
+    return row?.seq ?? undefined;
+  }
+
+  // ── Outbound spool ────────────────────────────────────────────────────────
+
+  /**
+   * Owe something to the network. Durable before anything is attempted.
+   *
+   * The insert is the whole point: a reply composed and then handed straight to
+   * a transport is lost by any failure between the two, and nothing afterwards
+   * knows it was ever owed.
+   */
+  enqueueOutbound(
+    spec: OutboundSpec,
+    at = Math.floor(Date.now() / 1000),
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO outbound
+           (inbound_seq, kind, transport, relay, room, recipient, payload,
+            created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        spec.inboundSeq ?? null,
+        spec.kind,
+        spec.transport,
+        spec.relay ?? null,
+        spec.room,
+        spec.recipient ?? null,
+        JSON.stringify(spec.payload),
+        at,
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  /**
+   * Everything still owed, oldest first, minus what has been given up on.
+   *
+   * A row past `maxAttempts` is parked rather than deleted: the send is not
+   * happening, and `last_error` is the only thing that says why. Excluded here
+   * so one poisoned row cannot hold up the rest of the spool.
+   */
+  pendingOutbound(maxAttempts: number, limit = 200): OutboundRow[] {
+    return this.readOutbound(
+      `WHERE sent_at IS NULL AND attempts < ? ORDER BY id LIMIT ?`,
+      [maxAttempts, limit],
+    );
+  }
+
+  /** One row that has not gone yet, whatever its attempts. */
+  owedOutbound(id: number): OutboundRow | undefined {
+    return this.readOutbound(`WHERE id = ? AND sent_at IS NULL`, [id])[0];
+  }
+
+  private readOutbound(
+    where: string,
+    bind: (number | string)[],
+  ): OutboundRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, inbound_seq, kind, transport, relay, room, recipient,
+                payload, created_at, attempts, last_error
+           FROM outbound ${where}`,
+      )
+      .all(...bind) as unknown as {
+      id: number;
+      inbound_seq: number | null;
+      kind: string;
+      transport: string;
+      relay: string | null;
+      room: string;
+      recipient: string | null;
+      payload: string;
+      created_at: number;
+      attempts: number;
+      last_error: string | null;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      inboundSeq: row.inbound_seq ?? undefined,
+      // Untrusted for the same reason a queue row's type is: a newer hex may
+      // spool a kind this build cannot send.
+      kind: row.kind,
+      transport: row.transport,
+      relay: row.relay ?? undefined,
+      room: row.room,
+      recipient: row.recipient ?? undefined,
+      payload: JSON.parse(row.payload) as unknown,
+      createdAt: row.created_at,
+      attempts: row.attempts,
+      lastError: row.last_error ?? undefined,
+    }));
+  }
+
+  /**
+   * Take one row for the live generation and count the attempt.
+   *
+   * Fenced on the lease, like every other write that reaches a relay: a process
+   * whose lease was taken over would otherwise drain the same rows the new
+   * holder is draining, and both would send. Counted BEFORE the attempt, so a
+   * send that hangs or crashes the process still spends one — a poisoned row
+   * that kills its sender must not be retried forever.
+   */
+  beginOutbound(id: number, generation: number): boolean {
+    return this.transaction(() => {
+      const live = this.db
+        .prepare(`SELECT generation FROM writer_lease WHERE id = 1`)
+        .get() as { generation: number } | undefined;
+      if (!live || Number(live.generation) !== generation)
+        throw new FencedWriteError(
+          `refusing to send outbound ${id}: this writer holds generation ` +
+            `${generation}, but the lease is at ` +
+            `${live ? `generation ${Number(live.generation)}` : "no generation at all"} — ` +
+            `another process owns this home now`,
+        );
+      const result = this.db
+        .prepare(
+          `UPDATE outbound SET claimed_gen = ?, attempts = attempts + 1
+             WHERE id = ? AND sent_at IS NULL`,
+        )
+        .run(generation, id);
+      return Number(result.changes) === 1;
+    });
+  }
+
+  /** It went. `sentId` is the published event's id. */
+  outboundSent(
+    id: number,
+    sentId: string,
+    at = Math.floor(Date.now() / 1000),
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE outbound SET sent_at = ?, sent_id = ?, last_error = NULL
+           WHERE id = ?`,
+      )
+      .run(at, sentId, id);
+  }
+
+  /** It did not go, and this is what the relay or the transport said. */
+  outboundFailed(id: number, error: string): void {
+    this.db
+      .prepare(`UPDATE outbound SET last_error = ? WHERE id = ?`)
+      .run(error.slice(0, 500), id);
+  }
+
+  /**
+   * Whether an answer to this queue row has already been composed.
+   *
+   * The idempotency marker a client-supplied key would give us and a relay
+   * cannot: a redelivered message whose row already owes — or has already sent
+   * — a reply must be settled rather than answered a second time.
+   *
+   * Replies ONLY. The ack reaction is spooled before the turn even starts, so
+   * counting it would make every redelivered message look already answered.
+   */
+  outboundRepliedTo(inboundSeq: number): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM outbound WHERE inbound_seq = ? AND kind = 'reply'`,
+        )
+        .get(inboundSeq),
+    );
+  }
+
+  /** One row, whatever state it is in — for the operator, and for tests. */
+  outboundRow(id: number): OutboundState | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT attempts, sent_at, sent_id, last_error, claimed_gen
+           FROM outbound WHERE id = ?`,
+      )
+      .get(id) as
+      | {
+          attempts: number;
+          sent_at: number | null;
+          sent_id: string | null;
+          last_error: string | null;
+          claimed_gen: number | null;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      attempts: row.attempts,
+      sentAt: row.sent_at ?? undefined,
+      sentId: row.sent_id ?? undefined,
+      lastError: row.last_error ?? undefined,
+      claimedGen: row.claimed_gen ?? undefined,
+    };
   }
 
   close(): void {

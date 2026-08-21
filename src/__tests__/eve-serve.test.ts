@@ -256,17 +256,21 @@ function sink() {
   return { impl, sent };
 }
 
-function transport() {
+function transport(options: { failing?: boolean } = {}) {
   const replies: { to: string; text: string; tags?: string[][] }[] = [];
   const reactions: { to: string; emoji: string }[] = [];
   return {
     replies,
     reactions,
+    // Failing is a relay that will not take the event: the answer exists, the
+    // turn is paid for, and there is nowhere for it to go.
     reply: async (to: Inbound, text: string, tags?: string[][]) => {
+      if (options.failing) throw new Error("no relay took the reply");
       replies.push({ to: to.id, text, tags });
       return "reply-id";
     },
     react: async (to: Inbound, emoji: string) => {
+      if (options.failing) throw new Error("no relay took the reaction");
       reactions.push({ to: to.id, emoji });
       return "reaction-id";
     },
@@ -1784,6 +1788,60 @@ describe("EveServer", () => {
 
       expect(eve.posts.length).toBe(before);
       expect(store.inboundOutcome(seq)).toBe("duplicate");
+    });
+  });
+
+  describe("an answer that never reached the room", () => {
+    it("goes out at the next start, once, without running the turn again", async () => {
+      /**
+       * The gap this phase closes. The model ran, the answer was composed, and
+       * the relay refused it — or the process died between the two. Nothing
+       * anywhere knew an answer was owed, so the person was left with silence
+       * and the only record was a log line.
+       *
+       * Two halves, both in one test because they are one behaviour: the reply
+       * survives, and the message that produced it is NOT asked again. Running
+       * the turn twice is the expensive half of the bug.
+       */
+      const eve = fakeEve();
+      const refusing = transport({ failing: true });
+      const hex = server(eve, refusing, sink().impl);
+      const dead = runnerFor(hex, { settle: false });
+      const seq = dead.ingest.accept(inbound("msg-1", "how many kinds?"))!;
+
+      await until(
+        () =>
+          store.pendingOutbound(5).filter((row) => row.kind === "reply")
+            .length === 1,
+      );
+      expect(refusing.replies).toEqual([]);
+      // Unsettled and claimed: a process that died before it could finish.
+      expect(store.inboundOutcome(seq)).toBeUndefined();
+      const owed = store.pendingOutbound(5).find((row) => row.kind === "reply");
+      expect(owed?.inboundSeq).toBe(seq);
+      const turns = eve.posts.length;
+
+      // A second process over the same home, and a relay that takes events.
+      const working = transport();
+      const revived = server(eve, working, sink().impl);
+      const alive = runnerFor(revived);
+      alive.ingest.start();
+      // What the daemon does at startup, and what drains the spool with it.
+      await revived.catchUp();
+      alive.ingest.stop();
+
+      expect(working.replies).toEqual([
+        { to: "msg-1", text: "41 of them.", tags: undefined },
+      ]);
+      // The turn did not run again: no new request reached the runtime.
+      expect(eve.posts.length).toBe(turns);
+      expect(store.inboundOutcome(seq)).toBe("handled");
+      expect(store.pendingOutbound(5)).toEqual([]);
+
+      // And it stays sent: a third start has nothing left to owe.
+      const third = server(eve, transport(), sink().impl);
+      await third.catchUp();
+      expect(store.pendingOutbound(5)).toEqual([]);
     });
   });
 });

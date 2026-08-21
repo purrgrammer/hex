@@ -49,6 +49,13 @@ export {
   type RunnerTarget,
 } from "./runner.js";
 export {
+  Spool,
+  type SpoolOptions,
+  type SpoolSink,
+  type SpoolTransport,
+  type WrapSpool,
+} from "./outbound.js";
+export {
   roomKey,
   type Room,
   type Inbound,
