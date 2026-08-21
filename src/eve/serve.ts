@@ -403,7 +403,27 @@ export class EveServer {
    * session's turns twice, which is the failure everything else here exists to
    * prevent.
    */
-  private readonly readers = new Set<string>();
+  private readonly readers = new Map<string, number>();
+
+  /**
+   * Counted, not a flag, and bracketed by the caller's `finally`.
+   *
+   * A reconcile is a read inside a read, so the inner one's release would
+   * otherwise clear the outer one's claim. And a leaked claim is worse than a
+   * missing one: the sweep would skip that session for the life of the
+   * process, which is the stale head this all exists to prevent.
+   */
+  private startedReading(sessionId: string): () => void {
+    this.readers.set(sessionId, (this.readers.get(sessionId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const left = (this.readers.get(sessionId) ?? 1) - 1;
+      if (left > 0) this.readers.set(sessionId, left);
+      else this.readers.delete(sessionId);
+    };
+  }
 
   /**
    * Control events already carried out, bounded and FIFO.
@@ -1788,7 +1808,7 @@ export class EveServer {
      * catch below treats it as "this process cannot report further", which is
      * exactly what it is.
      */
-    this.readers.add(conversation.sessionId);
+    const stopReading = this.startedReading(conversation.sessionId);
     const verdict = new AbortController();
     let verdictTimer: ReturnType<typeof setTimeout> | undefined;
     /**
@@ -1946,7 +1966,7 @@ export class EveServer {
       }
     }
 
-    this.readers.delete(conversation.sessionId);
+    stopReading();
 
     if (failed && !answer) return `That did not work: ${failed}`;
     return answer;
@@ -1962,7 +1982,8 @@ export class EveServer {
   /** Whether this process has a reader on that session's stream. */
   private reading(sessionId: string): boolean {
     return (
-      this.readers.has(sessionId) || this.following(sessionId) !== undefined
+      (this.readers.get(sessionId) ?? 0) > 0 ||
+      this.following(sessionId) !== undefined
     );
   }
 
@@ -2054,7 +2075,7 @@ export class EveServer {
     /** A wall-clock ceiling, for a read that may never fall silent. */
     deadlineMs?: number,
   ): Promise<Boundary> {
-    this.readers.add(conversation.sessionId);
+    const stopReading = this.startedReading(conversation.sessionId);
     const quiet = this.options.drainQuietMs ?? DEFAULT_DRAIN_QUIET_MS;
     const controller = new AbortController();
     const stop = () => {
@@ -2099,7 +2120,7 @@ export class EveServer {
       clearTimeout(timer);
       if (deadline) clearTimeout(deadline);
       this.options.signal?.removeEventListener("abort", stop);
-      this.readers.delete(conversation.sessionId);
+      stopReading();
     }
     conversation.finished = finished;
     return { last, finished };

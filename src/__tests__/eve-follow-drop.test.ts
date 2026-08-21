@@ -313,14 +313,64 @@ describe("what counts as already being read", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("does not sweep a session while a follow is in flight on it", async () => {
-    const eve = droppingEve();
+  /**
+   * An Eve that holds its stream open until the test lets go, so the follow is
+   * provably still in flight when the sweep runs. Timing sleeps do not prove
+   * this: if the follow finishes first the head is no longer `active`, the
+   * sweep finds nothing, and the assertion passes without touching the guard.
+   */
+  function heldEve() {
+    const encoder = new TextEncoder();
+    const reads: number[] = [];
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+
+    const impl = (async (url: string | URL, init?: RequestInit) => {
+      if (init?.method === "POST")
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({ ok: true, sessionId: SESSION }),
+        };
+      reads.push(
+        Number(new URL(String(url)).searchParams.get("startIndex") ?? 0),
+      );
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers(),
+        body: (async function* () {
+          for (const event of CUT_OFF)
+            yield encoder.encode(JSON.stringify(event) + "\n");
+          open();
+          await held;
+          for (const event of THE_REST)
+            yield encoder.encode(JSON.stringify(event) + "\n");
+        })(),
+      };
+    }) as unknown as typeof fetch;
+
+    return { impl, reads, opened, release };
+  }
+
+  /**
+   * The gap, exactly: a run started over the CONTROL PLANE. It belongs to no
+   * room, so it is never put in the room-keyed conversation map, and asking
+   * that map whether it is being followed answers "no" about a session with a
+   * live reader on it. Driving the DM path instead proves nothing — that one
+   * IS in the map, and the assertion passes with or without the guard.
+   */
+  it("does not sweep a control-plane run while it is being read", async () => {
+    const eve = heldEve();
     const { impl } = sink();
     const hex = new EveServer({
       runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
       transport: transport() as never,
-      // Long enough that the follow is still reading when the sweep fires.
-      drainQuietMs: 400,
+      drainQuietMs: 50,
       transcript: {
         agentPubkey: AGENT,
         slug: "hex",
@@ -332,12 +382,26 @@ describe("what counts as already being read", () => {
       },
     });
 
-    const working = hex.handle(inbound("m1", "do the long thing"));
-    // While that is in flight, the sweep must find nothing to do.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    const wire = "a".repeat(64);
+    const working = hex.control({
+      id: "ctl_1",
+      operator: PEER,
+      agent: AGENT,
+      session: wire,
+      command: "start",
+      text: "do the long thing",
+    } as never);
+    await eve.opened;
+
+    // There has to be something for the sweep to find, or the guard is not
+    // what the assertion is measuring.
+    const record = store.transcriptFor(SESSION);
+    expect(record?.status).toBe("active");
     const before = eve.reads.length;
     await hex.catchUp({ claimingWork: true });
     expect(eve.reads.length).toBe(before);
+
+    eve.release();
     await working;
   });
 });
