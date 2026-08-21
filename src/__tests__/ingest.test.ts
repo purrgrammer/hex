@@ -186,7 +186,7 @@ describe("draining", () => {
 });
 
 describe("what a dead process left behind", () => {
-  it("drops its messages and redelivers its controls", () => {
+  it("redelivers both, because the row answers for itself", () => {
     const messageSeq = store.enqueueInbound(
       messageEvent(groupMessage("5".repeat(64))),
     )!;
@@ -198,13 +198,31 @@ describe("what a dead process left behind", () => {
     ingest.start();
     ingest.stop();
 
-    // Nobody is waiting for that answer and re-running it costs money;
-    // redelivery is the runner's to own, once its claims are fenced.
-    expect(store.inboundOutcome(messageSeq)).toBe("dropped:restart");
-    // A stop button pressed while the runtime was down is still owed. The
-    // relay used to redeliver it; the row does now, and `obeyed` makes a
-    // second delivery a no-op.
-    expect(seen.map((queued) => queued.seq)).toEqual([controlSeq]);
+    // The message used to be settled `dropped:restart` here without ever
+    // being dispatched, because the only thing that could answer it was an
+    // `Inbound` held in the dead process's memory. It is handed on now; this
+    // fake dispatch is what settles it `handled`.
+    expect(store.inboundOutcome(messageSeq)).not.toMatch(/^dropped/);
+    expect(seen.map((queued) => queued.seq)).toEqual([messageSeq, controlSeq]);
+    // And it arrives answerable, not as a bare record.
+    const redelivered = seen.find((queued) => queued.seq === messageSeq)!;
+    expect(redelivered.carrier).toBeDefined();
+    expect(redelivered.carrier!.id).toBe("5".repeat(64));
+    expect(redelivered.carrier!.room.id).toBeTruthy();
+  });
+
+  it("gives up only on a row written before the raw event was kept", () => {
+    const seq = store.enqueueInbound(
+      messageEvent(groupMessage("8".repeat(64))),
+    )!;
+    // What an upgrade leaves behind: a row from a build that stored no raw.
+    store.rawForTests?.(seq, null);
+
+    const { ingest, seen } = recording();
+    ingest.start();
+    ingest.stop();
+    const forMessage = seen.find((queued) => queued.seq === seq);
+    expect(forMessage?.carrier).toBeUndefined();
   });
 
   it("leaves a control owed when acting on it fails", () => {

@@ -419,6 +419,11 @@ CREATE TABLE IF NOT EXISTS inbound_events (
   created_at  INTEGER NOT NULL,
   observed_at INTEGER NOT NULL,
   payload     TEXT NOT NULL,
+  -- The event exactly as it arrived. The canonical payload deliberately holds
+  -- no transport fields, which is right for deciding and wrong for replying:
+  -- a Concord reply inherits K/E/P from the original's tags. Kept here so a
+  -- row is answerable on its own, with no help from the process that read it.
+  raw         TEXT,
   claimed_gen INTEGER,
   claimed_at  INTEGER,
   done_at     INTEGER,
@@ -562,6 +567,8 @@ export interface QueuedInbound {
   createdAt: number;
   observedAt: number;
   payload: unknown;
+  /** The event as it arrived, so the row can be answered without runtime state. */
+  raw?: unknown;
 }
 
 /**
@@ -748,6 +755,14 @@ export class HexStore {
       db.exec(`ALTER TABLE transcripts ADD COLUMN grp TEXT`);
     if (!columns.includes("grp_relay"))
       db.exec(`ALTER TABLE transcripts ADD COLUMN grp_relay TEXT`);
+
+    // `raw` arrived after `inbound_events` did, and a row without it cannot be
+    // answered after a restart.
+    const inbound = (
+      db.prepare(`PRAGMA table_info(inbound_events)`).all() as { name: string }[]
+    ).map((column) => column.name);
+    if (inbound.length > 0 && !inbound.includes("raw"))
+      db.exec(`ALTER TABLE inbound_events ADD COLUMN raw TEXT`);
 
     /**
      * An older `conversations` had `peer` as its whole primary key.
@@ -1119,8 +1134,8 @@ export class HexStore {
         .prepare(
           `INSERT INTO inbound_events
              (v, type, event_id, transport, relay, room, peer, thread,
-              created_at, observed_at, payload)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              created_at, observed_at, payload, raw)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           event.v,
@@ -1134,6 +1149,7 @@ export class HexStore {
           event.createdAt,
           event.observedAt,
           JSON.stringify(event.payload),
+          event.raw === undefined ? null : JSON.stringify(event.raw),
         );
       return Number(inserted.lastInsertRowid);
     });
@@ -1144,7 +1160,7 @@ export class HexStore {
     const rows = this.db
       .prepare(
         `SELECT seq, v, type, event_id, transport, relay, room, peer, thread,
-                created_at, observed_at, payload
+                created_at, observed_at, payload, raw
            FROM inbound_events WHERE done_at IS NULL ORDER BY seq LIMIT ?`,
       )
       .all(limit) as unknown as {
@@ -1160,6 +1176,7 @@ export class HexStore {
       created_at: number;
       observed_at: number;
       payload: string;
+      raw: string | null;
     }[];
     return rows.map((row) => ({
       seq: row.seq,
@@ -1178,7 +1195,15 @@ export class HexStore {
       createdAt: row.created_at,
       observedAt: row.observed_at,
       payload: JSON.parse(row.payload) as unknown,
+      raw: row.raw ? (JSON.parse(row.raw) as unknown) : undefined,
     }));
+  }
+
+  /** Test seam: forge a row from a build that kept no raw event. */
+  rawForTests(seq: number, raw: string | null): void {
+    this.db
+      .prepare(`UPDATE inbound_events SET raw = ? WHERE seq = ?`)
+      .run(raw, seq);
   }
 
   /**

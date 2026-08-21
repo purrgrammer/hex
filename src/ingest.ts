@@ -89,6 +89,16 @@ export interface CanonicalEvent {
   /** When this process heard it. */
   observedAt: number;
   payload: unknown;
+  /**
+   * The event as it arrived.
+   *
+   * Kept beside the canonical fields, never inside them: policy decides on
+   * canonical fields only, but ANSWERING needs the original — a Concord reply
+   * inherits `K`/`E`/`P` from the parent's tags. Storing it is what makes a
+   * queued row answerable by a process that never saw it arrive, which is what
+   * lets a restart be ordinary rather than a special case.
+   */
+  raw?: unknown;
 }
 
 /** `type` from a stored row, if this build knows it. */
@@ -146,6 +156,7 @@ export function messageEvent(
     createdAt: inbound.createdAt,
     observedAt,
     payload,
+    raw: inbound.event,
   };
 }
 
@@ -176,19 +187,46 @@ export function controlEvent(
   };
 }
 
+/**
+ * The row, as the thing a transport can reply to.
+ *
+ * Everything here comes off the row: the route the ingestor recorded, the
+ * canonical fields it decided on, and the event exactly as it arrived. A row
+ * written before `raw` existed has none, and cannot be answered — it is the
+ * only case left that has to be given up on.
+ */
+export function carrierFor(row: QueuedInbound): Inbound | undefined {
+  if (row.raw === undefined || row.raw === null) return undefined;
+  const payload = (row.payload ?? {}) as Partial<MessagePayload>;
+  return {
+    id: row.id,
+    author: row.route.peer,
+    text: payload.text ?? "",
+    createdAt: row.createdAt,
+    room: {
+      transport: row.route.transport,
+      id: row.route.room,
+      ...(row.route.relay !== undefined ? { relay: row.route.relay } : {}),
+    },
+    addressesSelf: payload.addressesSelf ?? false,
+    ...(payload.replyToId !== undefined ? { replyToId: payload.replyToId } : {}),
+    event: row.raw,
+  } as unknown as Inbound;
+}
+
 /** One queue row, ready to act on, with the type this build recognises. */
 export interface QueuedEvent {
   seq: number;
   type: HexEventType;
   event: QueuedInbound;
   /**
-   * The transport's own object, when this row was enqueued by this process.
+   * What a transport needs to answer this row, rebuilt from the row itself.
    *
-   * A `CanonicalEvent` is deliberately not enough to answer with — replying
-   * needs the raw event and the room the transport built. So the live path
-   * carries it alongside, and a row with no carrier (one a previous run left
-   * behind) is not dispatchable as a message. That is what makes crash
-   * redelivery the runner's problem rather than a surprise here.
+   * It used to be the live `Inbound` held in a map for the life of the process,
+   * which meant a row outlived the only thing that could answer it: after a
+   * restart the message was dropped, and the person who sent it got a log line.
+   * The row stores the raw event now, so this is derived rather than remembered
+   * — a restart is ordinary, not a special case.
    */
   carrier?: Inbound;
 }
@@ -254,7 +292,6 @@ export function settleControl(
 export class Ingestor {
   /** Rows handed to `dispatch` and not yet settled. Never dispatched twice. */
   private readonly inFlight = new Set<number>();
-  private readonly carriers = new Map<number, Inbound>();
   private timer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly options: IngestorOptions) {}
@@ -273,7 +310,6 @@ export class Ingestor {
     const event = messageEvent(inbound, observedAt);
     const seq = this.options.store.enqueueInbound(event);
     if (seq === undefined) return undefined;
-    this.carriers.set(seq, inbound);
     this.drain();
     return seq;
   }
@@ -329,10 +365,15 @@ export class Ingestor {
         this.options.store.finishInbound(row.seq, "handled");
         continue;
       }
+      /**
+       * Left pending on purpose: `drain()` below hands it on, and
+       * `claimInbound` admits a row whose claim belongs to a dead generation.
+       * The row answers for itself now, so there is nothing a previous process
+       * knew that this one does not.
+       */
       this.log(
-        `[hex] queued ${row.type} ${row.seq} was left behind by an earlier run — dropped`,
+        `[hex] queued ${row.type} ${row.seq} was left behind by an earlier run — retrying it`,
       );
-      this.options.store.finishInbound(row.seq, "dropped:restart");
     }
     this.drain();
     this.timer = setInterval(
@@ -360,7 +401,7 @@ export class Ingestor {
         seq: row.seq,
         type,
         event: row,
-        carrier: this.carriers.get(row.seq),
+        carrier: carrierFor(row),
       });
     }
   }
@@ -369,7 +410,6 @@ export class Ingestor {
   finish(seq: number, outcome: string): void {
     this.options.store.finishInbound(seq, outcome);
     this.inFlight.delete(seq);
-    this.carriers.delete(seq);
   }
 
   stop(): void {
