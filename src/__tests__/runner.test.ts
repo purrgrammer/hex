@@ -296,6 +296,31 @@ describe("Runner", () => {
     expect(store.inboundOutcome(seqs[22]!)).toBeUndefined();
   });
 
+  it("never lets a message flood push a held control out of the line", async () => {
+    /**
+     * A dropped row is gone for good: the queue's dedupe means no relay offers
+     * the wrap again, and a settled row is not redelivered at the next start.
+     * A stop the operator pressed while a turn was running must therefore
+     * outlive whatever arrives after it.
+     */
+    const nostrId = "d".repeat(64);
+    transcriptRow("wrun_4", nostrId);
+    store.rememberConversation(PEER, roomKey(GROUP), "wrun_4", 1000);
+
+    const bus = target();
+    const { ingest } = runner(bus);
+    ingest.accept(inbound({ id: "m0", room: GROUP }));
+    const held = ingest.acceptControl(control({ id: "c7", session: nostrId }))!;
+    for (let at = 1; at < 40; at += 1)
+      ingest.accept(inbound({ id: `m${at}`, room: GROUP }));
+    await tick();
+
+    expect(store.inboundOutcome(held)).toBeUndefined();
+    await bus.finish("turn m0");
+    // The control is still first in line, and it is what runs next.
+    expect(bus.calls).toEqual(["turn m0", "control c7"]);
+  });
+
   it("caps how many turns run at once, and starts the next when one ends", async () => {
     const bus = target();
     const { ingest } = runner(bus, { maxConcurrentTurns: 1 });
