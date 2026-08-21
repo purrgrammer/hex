@@ -1508,4 +1508,34 @@ describe("EveTranscript", () => {
 
     store.close();
   });
+  it("closes a resumed session without rewinding the stored cursor", async () => {
+    const store = HexStore.open(agentHome(home, AGENT).db);
+    const first = sink();
+    const pub = publisher(store, first.impl);
+
+    // A prior run read the stream well past zero and saved that cursor.
+    let index = 0;
+    for (const event of RUN) await pub.handle(event, (index += 100));
+    await pub.close("done");
+    const seeded = store.transcriptFor(SESSION)?.streamIndex ?? 0;
+    expect(seeded).toBeGreaterThan(0);
+
+    // A fresh object over the same record — `hex stop` on a served session —
+    // publishes the closing head before it has followed a single event.
+    const second = sink();
+    const logs: string[] = [];
+    const resumed = publisher(store, second.impl, SESSION, {
+      log: (line) => logs.push(line),
+    });
+    await resumed.close("aborted");
+
+    const heads = second.sent.filter((s) => s.rumor.kind === 31777);
+    expect(heads.length).toBeGreaterThan(0);
+    expect(tag(heads.at(-1)!.rumor, "status")).toBe("aborted");
+    // The fenced save after the head must not try to walk the cursor to 0.
+    expect(logs.join("\n")).not.toContain("head failed");
+    expect(store.transcriptFor(SESSION)?.streamIndex).toBe(seeded);
+
+    store.close();
+  });
 });

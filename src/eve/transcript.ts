@@ -396,6 +396,9 @@ export class EveTranscript {
       cacheWrite: 0,
     };
     this.savedIndex = this.record.streamIndex;
+    // A resumed session starts where its stored cursor is, not at zero: a head
+    // published before any event is followed must not rewind the fenced row.
+    this.atIndex = this.record.streamIndex;
     this.openRequests = new Set(this.record.pending ?? []);
     this.coalescer = new DeltaCoalescer({
       emit: (delta) => {
@@ -1803,8 +1806,10 @@ export class EveTranscript {
         return false;
       }
       this.frozen = false;
-      // Read this far, and everything up to here is on a relay.
-      this.record.streamIndex = this.atIndex;
+      // Read this far, and everything up to here is on a relay — but never
+      // backwards: a send before any event is followed leaves atIndex behind.
+      if (this.atIndex > this.record.streamIndex)
+        this.record.streamIndex = this.atIndex;
       this.options.store.saveTranscript(this.record, this.options.fence);
       await this.sendGroup(rumor, what, ephemeral);
       return true;
