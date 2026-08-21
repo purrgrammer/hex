@@ -392,6 +392,20 @@ export class EveServer {
   private sweeping?: ReturnType<typeof setInterval>;
 
   /**
+   * Sessions this process has a reader on right now.
+   *
+   * Not the same as `conversations`, and the difference is load-bearing: a run
+   * started over the control plane is followed to its end without ever being
+   * put there, because it belongs to no room and `conversations` is keyed by
+   * one. Asking `conversations` whether a session is being followed therefore
+   * answered "no" about a session being actively read, and the sweep would
+   * have opened a second reader on it — two readers of one stream publish one
+   * session's turns twice, which is the failure everything else here exists to
+   * prevent.
+   */
+  private readonly readers = new Set<string>();
+
+  /**
    * Control events already carried out, bounded and FIFO.
    *
    * Four relays hand over the same wrap four times, and every one of these does
@@ -461,7 +475,7 @@ export class EveServer {
   }): Promise<void> {
     const open = this.options.transcript.store
       .openTranscripts()
-      .filter((record) => !this.following(record.sessionId))
+      .filter((record) => !this.reading(record.sessionId))
       .filter((record) => !options?.claimingWork || record.status === "active");
     if (open.length === 0) return;
     this.log(
@@ -476,7 +490,7 @@ export class EveServer {
        * periodic sweep it is what stops a live conversation being drained from
        * underneath itself, which would publish its turns twice.
        */
-      if (this.following(record.sessionId)) continue;
+      if (this.reading(record.sessionId)) continue;
 
       const conversation: Conversation = {
         sessionId: record.sessionId,
@@ -1774,6 +1788,7 @@ export class EveServer {
      * catch below treats it as "this process cannot report further", which is
      * exactly what it is.
      */
+    this.readers.add(conversation.sessionId);
     const verdict = new AbortController();
     let verdictTimer: ReturnType<typeof setTimeout> | undefined;
     /**
@@ -1931,6 +1946,8 @@ export class EveServer {
       }
     }
 
+    this.readers.delete(conversation.sessionId);
+
     if (failed && !answer) return `That did not work: ${failed}`;
     return answer;
   }
@@ -1942,6 +1959,13 @@ export class EveServer {
    * it left off rather than forking, and the trigger it already published stays
    * the message that opened the run.
    */
+  /** Whether this process has a reader on that session's stream. */
+  private reading(sessionId: string): boolean {
+    return (
+      this.readers.has(sessionId) || this.following(sessionId) !== undefined
+    );
+  }
+
   /** The conversation already following this session, if one is. */
   private following(sessionId: string): Conversation | undefined {
     for (const conversation of this.conversations.values())
@@ -2030,6 +2054,7 @@ export class EveServer {
     /** A wall-clock ceiling, for a read that may never fall silent. */
     deadlineMs?: number,
   ): Promise<Boundary> {
+    this.readers.add(conversation.sessionId);
     const quiet = this.options.drainQuietMs ?? DEFAULT_DRAIN_QUIET_MS;
     const controller = new AbortController();
     const stop = () => {
@@ -2074,6 +2099,7 @@ export class EveServer {
       clearTimeout(timer);
       if (deadline) clearTimeout(deadline);
       this.options.signal?.removeEventListener("abort", stop);
+      this.readers.delete(conversation.sessionId);
     }
     conversation.finished = finished;
     return { last, finished };

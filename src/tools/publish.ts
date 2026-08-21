@@ -295,6 +295,23 @@ export class PublishTools {
   /** Timestamps of what was published, for the hourly bound. */
   private readonly published: number[] = [];
 
+  /**
+   * One publish at a time per repository and kind.
+   *
+   * The two executions of a re-executed turn OVERLAP — proved in the stream
+   * this was written for, where the second execution's first action ran while
+   * the first execution's was still in flight. Reading the ledger, then
+   * spending up to ten seconds talking to relays, then writing it, lets both
+   * through: each sees a ledger that does not yet mention the other. So the
+   * whole check-publish-record sequence is serialised on what the ledger keys
+   * off, and the second call reads a ledger the first has already written.
+   *
+   * Per scope rather than globally: two proposals to two repositories have
+   * nothing to say to each other, and a slow relay on one should not hold up
+   * the other.
+   */
+  private readonly inFlight = new Map<string, Promise<unknown>>();
+
   constructor(private readonly options: PublishToolsOptions) {}
 
   private get allowed(): Set<number> {
@@ -412,6 +429,31 @@ export class PublishTools {
 
     const template = this.templateFor(args);
     if ("error" in template) return { ok: false, output: template.error };
+
+    // Only the kinds the ledger guards need the queue; a note waits for nobody.
+    if (!this.options.ledger || !ONE_PER_THING.includes(template.value.kind))
+      return await this.write(name, args, template.value);
+
+    const key = `${template.value.kind}:${PublishTools.scopeOf(template.value)}`;
+    const queued = (this.inFlight.get(key) ?? Promise.resolve()).then(
+      () => this.write(name, args, template.value),
+      () => this.write(name, args, template.value),
+    );
+    this.inFlight.set(key, queued);
+    try {
+      return await queued;
+    } finally {
+      if (this.inFlight.get(key) === queued) this.inFlight.delete(key);
+    }
+  }
+
+  /** Everything after the queue: the check, the publish and the record. */
+  private async write(
+    name: string,
+    args: Record<string, unknown>,
+    value: EventTemplate,
+  ): Promise<ToolResult> {
+    const template = { value };
 
     /**
      * Already filed?

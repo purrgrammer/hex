@@ -21,6 +21,8 @@ import {
   type RelayHealth,
 } from "./relays.js";
 import { resolveSigner } from "./signer.js";
+import { connect } from "node:net";
+
 import { announceIdentity } from "./identity.js";
 import { retract } from "./retract.js";
 import { joinConfiguredGroups } from "./transports/nip29-join.js";
@@ -158,6 +160,7 @@ async function main(): Promise<void> {
       reason: { type: "string" },
       relay: { type: "string", multiple: true },
       all: { type: "boolean", default: false },
+      force: { type: "boolean", default: false },
       help: { type: "boolean", default: false, short: "h" },
     },
   });
@@ -392,6 +395,36 @@ async function main(): Promise<void> {
         const named = args.filter((arg) => !arg.startsWith("-"));
         if (named.length === 0 && !values.all)
           fail("usage: hex stop [config] <session-id...> | --all");
+
+        /**
+         * Refuse while the daemon is up, unless told otherwise.
+         *
+         * Two processes publishing heads for one session fork its `seq` chain,
+         * and a reader is required to read a fork as a fork rather than as a
+         * continuation — an unfixable mess, from a mistake that takes one
+         * forgotten terminal. The tool bridge's port is the tell: `serve`
+         * binds it and nothing else does.
+         */
+        const bridgePort = config.eve?.bridge?.port;
+        if (bridgePort && !values.force) {
+          const up = await new Promise<boolean>((settle) => {
+            const socket = connect({ port: bridgePort, host: "127.0.0.1" });
+            const done = (answer: boolean) => {
+              socket.destroy();
+              settle(answer);
+            };
+            socket.setTimeout(500, () => done(false));
+            socket.once("connect", () => done(true));
+            socket.once("error", () => done(false));
+          });
+          if (up)
+            fail(
+              `something is listening on the tool bridge port ${bridgePort}, ` +
+                "which means `hex serve` is running. Stop it first — two " +
+                "processes publishing heads for one session fork its seq " +
+                "chain. Pass --force if you are sure it is something else.",
+            );
+        }
 
         const resolved = await resolveSigner(config.identity.signer, {
           baseDir: loaded.baseDir,

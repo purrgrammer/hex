@@ -292,3 +292,52 @@ describe("the periodic sweep", () => {
     expect(eve.reads.length).toBe(1);
   });
 });
+
+/**
+ * A run started over the control plane belongs to no room, so it is never put
+ * in the room-keyed conversation map — and asking that map whether a session is
+ * being followed therefore answered "no" about one being actively read. The
+ * sweep would have opened a second reader on it.
+ */
+describe("what counts as already being read", () => {
+  let home: string;
+  let store: HexStore;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "eve-readers-"));
+    store = HexStore.open(agentHome(home, AGENT).db);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("does not sweep a session while a follow is in flight on it", async () => {
+    const eve = droppingEve();
+    const { impl } = sink();
+    const hex = new EveServer({
+      runtime: new EveRuntime({ host: HOST, fetchImpl: eve.impl }),
+      transport: transport() as never,
+      // Long enough that the follow is still reading when the sweep fires.
+      drainQuietMs: 400,
+      transcript: {
+        agentPubkey: AGENT,
+        slug: "hex",
+        recipients: [PEER],
+        store,
+        sink: impl,
+        setTimer: () => 0,
+        clearTimer: () => {},
+      },
+    });
+
+    const working = hex.handle(inbound("m1", "do the long thing"));
+    // While that is in flight, the sweep must find nothing to do.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const before = eve.reads.length;
+    await hex.catchUp({ claimingWork: true });
+    expect(eve.reads.length).toBe(before);
+    await working;
+  });
+});

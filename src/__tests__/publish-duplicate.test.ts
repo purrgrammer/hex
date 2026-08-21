@@ -364,3 +364,43 @@ describe("patch subjects are not prose", () => {
     expect(result.output).toContain("the same subject");
   });
 });
+
+/**
+ * The two executions of a re-executed turn OVERLAP.
+ *
+ * Proved in the stream that started all this: turn_2's second `turn.started`
+ * arrived at index 103 while the first execution's `web_search` at 101 was
+ * still in flight, and its first `turn.completed` landed at 141 before the
+ * second execution's search at 145. So two publishes of the same proposal can
+ * be in the air at once — and a check that reads the ledger, then spends ten
+ * seconds talking to relays, then writes it, lets both through.
+ */
+describe("two executions publishing at the same time", () => {
+  it("publishes one of them and refuses the other", async () => {
+    const relay = await startMockRelay({ kind: "normal" });
+    const home = mkdtempSync(join(tmpdir(), "hex-race-"));
+    try {
+      const publishing = new PublishTools({
+        signer: signerFromSecret(secret),
+        pubkey,
+        relays: createRelays(),
+        publishRelays: [relay.url],
+        ledger: HexStore.open(join(home, "data.db")),
+      });
+
+      const both = await Promise.all([
+        publishing.call(PUBLISH_TOOL, issue("Filed by two executions at once")),
+        publishing.call(PUBLISH_TOOL, issue("Filed by two executions at once")),
+      ]);
+
+      expect(both.filter((result) => result.ok)).toHaveLength(1);
+      expect(both.find((result) => !result.ok)?.output).toContain(
+        "already published",
+      );
+      expect(relay.received).toHaveLength(1);
+    } finally {
+      await relay.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
