@@ -133,6 +133,23 @@ told nothing else. Without them "check my recent posts" became a query for kind 
 across the whole network, answered from strangers, and anything referring to
 earlier was repeated or invented.
 
+### The runtime's queue must not time out a turn
+
+Eve's local workflow queue delivers a turn over HTTP and waits for the handler
+to answer, with a 30-second ceiling on both the headers and the body. A turn
+that thinks for longer than that makes the delivery throw `TypeError: fetch
+failed`, and the queue redelivers — re-executing the turn's inline steps, tool
+calls and all. Set these where Eve runs:
+
+```
+WORKFLOW_LOCAL_HEADERS_TIMEOUT_MS=0
+WORKFLOW_LOCAL_BODY_TIMEOUT_MS=0
+```
+
+Eve's own session timeout is the backstop. Without this, every turn longer than
+half a minute is executed more than once, which is what published patches and
+issues in pairs.
+
 A proposal is filed once. `nostr.publish` keeps a durable ledger of the patches,
 pull requests and issues it has sent, and refuses one that repeats a recent
 proposal to the same repository — same bytes, same subject, or the same opening.

@@ -150,6 +150,14 @@ export interface ServeOptions {
   }) => Promise<string[]>;
   /** How long the pre-message read waits for silence. Injected in tests. */
   drainQuietMs?: number;
+  /**
+   * How often to settle sessions nobody is following. 0 turns the sweep off.
+   *
+   * The startup catch-up is not enough on its own: a stream can drop while the
+   * process stays up, and then the head goes on claiming `active` until the
+   * next restart — which is what happened, for eleven hours.
+   */
+  sweepMs?: number;
   log?: (line: string) => void;
   signal?: AbortSignal;
 }
@@ -161,6 +169,22 @@ export interface ServeOptions {
  * per follow-up, on a session that is waiting and therefore silent.
  */
 const DEFAULT_DRAIN_QUIET_MS = 1_500;
+
+/**
+ * How often sessions nobody is following are settled.
+ *
+ * Cheap: it reads only transcripts this process is NOT following, and a run
+ * that really is still going drains to its current lull and stays `active`.
+ */
+const DEFAULT_SWEEP_MS = 5 * 60 * 1000;
+
+/**
+ * A ceiling on reconciling one dropped follow.
+ *
+ * `drain` ends on silence, and a session that is still working is never silent,
+ * so without a deadline a reconcile inherits the run's whole remaining length.
+ */
+const RECONCILE_MS = 60 * 1000;
 
 /**
  * Every tool id the bridge could ever serve, in the spelling a runtime uses.
@@ -364,6 +388,9 @@ export class EveServer {
    */
   private readonly instructions = new Map<string, Promise<void>>();
 
+  /** The periodic settle, while this server is up. */
+  private sweeping?: ReturnType<typeof setInterval>;
+
   /**
    * Control events already carried out, bounded and FIFO.
    *
@@ -421,13 +448,24 @@ export class EveServer {
    * stays `active`, which is then true.
    */
   async catchUp(): Promise<void> {
-    const open = this.options.transcript.store.openTranscripts();
+    const open = this.options.transcript.store
+      .openTranscripts()
+      .filter((record) => !this.following(record.sessionId));
     if (open.length === 0) return;
     this.log(
       `[hex] catching up ${open.length} session(s) nobody was following`,
     );
 
     for (const record of open) {
+      /**
+       * Never two followers on one session.
+       *
+       * At startup nothing is being followed and this is a no-op. On the
+       * periodic sweep it is what stops a live conversation being drained from
+       * underneath itself, which would publish its turns twice.
+       */
+      if (this.following(record.sessionId)) continue;
+
       const conversation: Conversation = {
         sessionId: record.sessionId,
         transcript: new EveTranscript(
@@ -1698,6 +1736,16 @@ export class EveServer {
      */
     const verdict = new AbortController();
     let verdictTimer: ReturnType<typeof setTimeout> | undefined;
+    /**
+     * Did this follow actually see its turn end?
+     *
+     * The loop can also finish because the STREAM finished — undici cuts a body
+     * that has gone quiet, and the generator then returns rather than throwing,
+     * so neither the catch below nor any log line fires. The head is left
+     * asserting whatever it last published, and asserts it until the process
+     * restarts. Seen live: `active` for eleven hours on a run that had ended.
+     */
+    let settled = false;
     const signal = this.options.signal
       ? AbortSignal.any([this.options.signal, verdict.signal])
       : verdict.signal;
@@ -1784,7 +1832,10 @@ export class EveServer {
              * there because "read until something arrives" is how a follow
              * hangs forever on a stream that has stopped talking.
              */
-            if (event.type === "turn.completed") break;
+            if (event.type === "turn.completed") {
+              settled = true;
+              break;
+            }
             verdictTimer ??= setTimeout(() => verdict.abort(), VERDICT_MS);
             continue;
           }
@@ -1798,7 +1849,10 @@ export class EveServer {
           event.type === "session.waiting" ||
           event.type === "session.failed"
         ) {
-          if (ours) break;
+          if (ours) {
+            settled = true;
+            break;
+          }
           continue;
         }
       }
@@ -1814,6 +1868,27 @@ export class EveServer {
         );
     } finally {
       if (verdictTimer) clearTimeout(verdictTimer);
+    }
+
+    /**
+     * A follow that stopped before its turn did leaves a lie behind.
+     *
+     * Reconciled here rather than at the next restart: read what is there now,
+     * publish the turns nobody published, and let the head land on whatever the
+     * runtime last said. Bounded, because a run that is genuinely still working
+     * never falls silent and this must not wait for it.
+     */
+    if (!settled) {
+      this.log(
+        `[hex] the follow for ${conversation.sessionId} stopped before its turn did — settling it`,
+      );
+      try {
+        await this.drain(conversation, RECONCILE_MS);
+      } catch (error) {
+        this.log(
+          `[hex] could not settle ${conversation.sessionId}: ${message(error)}`,
+        );
+      }
     }
 
     if (failed && !answer) return `That did not work: ${failed}`;
@@ -1910,7 +1985,11 @@ export class EveServer {
    * a resumed conversation has a tail nobody published yet, and this is the only
    * pass that will ever see it.
    */
-  private async drain(conversation: Conversation): Promise<Boundary> {
+  private async drain(
+    conversation: Conversation,
+    /** A wall-clock ceiling, for a read that may never fall silent. */
+    deadlineMs?: number,
+  ): Promise<Boundary> {
     const quiet = this.options.drainQuietMs ?? DEFAULT_DRAIN_QUIET_MS;
     const controller = new AbortController();
     const stop = () => {
@@ -1918,6 +1997,8 @@ export class EveServer {
     };
     this.options.signal?.addEventListener("abort", stop);
     let timer = setTimeout(stop, quiet);
+    const deadline = deadlineMs ? setTimeout(stop, deadlineMs) : undefined;
+    deadline?.unref?.();
 
     let last = conversation.transcript.streamIndex;
     const finished = new Set(conversation.finished);
@@ -1951,14 +2032,37 @@ export class EveServer {
       // an answer repeated is better than an answer never sent.
     } finally {
       clearTimeout(timer);
+      if (deadline) clearTimeout(deadline);
       this.options.signal?.removeEventListener("abort", stop);
     }
     conversation.finished = finished;
     return { last, finished };
   }
 
+  /**
+   * Keep settling sessions nobody is following, for as long as this runs.
+   *
+   * The startup catch-up handles a process that died. This handles a process
+   * that lived: a dropped stream, a reconcile that could not reach a relay, a
+   * session picked up by nothing. Without it the only cure for a stale head is
+   * a restart, which is how one came to claim `active` for eleven hours.
+   */
+  watch(): void {
+    const every = this.options.sweepMs ?? DEFAULT_SWEEP_MS;
+    if (every <= 0 || this.sweeping) return;
+    this.sweeping = setInterval(() => {
+      void this.catchUp().catch((error: unknown) =>
+        this.log(`[hex] the sweep did not finish: ${message(error)}`),
+      );
+    }, every);
+    // A backstop must not be the reason a CLI refuses to exit.
+    this.sweeping.unref?.();
+  }
+
   /** Close every session this server was following. */
   async close(): Promise<void> {
+    if (this.sweeping) clearInterval(this.sweeping);
+    this.sweeping = undefined;
     for (const conversation of this.conversations.values())
       await conversation.transcript.close();
   }

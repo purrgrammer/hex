@@ -1259,6 +1259,8 @@ async function main(): Promise<void> {
          * reader can detect, and it never expires on its own.
          */
         await server.catchUp();
+        // And keep doing it: a stream can drop while this process stays up.
+        server.watch();
 
         await new Promise<void>((resolveRun) => {
           const shutdown = (signal: string) => {
