@@ -19,5 +19,12 @@ export default defineConfig({
      * that branch and are reported as if they were this one's.
      */
     exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**"],
+    /**
+     * Runs before any module is imported, and points `HOME` — and so the
+     * store's `DEFAULT_HOME` — at a temp directory. A test that opens a store
+     * without naming a path must not be able to reach `~/.hex`, where a live
+     * daemon holds the writer lease on the real queue.
+     */
+    setupFiles: ["./test/setup.ts"],
   },
 });

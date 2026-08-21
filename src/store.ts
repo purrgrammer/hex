@@ -712,6 +712,7 @@ export class FencedWriteError extends Error {
 /** Thrown when the lease is held by a live process. Names the holder. */
 export class LeaseHeldError extends Error {
   constructor(readonly holder: WriterLeaseHolder) {
+    // clock: formats "acquired 40s ago" for a human. Nothing decides on it.
     const now = Math.floor(Date.now() / 1000);
     const age = Math.max(0, now - holder.acquiredAt);
     const left = Math.max(0, holder.expiresAt - now);
@@ -728,8 +729,27 @@ export class LeaseHeldError extends Error {
   }
 }
 
+/** What a store reads the wall clock through. Unix SECONDS, like every `at`. */
+export type StoreClock = () => number;
+
+// clock: the injection default itself — the one place the wall clock is read.
+const systemClock: StoreClock = () => Math.floor(Date.now() / 1000);
+
 export class HexStore {
-  private constructor(private readonly db: DatabaseSync) {}
+  /**
+   * The clock every method here defaults to.
+   *
+   * The lease, the reservation horizon and the prune on open are all decided
+   * against the wall clock, which means a property cannot drive them to their
+   * boundaries: it would have to sleep out a real TTL. Injected instead, so a
+   * generated history can advance time and see what expiry actually does. The
+   * per-call `at` parameters stay exactly as they were — callers use them, and
+   * they are already the injection point for a caller that knows its own time.
+   */
+  private constructor(
+    private readonly db: DatabaseSync,
+    private readonly now: StoreClock = systemClock,
+  ) {}
 
   /**
    * Open (or create) an agent's database.
@@ -738,7 +758,13 @@ export class HexStore {
    * session writes while this one does. `busy_timeout` so a concurrent write
    * waits its turn instead of throwing SQLITE_BUSY at whoever lost the race.
    */
-  static open(path: string): HexStore {
+  static open(path: string, options?: { now?: StoreClock }): HexStore {
+    /*
+     * Threaded explicitly rather than read off `this`: `open` prunes BEFORE
+     * the instance exists, and opening a store is itself a time-dependent
+     * mutation — seven horizon DELETEs against a clock nothing could reach.
+     */
+    const now = options?.now ?? systemClock;
     const db = new DatabaseSync(path);
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA busy_timeout = 5000");
@@ -806,16 +832,16 @@ export class HexStore {
     }
 
     db.prepare(`DELETE FROM obeyed WHERE at < ?`).run(
-      Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
+      now() - OBEYED_HORIZON_SECONDS,
     );
     db.prepare(`DELETE FROM published WHERE at < ?`).run(
-      Math.floor(Date.now() / 1000) - PUBLISHED_HORIZON_SECONDS,
+      now() - PUBLISHED_HORIZON_SECONDS,
     );
 
     // The Concord dedupe set is a replay guard, not a log: it only has to
     // outlast the window a cursor's overlap can replay.
     db.prepare(`DELETE FROM concord_rumors WHERE at < ?`).run(
-      Math.floor(Date.now() / 1000) - OBEYED_HORIZON_SECONDS,
+      now() - OBEYED_HORIZON_SECONDS,
     );
 
     // Orphaned reservations: stamped by a generation that is no longer the
@@ -826,19 +852,19 @@ export class HexStore {
         WHERE reserved_at < ?
            OR generation != COALESCE(
                 (SELECT generation FROM writer_lease WHERE id = 1), -1)`,
-    ).run(Math.floor(Date.now() / 1000) - RESERVATION_HORIZON_SECONDS);
+    ).run(now() - RESERVATION_HORIZON_SECONDS);
 
     db.prepare(`DELETE FROM inbound_seen WHERE at < ?`).run(
-      Math.floor(Date.now() / 1000) - INBOUND_SEEN_HORIZON_SECONDS,
+      now() - INBOUND_SEEN_HORIZON_SECONDS,
     );
     // Settled rows only: a pending one is owed work however old it is.
     db.prepare(
       `DELETE FROM inbound_events WHERE done_at IS NOT NULL AND done_at < ?`,
-    ).run(Math.floor(Date.now() / 1000) - INBOUND_DONE_HORIZON_SECONDS);
+    ).run(now() - INBOUND_DONE_HORIZON_SECONDS);
     // Delivered rows only: an owed one stays owed for as long as it takes.
     db.prepare(
       `DELETE FROM outbound WHERE sent_at IS NOT NULL AND sent_at < ?`,
-    ).run(Math.floor(Date.now() / 1000) - OUTBOUND_SENT_HORIZON_SECONDS);
+    ).run(now() - OUTBOUND_SENT_HORIZON_SECONDS);
 
     /**
      * Concord's cursors, carried into the general table.
@@ -853,7 +879,7 @@ export class HexStore {
          SELECT 'concord', relay, stream, since FROM concord_cursors`,
     );
 
-    return new HexStore(db);
+    return new HexStore(db, now);
   }
 
   /** Whether this connection is inside `transaction()`. Nesting is refused. */
@@ -905,7 +931,7 @@ export class HexStore {
     takeover?: boolean;
   }): WriterLease {
     const ttl = options?.ttlSecs ?? WRITER_LEASE_TTL_SECONDS;
-    const now = Math.floor(Date.now() / 1000);
+    const now = this.now();
     const generation = this.transaction(() => {
       const row = this.db
         .prepare(
@@ -946,10 +972,13 @@ export class HexStore {
     });
 
     const db = this.db;
+    // The store's clock, captured: the returned lease is a plain object and a
+    // method on it has no `this` to read it from.
+    const clock = this.now;
     return {
       generation,
       heartbeat(): boolean {
-        const at = Math.floor(Date.now() / 1000);
+        const at = clock();
         const changed = db
           .prepare(
             `UPDATE writer_lease SET expires_at = ?
@@ -971,7 +1000,7 @@ export class HexStore {
 
   /** Who holds the lease right now, or nothing if it is free or expired. */
   writerLeaseHolder(): WriterLeaseHolder | undefined {
-    const now = Math.floor(Date.now() / 1000);
+    const now = this.now();
     const row = this.db
       .prepare(
         `SELECT generation, pid, hostname, acquired_at, expires_at
@@ -1030,11 +1059,7 @@ export class HexStore {
          VALUES (?, ?, ?)
          ON CONFLICT(community_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
       )
-      .run(
-        stored.communityId,
-        JSON.stringify(stored),
-        Math.floor(Date.now() / 1000),
-      );
+      .run(stored.communityId, JSON.stringify(stored), this.now());
   }
 
   /** Forget a community entirely — a leave, or an operator cleaning up. */
@@ -1116,11 +1141,7 @@ export class HexStore {
     return row?.own === 1;
   }
 
-  rememberRumor(
-    rumorId: string,
-    own: boolean,
-    at = Math.floor(Date.now() / 1000),
-  ): void {
+  rememberRumor(rumorId: string, own: boolean, at = this.now()): void {
     this.db
       .prepare(
         `INSERT OR IGNORE INTO concord_rumors (rumor_id, at, own) VALUES (?, ?, ?)`,
@@ -1229,11 +1250,7 @@ export class HexStore {
    * Settle one row. `outcome` is `handled`, `duplicate`, `refused`, `ignored`,
    * or `dropped:<reason>`. A row left unsettled is still owed work.
    */
-  finishInbound(
-    seq: number,
-    outcome: string,
-    at = Math.floor(Date.now() / 1000),
-  ): void {
+  finishInbound(seq: number, outcome: string, at = this.now()): void {
     this.db
       .prepare(
         `UPDATE inbound_events SET done_at = ?, outcome = ? WHERE seq = ?`,
@@ -1253,11 +1270,7 @@ export class HexStore {
    * False when the row is already settled, or already claimed by this
    * generation.
    */
-  claimInbound(
-    seq: number,
-    generation: number,
-    at = Math.floor(Date.now() / 1000),
-  ): boolean {
+  claimInbound(seq: number, generation: number, at = this.now()): boolean {
     return this.transaction(() => {
       const result = this.db
         .prepare(
@@ -1305,10 +1318,7 @@ export class HexStore {
    * a transport is lost by any failure between the two, and nothing afterwards
    * knows it was ever owed.
    */
-  enqueueOutbound(
-    spec: OutboundSpec,
-    at = Math.floor(Date.now() / 1000),
-  ): number {
+  enqueueOutbound(spec: OutboundSpec, at = this.now()): number {
     const inserted = this.db
       .prepare(
         `INSERT INTO outbound
@@ -1420,11 +1430,7 @@ export class HexStore {
   }
 
   /** It went. `sentId` is the published event's id. */
-  outboundSent(
-    id: number,
-    sentId: string,
-    at = Math.floor(Date.now() / 1000),
-  ): void {
+  outboundSent(id: number, sentId: string, at = this.now()): void {
     this.db
       .prepare(
         `UPDATE outbound SET sent_at = ?, sent_id = ?, last_error = NULL
@@ -1508,7 +1514,7 @@ export class HexStore {
    * `inbound_seen` — and the scope checks are what make redelivering a command
    * that DID land harmless.
    */
-  markObeyed(controlId: string, at = Math.floor(Date.now() / 1000)): void {
+  markObeyed(controlId: string, at = this.now()): void {
     this.db
       .prepare(`INSERT OR IGNORE INTO obeyed (control_id, at) VALUES (?, ?)`)
       .run(controlId, at);
@@ -1522,7 +1528,7 @@ export class HexStore {
    * span the awaited instruction itself — that stays `wasObeyed` up front and
    * this at the point it landed.
    */
-  obeyOnce(controlId: string, at = Math.floor(Date.now() / 1000)): boolean {
+  obeyOnce(controlId: string, at = this.now()): boolean {
     return this.transaction(() => {
       if (this.wasObeyed(controlId)) return false;
       this.markObeyed(controlId, at);
@@ -1578,12 +1584,8 @@ export class HexStore {
             AND reserved_at > ?
             AND generation = (SELECT generation FROM writer_lease WHERE id = 1)`,
       )
-      .get(
-        kind,
-        scope,
-        subject,
-        Math.floor(Date.now() / 1000) - RESERVATION_HORIZON_SECONDS,
-      ) as { generation: number; reserved_at: number } | undefined;
+      .get(kind, scope, subject, this.now() - RESERVATION_HORIZON_SECONDS) as
+      { generation: number; reserved_at: number } | undefined;
     if (!row) return undefined;
     return {
       generation: Number(row.generation),
@@ -1617,7 +1619,7 @@ export class HexStore {
         entry.scope,
         entry.subject,
         entry.generation,
-        entry.at ?? Math.floor(Date.now() / 1000),
+        entry.at ?? this.now(),
       );
   }
 
@@ -1737,11 +1739,7 @@ export class HexStore {
    * root, not the message: every later reply names the root, but only the first
    * one names the opening message.
    */
-  rememberThread(
-    rootId: string,
-    sessionId: string,
-    at = Math.floor(Date.now() / 1000),
-  ): void {
+  rememberThread(rootId: string, sessionId: string, at = this.now()): void {
     this.db
       .prepare(
         `INSERT INTO threads (root_id, session_id, at) VALUES (?, ?, ?)
