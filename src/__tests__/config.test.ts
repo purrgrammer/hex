@@ -17,7 +17,6 @@ describe("parseConfig", () => {
   it("accepts a minimal config and fills the optional defaults", () => {
     const config = parseConfig(minimal);
     expect(config.limits.repliesPerRoomPerHour).toBe(20);
-    expect(config.mentions).toEqual([]);
     // No profile means Hex never touches its own metadata.
     expect(config.profile.publish).toBe(false);
     const [transport] = config.transports;
@@ -446,5 +445,25 @@ describe("what a config that says nothing about limits means", () => {
       limits: { maxConcurrentTurns: 32 },
     }).limits;
     expect(raised.maxConcurrentTurns).toBe(32);
+  });
+});
+
+/**
+ * A setting that is gone is refused, not ignored.
+ *
+ * `mentions` configured matching Hex's name in the message TEXT, which fired on
+ * quoted messages where the tags name somebody else. Ignoring a config that
+ * still carries it would silently narrow who can reach an agent, and the
+ * operator should hear that from the config rather than from a quiet room.
+ */
+describe("a config that still names mentions", () => {
+  it("is refused, and says what to do about it", () => {
+    expect(() => parseConfig({ ...minimal, mentions: ["hex"] })).toThrow(
+      /no longer a setting/,
+    );
+  });
+
+  it("is fine once the key is gone", () => {
+    expect(() => parseConfig(minimal)).not.toThrow();
   });
 });

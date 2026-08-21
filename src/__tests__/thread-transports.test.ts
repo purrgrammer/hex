@@ -211,7 +211,6 @@ describe("a NIP-29 reply with no mention in it", () => {
       signer,
       pubkey,
       groups: [{ relay: relay!.url, id: GROUP }],
-      mentions: ["hex"],
       since: 0,
       publishTimeoutMs: 1000,
       ...(threadIsOurs ? { threadIsOurs } : {}),

@@ -95,7 +95,6 @@ function transportFor(url: string, held = membership(url)) {
     signer,
     pubkey: hexPubkey,
     memberships: [held],
-    mentions: ["hex"],
     since: 0,
     publishTimeoutMs: 1000,
     relays: relays!,
@@ -127,8 +126,8 @@ async function memberMessage(
 }
 
 describe("ConcordTransport.start", () => {
-  it("hears a mention in a public channel and names the room", async () => {
-    const { wrap } = await memberMessage("@hex, are you there?");
+  it("hears a p-tagged message in a public channel and names the room", async () => {
+    const { wrap } = await memberMessage("are you there?", [["p", hexPubkey]]);
     relay = await startMockRelay({ kind: "normal", events: [wrap] });
     relays = createRelays();
     transport = transportFor(relay.url);
@@ -136,7 +135,7 @@ describe("ConcordTransport.start", () => {
     const [inbound] = await firstValueFrom(
       transport.start().pipe(take(1), toArray()),
     );
-    expect(inbound?.text).toBe("@hex, are you there?");
+    expect(inbound?.text).toBe("are you there?");
     expect(inbound?.author).toBe(member);
     expect(inbound?.addressesSelf).toBe(true);
     // A channel id means nothing without its community: both travel in the id.
@@ -271,7 +270,7 @@ describe("ConcordTransport.reply", () => {
      * anything Hex wrote. "Did Hex write the parent" says no, and every message
      * after the first would need the mention typed again.
      */
-    const opening = await memberMessage("@hex, research NIP 5D");
+    const opening = await memberMessage("research NIP 5D", [["p", hexPubkey]]);
     relay = await startMockRelay({ kind: "normal", events: [opening.wrap] });
     relays = createRelays();
     transport = transportFor(relay.url);
@@ -308,7 +307,6 @@ describe("ConcordTransport.reply", () => {
       signer,
       pubkey: hexPubkey,
       memberships: [membership(relay.url)],
-      mentions: ["hex"],
       since: 0,
       publishTimeoutMs: 1000,
       relays: relays!,
@@ -375,7 +373,6 @@ describe("ConcordTransport.reply", () => {
       signer,
       pubkey: hexPubkey,
       memberships: [membership(relay.url)],
-      mentions: ["hex"],
       since: 0,
       publishTimeoutMs: 1000,
       relays: relays!,

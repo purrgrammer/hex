@@ -83,8 +83,6 @@ export interface Nip29TransportOptions {
   signer: ISigner;
   pubkey: string;
   groups: Nip29GroupConfig[];
-  /** Names Hex answers to, beyond a p-tag. */
-  mentions: string[];
   /** Unix seconds. The live subscription asks for nothing older. */
   since: number;
   publishTimeoutMs?: number;
@@ -206,11 +204,7 @@ export class Nip29Transport implements Transport {
       ...inbound,
       addressesSelf:
         continuesConversation ||
-        addressesSelfInGroup(
-          inbound,
-          this.options.pubkey,
-          this.options.mentions,
-        ),
+        addressesSelfInGroup(inbound, this.options.pubkey),
     };
   }
 

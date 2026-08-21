@@ -42,13 +42,12 @@ afterEach(async () => {
   relay = undefined;
 });
 
-function transportFor(url: string, mentions = ["hex"]) {
+function transportFor(url: string) {
   return new Nip29Transport({
     relays: relays!,
     signer,
     pubkey,
     groups: [{ relay: url, id: GROUP }],
-    mentions,
     since: 0,
     publishTimeoutMs: 1000,
   });
@@ -58,7 +57,7 @@ describe("Nip29Transport.start", () => {
   it("yields messages from the configured group", async () => {
     relay = await startMockRelay({
       kind: "normal",
-      events: [message("@hex are you there?")],
+      events: [message("are you there?", GROUP, [["p", pubkey]])],
     });
     relays = createRelays();
 
@@ -66,7 +65,7 @@ describe("Nip29Transport.start", () => {
       transportFor(relay.url).start().pipe(take(1), toArray()),
     );
 
-    expect(inbound!.text).toBe("@hex are you there?");
+    expect(inbound!.text).toBe("are you there?");
     expect(inbound!.room).toEqual({
       transport: "nip-29",
       id: GROUP,
@@ -106,7 +105,10 @@ describe("Nip29Transport.start", () => {
     // defence, because a relay may over-serve.
     relay = await startMockRelay({
       kind: "normal",
-      events: [message("@hex hello", "some-other-room"), message("@hex hello")],
+      events: [
+        message("hello", "some-other-room", [["p", pubkey]]),
+        message("hello", GROUP, [["p", pubkey]]),
+      ],
     });
     relays = createRelays();
     const messages = await firstValueFrom(

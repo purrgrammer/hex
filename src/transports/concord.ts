@@ -151,7 +151,6 @@ export interface ConcordTransportOptions {
   /** The communities Hex holds keys for, already resolved from invites. */
   memberships: Membership[];
   /** Names Hex answers to, beyond a `p` tag on the rumor. */
-  mentions: string[];
   /** Unix seconds. A stream with no stored cursor starts here. */
   since: number;
   durability?: ConcordDurability;
@@ -584,11 +583,7 @@ export class ConcordTransport implements Transport {
       ...inbound,
       addressesSelf:
         continuesConversation ||
-        addressesSelfInGroup(
-          inbound,
-          this.options.pubkey,
-          this.options.mentions,
-        ),
+        addressesSelfInGroup(inbound, this.options.pubkey),
     };
   }
 

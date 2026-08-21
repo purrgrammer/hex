@@ -41,7 +41,7 @@ export {
   type AnnounceResult,
   type EventTemplate,
 } from "./identity.js";
-export { mentionsName, tagsSelf, addressesSelfInGroup } from "./policy.js";
+export { tagsSelf, addressesSelfInGroup } from "./policy.js";
 export {
   Runner,
   type RunnerOptions,

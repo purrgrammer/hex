@@ -275,7 +275,6 @@ export interface HexConfig {
   /** Path to the instructions file, resolved against the config file's dir. */
   instructions?: string;
   /** Names Hex answers to, beyond a p-tag. */
-  mentions: string[];
   relays: RelayRoles;
   profile: ProfileConfig;
   limits: {
@@ -849,12 +848,24 @@ function parseTransports(value: unknown): TransportConfig[] {
   });
 }
 
-function parseMentions(value: unknown): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value))
-    throw new ConfigError("mentions must be an array of strings");
-  return value.map((entry, index) =>
-    requireString(entry, `mentions[${index}]`),
+/**
+ * `mentions` is gone, and a config that still names it is refused rather than
+ * quietly ignored.
+ *
+ * It configured matching Hex's NAME in the message text, which was the only one
+ * of Hex's doors that could open when nobody had addressed anything: quote a
+ * message that said `@hex` and the text carries the mention while the tags do
+ * not, because the quoter tags the original author. Refused loudly because
+ * ignoring it would silently narrow who can reach an agent, and an operator
+ * should hear that from the config rather than from a quiet room.
+ */
+function refuseMentions(value: unknown): void {
+  if (value === undefined) return;
+  throw new ConfigError(
+    "mentions is no longer a setting: Hex is addressed by a p-tag, or by a " +
+      "reply in a thread it is already answering in. Matching a name in the " +
+      "text also fired on quoted messages, where the tags name somebody else. " +
+      "Remove the key.",
   );
 }
 
@@ -960,6 +971,8 @@ export function parseConfig(input: unknown): HexConfig {
     [
       "identity",
       "instructions",
+      // Kept in the list on purpose: a config that still names it gets the
+      // specific refusal below rather than a generic "unknown key".
       "mentions",
       "relays",
       "profile",
@@ -974,6 +987,8 @@ export function parseConfig(input: unknown): HexConfig {
     ],
     "config",
   );
+
+  refuseMentions(raw.mentions);
 
   const identity = requireRecord(raw.identity, "identity");
   rejectUnknown(identity, ["signer"], "identity");
@@ -1021,7 +1036,6 @@ export function parseConfig(input: unknown): HexConfig {
   const config: HexConfig = {
     identity: { signer: parseSigner(identity.signer) },
     instructions: optionalString(raw.instructions, "instructions"),
-    mentions: parseMentions(raw.mentions),
     relays: parseRelays(raw.relays),
     profile: parseProfile(raw.profile),
     limits,

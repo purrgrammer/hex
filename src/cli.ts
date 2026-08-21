@@ -290,7 +290,7 @@ async function main(): Promise<void> {
       case "check": {
         console.log(`config  ${loaded.path}`);
         console.log(
-          `mentions ${config.mentions.length ? config.mentions.join(", ") : "(none — only a p-tag will reach Hex)"}`,
+          "address  a p-tag, or a reply in a thread Hex is answering in",
         );
 
         const resolved = await resolveSigner(config.identity.signer, {
@@ -782,7 +782,6 @@ async function main(): Promise<void> {
             signer: resolved.signer,
             pubkey: resolved.pubkey,
             groups: group.groups,
-            mentions: config.mentions,
             since: Math.floor(Date.now() / 1000),
           });
 
@@ -1129,7 +1128,6 @@ async function main(): Promise<void> {
               signer: resolved.signer,
               pubkey: resolved.pubkey,
               groups: groups.groups,
-              mentions: config.mentions,
               since: startedAt,
               // A kind 9 names no thread root, so the parent is the only
               // handle — and the store knows every message Hex has handled.
@@ -1178,7 +1176,6 @@ async function main(): Promise<void> {
               signer: resolved.signer,
               pubkey: resolved.pubkey,
               memberships,
-              mentions: config.mentions,
               since: startedAt,
               durability: store,
               log: (line) => console.log(line),
