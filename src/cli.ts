@@ -1395,6 +1395,18 @@ async function main(): Promise<void> {
                     new RoomTools({
                       transport,
                       incoming: inbound,
+                      /*
+                       * The answer joins the thread it answers.
+                       *
+                       * Derived rather than plumbed: the message being answered
+                       * is already bound to its run, so whatever run that is, is
+                       * the one this belongs to too.
+                       */
+                      rememberSaid: (id) => {
+                        if (!inbound) return;
+                        const session = store.threadSession(inbound.id);
+                        if (session) store.rememberThread(id, session);
+                      },
                       requestedBy: transcriptConfig.to[0],
                       selfPubkey: resolved.pubkey,
                       knowledge,

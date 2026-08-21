@@ -85,6 +85,16 @@ export interface RoomToolsOptions {
   log?: (line: string) => void;
   /** Cap on deliveries in one turn, so a confused model cannot flood a room. */
   maxResponses?: number;
+  /**
+   * Say that this run published something, so a reply to it comes back here.
+   *
+   * An answer delivered by this tool never touches the spool, which is where
+   * the same binding is made for a spooled reply — so without this, the one
+   * message a person is most likely to reply to is the one message nothing has
+   * a thread for. In a group that is the whole conversation: a kind 9 names no
+   * root, so the parent is the only handle there is.
+   */
+  rememberSaid?: (publishedId: string) => void;
   /** Who the run is for, when no message names them. Control-plane runs only. */
   requestedBy?: string;
   /**
@@ -532,6 +542,7 @@ export class RoomTools implements ToolHost {
         imeta && imeta[0] === "imeta" && imeta.length > 1 ? [imeta] : [];
 
       const id = await this.options.transport.reply(incoming, text, tags);
+      this.options.rememberSaid?.(id);
       this.responses += 1;
       this.didDeliver = true;
       this.deliveredIds.push(id);
