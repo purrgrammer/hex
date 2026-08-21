@@ -1,10 +1,10 @@
 {
   "name": "nostr-hex",
   "version": "0.1.0",
-  "description": "Hex — a transport-agnostic agent for Nostr groups. NIP-29 today, NIP-17 and Concord next.",
+  "description": "Hex \u2014 a transport-agnostic agent for Nostr groups. NIP-29 today, NIP-17 and Concord next.",
   "type": "module",
   "license": "MIT",
-  "author": "Alejandro Gómez",
+  "author": "Alejandro G\u00f3mez",
   "keywords": [
     "nostr",
     "agent",
@@ -38,7 +38,8 @@
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@noble/curves": "^2.3.0",

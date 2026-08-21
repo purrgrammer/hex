@@ -206,7 +206,7 @@ describe("a follow that stops before its turn does", () => {
 
   it("publishes the turns the drop hid", async () => {
     const eve = droppingEve();
-    const { impl, sent } = sink();
+    const { impl } = sink();
     const hex = server(eve, impl);
 
     await hex.runTurn(inbound("m1", "do the long thing"));

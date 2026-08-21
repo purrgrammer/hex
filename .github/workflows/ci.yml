@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The whole tree, tests included — the build config excludes them, and a
+      # test that no longer type-checks is a test nobody is reading.
+      - run: npm run typecheck
+      # Three times the baseline for the gate. Deep enough that the fault paths
+      # — a redelivery after a prune, a fence taken mid-write — show up before
+      # a merge rather than overnight, and still under a minute.
+      - run: npx vitest run
+        env:
+          HEX_PBT_RUNS: 3

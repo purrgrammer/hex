@@ -1192,7 +1192,7 @@ describe("EveServer", () => {
       }).runTurn({
         ...inbound("msg-" + (room?.id ?? "dm"), "first"),
         ...(room ? { room } : {}),
-      });
+      } as Inbound);
 
     // A NIP-17 conversation has no group and no second reader.
     await open();

@@ -52,7 +52,9 @@ async function readAsGrimoireWould(
     await webcrypto.subtle.decrypt(
       { name: "AES-GCM", iv: Buffer.from(nonce, "hex") },
       imported,
-      ciphertext,
+      // Node types the buffer as ArrayBufferLike, which SharedArrayBuffer also
+      // satisfies; WebCrypto wants the narrower one.
+      ciphertext as unknown as ArrayBuffer,
     ),
   );
 
@@ -85,7 +87,10 @@ function fakeBlossom(options: { fail?: boolean } = {}) {
     return {
       ok: true,
       status: 200,
-      json: async () => ({ url: `${String(url).replace("/upload", "")}/${sha}`, sha256: sha }),
+      json: async () => ({
+        url: `${String(url).replace("/upload", "")}/${sha}`,
+        sha256: sha,
+      }),
     };
   }) as unknown as typeof fetch;
   return { impl, stored };
@@ -106,7 +111,12 @@ describe("blossom", () => {
     const uploaded = await uploadBytes(
       original,
       "image/png",
-      { servers: ["https://blossom.example"], signer, encrypted: true, fetchImpl: server.impl },
+      {
+        servers: ["https://blossom.example"],
+        signer,
+        encrypted: true,
+        fetchImpl: server.impl,
+      },
       "shot.png",
     );
 
@@ -128,7 +138,10 @@ describe("blossom", () => {
     const liar = (async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ url: "https://blossom.example/dead", sha256: "0".repeat(64) }),
+      json: async () => ({
+        url: "https://blossom.example/dead",
+        sha256: "0".repeat(64),
+      }),
     })) as unknown as typeof fetch;
 
     await expect(
@@ -144,11 +157,11 @@ describe("blossom", () => {
     // The auth event is a bearer token: whatever holds it can upload that one
     // blob to that one server, and only for as long as it says.
     const server = fakeBlossom();
-    const uploaded = await uploadBytes(
-      bytes("public notice"),
-      "text/plain",
-      { servers: ["https://blossom.example"], signer, fetchImpl: server.impl },
-    );
+    const uploaded = await uploadBytes(bytes("public notice"), "text/plain", {
+      servers: ["https://blossom.example"],
+      signer,
+      fetchImpl: server.impl,
+    });
 
     const header = server.stored[0]!.auth;
     expect(header.startsWith("Nostr ")).toBe(true);

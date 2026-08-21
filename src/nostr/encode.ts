@@ -17,7 +17,6 @@ import {
 } from "./kinds.js";
 import { isKnownPart } from "./types.js";
 import type {
-  RepositorySpec,
   AgentDefinitionInput,
   AgentToolSpec,
   AgentTurnInput,

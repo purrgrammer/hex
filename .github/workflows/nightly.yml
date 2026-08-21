@@ -1,0 +1,32 @@
+name: nightly
+
+on:
+  schedule:
+    # 04:20 UTC. Nothing depends on the hour; it just has to be quiet.
+    - cron: "20 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  deep:
+    runs-on: ubuntu-latest
+    strategy:
+      # Not a compatibility matrix — the shards are pure SEED DIVERSITY. Each
+      # runs the same properties from a different starting point, which is the
+      # cheapest way to widen the space a state machine actually explores.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx vitest run
+        env:
+          HEX_PBT_RUNS: 20
+          # Fault paths get their own multiplier: crash, restart and a stolen
+          # lease only pay off at depth.
+          HEX_PBT_FAULT_RUNS: 40

@@ -21,7 +21,7 @@
 import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { pbtRuns } from "../../test/pbt-runs.js";
+import { pbtFaultRuns, pbtRuns } from "../../test/pbt-runs.js";
 import {
   FencedWriteError,
   type HexStore,
@@ -539,7 +539,9 @@ describe("the store, over generated histories", () => {
         }
       }),
       {
-        numRuns: pbtRuns(150),
+        // The fault knob, not the general one: Crash, Restart and a stolen
+        // lease are what this suite is for, and their paths pay off at depth.
+        numRuns: pbtFaultRuns(150),
         // A failing run prints its seed and path; HEX_PBT_SEED replays it.
         ...(process.env["HEX_PBT_SEED"]
           ? { seed: Number(process.env["HEX_PBT_SEED"]) }
