@@ -12,18 +12,28 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { HexStore, type StoreClock } from "../../store.js";
+import { HexStore, type StoreClock, type WriterLease } from "../../store.js";
 
 /** One lease per store: every transcript save is fenced on its generation. */
 const generations = new WeakMap<HexStore, number>();
 
+const leases = new WeakMap<HexStore, WriterLease>();
+
 export function fenceFor(store: HexStore): { generation: number } {
   let generation = generations.get(store);
   if (generation === undefined) {
-    generation = store.acquireWriterLease({ takeover: true }).generation;
+    const lease = store.acquireWriterLease({ takeover: true });
+    leases.set(store, lease);
+    generation = lease.generation;
     generations.set(store, generation);
   }
   return { generation };
+}
+
+/** The lease object itself, for a test that has to heartbeat or release it. */
+export function leaseFor(store: HexStore): WriterLease {
+  fenceFor(store);
+  return leases.get(store)!;
 }
 
 export interface TempStore {
@@ -35,6 +45,8 @@ export interface TempStore {
   dispose(): void;
   /** Reopen the same file, as a restart does, and return the new store. */
   restart(): HexStore;
+  /** The lease the current store holds. */
+  readonly lease: WriterLease;
 }
 
 /**
@@ -59,6 +71,9 @@ export function tempStore(
     },
     home,
     path,
+    get lease() {
+      return leaseFor(store);
+    },
     dispose() {
       if (gone) return;
       gone = true;

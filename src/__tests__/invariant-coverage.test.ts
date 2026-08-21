@@ -69,7 +69,7 @@ const COVERAGE: Coverage[] = [
     statement: "at most one live generation; generations strictly increase",
     status: "covered",
     owner:
-      "writer-lease.test.ts, the state machine's TakeOverLease and Restart, and the shared checker",
+      "writer-lease.test.ts, the state machine's TakeOverLease/Heartbeat/AcquireExpired driven across the TTL by AdvanceClock, and the shared checker",
     ownerFiles: [WRITER_LEASE, STORE_PBT, INVARIANTS],
   },
   {
@@ -131,7 +131,7 @@ const COVERAGE: Coverage[] = [
     statement: "no in-memory set leaks: inFlight/sending/lanes empty at rest",
     status: "gap",
     owner:
-      "GAP: only a driven history can reach quiescence deliberately (P3 model).",
+      "GAP: the store machine cannot see them — they live in the runner and the spool. Needs the driven tier: a real store plus a fake runtime over generated crash and restart histories.",
     ownerFiles: [],
   },
   {

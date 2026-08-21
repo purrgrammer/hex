@@ -1627,7 +1627,11 @@ export class EveServer {
       this.log(
         `[hex] ${short(peer)} replied in a thread with no session behind it — starting one`,
       );
-    if (!inbound.replyToId) this.conversations.delete(peer);
+    // A message that threads onto nothing is a new subject, so whatever this
+    // correspondent had open in this room stops being the answer. By the map's
+    // own key: the bare pubkey this used to delete is not one the map has ever
+    // used, so the line did nothing.
+    if (!inbound.replyToId) this.conversations.delete(key);
 
     /**
      * Say "seen" before doing anything slow.
@@ -1800,7 +1804,7 @@ export class EveServer {
         this.log(
           `[hex] eve refuses session ${conversation.sessionId}: ${message(error)} — starting a fresh one`,
         );
-        this.forget(key, peer, conversation.sessionId);
+        this.forget(key, conversation.sessionId);
 
         const fresh = await this.createSession(
           inbound.text,
@@ -2427,13 +2431,17 @@ export class EveServer {
   /**
    * Drop every binding that points at a session, so nothing resumes it again.
    *
-   * Both maps and both tables: an in-memory conversation, the stored
-   * (peer, room) row, and every thread bound to it. Leaving any one behind is
-   * enough to walk back into the dead session on the next message.
+   * The in-memory conversation and every thread bound to it. The stored
+   * (peer, room) row is not deleted because the caller writes the replacement
+   * over it in the same breath — and a row deleted with no replacement is a
+   * correspondent whose next message starts from nothing.
+   *
+   * One key, not two. This used to also delete the bare pubkey, which nothing
+   * has ever been stored under: the map is keyed on (peer, room) throughout,
+   * so that line read as belt-and-braces and did nothing at all.
    */
-  private forget(key: string, peer: string, sessionId: string): void {
+  private forget(key: string, sessionId: string): void {
     this.conversations.delete(key);
-    this.conversations.delete(peer);
     this.options.transcript.store.forgetThread(sessionId);
   }
 

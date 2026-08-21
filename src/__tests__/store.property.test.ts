@@ -21,11 +21,14 @@
 import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { pbtFaultRuns, pbtRuns } from "../../test/pbt-runs.js";
+import { pbtFaultRuns } from "../../test/pbt-runs.js";
 import {
   FencedWriteError,
+  LeaseHeldError,
+  WRITER_LEASE_TTL_SECONDS,
   type HexStore,
   type StoredTranscript,
+  type WriterLease,
 } from "../store.js";
 import { checkStoreInvariants } from "./invariants.js";
 import { tempStore, type TempStore } from "./support/store.js";
@@ -48,7 +51,7 @@ import type { OutboundSpec } from "../store.js";
  * proves nothing, so the budget scales with the multiplier the same way the
  * run count does.
  */
-vi.setConfig({ testTimeout: pbtRuns(30_000) });
+vi.setConfig({ testTimeout: pbtFaultRuns(30_000) });
 
 const RESERVATION_HORIZON = 10 * 60;
 const INBOUND_SEEN_HORIZON = 30 * 24 * 60 * 60;
@@ -91,6 +94,8 @@ class Model {
   seqHighWater = new Map<string, number>();
   indexHighWater = new Map<string, number>();
   generations: number[] = [1];
+  /** When the live lease lapses on its own, at the model's clock. */
+  leaseExpiresAt = 0;
 
   key(event: CanonicalEvent): string {
     return `${event.route.transport}\u0000${event.id}`;
@@ -126,6 +131,8 @@ class Model {
 interface Real {
   tmp: TempStore;
   store: HexStore;
+  /** The lease THIS writer is holding — stale after somebody takes over. */
+  lease: WriterLease;
   clock: { at: number };
   path: string;
 }
@@ -429,6 +436,13 @@ class TakeOverLease implements StoreCommand {
     expect(lease.generation).toBeGreaterThan(model.generation);
     model.generation = lease.generation;
     model.generations.push(lease.generation);
+    model.leaseExpiresAt = model.clock + WRITER_LEASE_TTL_SECONDS;
+    /*
+     * The lease object stays the DISPLACED writer's on purpose: the model does
+     * not move `heldGeneration`, so the next Heartbeat or SaveTranscript is
+     * made by a writer that no longer owns the home. That is the state every
+     * fencing check exists for, and nothing else in the command set reaches it.
+     */
     // The old writer keeps holding its stale fence: that is the state every
     // fencing check exists for, and the model stays in it deliberately.
   }
@@ -445,11 +459,13 @@ class Restart implements StoreCommand {
     // Whatever was only in memory is gone; the file is all that is left.
     model.prune();
     real.store = real.tmp.restart();
-    const generation = real.store.writerLeaseHolder()!.generation;
+    real.lease = real.tmp.lease;
+    const generation = real.lease.generation;
     expect(generation).toBeGreaterThan(model.generation);
     model.generation = generation;
     model.heldGeneration = generation;
     model.generations.push(generation);
+    model.leaseExpiresAt = model.clock + WRITER_LEASE_TTL_SECONDS;
   }
   toString(): string {
     return "Restart()";
@@ -476,6 +492,54 @@ class AdvanceClock implements StoreCommand {
   }
 }
 
+class Heartbeat implements StoreCommand {
+  check(): boolean {
+    return true;
+  }
+  run(model: Model, real: Real): void {
+    const renewed = real.lease.heartbeat();
+    // invariant: I2 — a displaced writer cannot renew. Its generation is not
+    // the lease's any more, so the row it would touch is not its row, and the
+    // false it gets back is what tells it to stop writing and exit.
+    expect(renewed).toBe(model.heldGeneration === model.generation);
+    if (renewed) model.leaseExpiresAt = model.clock + WRITER_LEASE_TTL_SECONDS;
+    // Deliberately not conditioned on expiry: a holder nobody displaced may
+    // renew a lease that has already lapsed. Nothing else can have taken it —
+    // taking it is what moves the generation — so there is no second writer to
+    // race, and refusing here would kill a process that is still the only one.
+  }
+  toString(): string {
+    return "Heartbeat()";
+  }
+}
+
+class AcquireExpired implements StoreCommand {
+  check(): boolean {
+    return true;
+  }
+  run(model: Model, real: Real): void {
+    const held = model.leaseExpiresAt > model.clock;
+    if (held) {
+      // A live lease is refused by NAME — the message is what an operator gets
+      // when a second `hex serve` is started against one home.
+      expect(() => real.store.acquireWriterLease()).toThrow(LeaseHeldError);
+      return;
+    }
+    // Expired: it frees itself, and the generation still moves forward, so the
+    // writer that lapsed can be told from the one that replaced it.
+    const lease = real.store.acquireWriterLease();
+    expect(lease.generation).toBeGreaterThan(model.generation);
+    real.lease = lease;
+    model.generation = lease.generation;
+    model.heldGeneration = lease.generation;
+    model.generations.push(lease.generation);
+    model.leaseExpiresAt = model.clock + WRITER_LEASE_TTL_SECONDS;
+  }
+  toString(): string {
+    return "AcquireExpired()";
+  }
+}
+
 const commandsArb = fc.commands(
   [
     messageEventArb.map((event) => new Arrive(event)),
@@ -496,6 +560,8 @@ const commandsArb = fc.commands(
     reservationArb.map((entry) => new ReleaseReservation(entry)),
     fc.nat({ max: 3 }).map((which) => new Obey(which)),
     fc.constant(new TakeOverLease()),
+    fc.constant(new Heartbeat()),
+    fc.constant(new AcquireExpired()),
     fc.constant(new Restart()),
     clockJumpArb.map((by) => new AdvanceClock(by)),
   ],
@@ -521,9 +587,11 @@ describe("the store, over generated histories", () => {
           model.generation = tmp.store.writerLeaseHolder()!.generation;
           model.heldGeneration = model.generation;
           model.generations = [model.generation];
+          model.leaseExpiresAt = model.clock + WRITER_LEASE_TTL_SECONDS;
           const real: Real = {
             tmp,
             store: tmp.store,
+            lease: tmp.lease,
             clock,
             path: tmp.path,
           };
