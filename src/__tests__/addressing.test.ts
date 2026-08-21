@@ -26,7 +26,7 @@ const message = (over: Partial<Inbound> = {}): Inbound =>
     text: "any thoughts?",
     createdAt: 1,
     room: { transport: "concord", id: "community:channel" },
-    tagsSelf: false,
+    namesSelf: false,
     addressesSelf: false,
     event: { tags: [] },
     ...over,
@@ -41,7 +41,7 @@ const remembers = (rootId: string, room = ROOM): AddressingBindings => ({
 describe("whether a message is for Hex", () => {
   it("is yes when the tags say so", () => {
     expect(
-      addresses(message({ tagsSelf: true }), ROOM, NOTHING_REMEMBERED),
+      addresses(message({ namesSelf: true }), ROOM, NOTHING_REMEMBERED),
     ).toBe(true);
   });
 

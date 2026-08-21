@@ -24,7 +24,7 @@ import {
   subscribe,
   type HexRelays,
 } from "../relays.js";
-import { tagsSelf } from "../policy.js";
+import { namesSelf } from "../policy.js";
 import type { Inbound, Room, Transport } from "./types.js";
 
 /** A group chat message. */
@@ -155,7 +155,7 @@ export class Nip29Transport implements Transport {
       text: event.content,
       createdAt: event.created_at,
       room,
-      tagsSelf: tagsSelf(event.tags, this.options.pubkey),
+      namesSelf: namesSelf(event, this.options.pubkey),
       // Resolved on the way into the queue, where the bindings are. A transport
       // knows tags; whether this continues something of Hex's is not a tag.
       addressesSelf: false,

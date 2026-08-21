@@ -41,7 +41,7 @@ export {
   type AnnounceResult,
   type EventTemplate,
 } from "./identity.js";
-export { tagsSelf } from "./policy.js";
+export { namesSelf, mentionsSelf, tagsSelf } from "./policy.js";
 export {
   addresses,
   NOTHING_REMEMBERED,

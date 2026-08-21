@@ -31,7 +31,7 @@ function inbound(id = "m1"): Inbound {
     text: event.content,
     createdAt: event.created_at,
     room: DM,
-    tagsSelf: true,
+    namesSelf: true,
     addressesSelf: true,
     event,
   };

@@ -45,7 +45,7 @@ import {
   subscribe,
   type HexRelays,
 } from "../relays.js";
-import { tagsSelf } from "../policy.js";
+import { namesSelf } from "../policy.js";
 import { withTags } from "../nostr/encode.js";
 import type { Rumor } from "../nostr/types.js";
 import type { Inbound, Room, Transport } from "./types.js";
@@ -527,7 +527,7 @@ export class ConcordTransport implements Transport {
       text: opened.content,
       createdAt: opened.createdAt,
       room: this.roomFor(binding),
-      tagsSelf: tagsSelf(opened.tags, this.options.pubkey),
+      namesSelf: namesSelf(opened, this.options.pubkey),
       // Resolved on the way into the queue, where the bindings are.
       addressesSelf: false,
       ...(replyToId ? { replyToId } : {}),
@@ -1156,7 +1156,7 @@ export class ConcordTransport implements Transport {
         text: opened.content,
         createdAt: opened.createdAt,
         room,
-        tagsSelf: tagsSelf(opened.tags, this.options.pubkey),
+        namesSelf: namesSelf(opened, this.options.pubkey),
         addressesSelf: false,
         ...(replyToId ? { replyToId } : {}),
         event: {

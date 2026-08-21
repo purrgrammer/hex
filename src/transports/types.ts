@@ -28,12 +28,13 @@ export interface Inbound {
   createdAt: number;
   room: Room;
   /**
-   * What the TAGS say: a `p` tag naming Hex, or a room that is a private
+   * Whether the event NAMES Hex: a `nostr:` reference to it in the content, a
+   * p-tag that threading cannot explain, or a room that is a private
    * conversation with it. A fact about the event, which is why the transport —
    * the only layer that knows the protocol's tag shape — is the one that sets
-   * it.
+   * it. See `namesSelf`.
    */
-  tagsSelf: boolean;
+  namesSelf: boolean;
   /**
    * Whether this message is FOR Hex, which the tags alone cannot answer: a
    * reply continues something of Hex's, and what Hex is doing is durable state.

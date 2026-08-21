@@ -40,7 +40,7 @@ export const messageEventArb: fc.Arbitrary<CanonicalEvent> = fc
     room: fc.constantFrom(...ROOMS),
     peerIndex: fc.nat({ max: 3 }),
     text: fc.string({ maxLength: 24 }),
-    tagsSelf: fc.boolean(),
+    namesSelf: fc.boolean(),
     replyIndex: fc.option(fc.nat({ max: 5 }), { nil: undefined }),
     rootIndex: fc.option(fc.nat({ max: 5 }), { nil: undefined }),
     createdAt: fc.nat({ max: 1_000 }),
@@ -69,8 +69,8 @@ export const messageEventArb: fc.Arbitrary<CanonicalEvent> = fc
         text: raw.text,
         // Addressing is resolved from the fact, so a generated event carries
         // the fact and the answer that follows from it with nothing remembered.
-        tagsSelf: raw.tagsSelf,
-        addressesSelf: raw.tagsSelf,
+        namesSelf: raw.namesSelf,
+        addressesSelf: raw.namesSelf,
         ...(replyToId !== undefined ? { replyToId } : {}),
         ...(threadRoot !== undefined ? { threadRoot } : {}),
       },

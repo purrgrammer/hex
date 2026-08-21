@@ -303,7 +303,7 @@ export class Nip17Transport implements Transport {
       createdAt: rumor.created_at,
       room: roomFor(rumor.pubkey),
       // A private message needs no mention: it was sent to Hex and nobody else.
-      tagsSelf: true,
+      namesSelf: true,
       addressesSelf: true,
       replyToId,
       ...(threadRoot !== undefined && threadRoot !== replyToId

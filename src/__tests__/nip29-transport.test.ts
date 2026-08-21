@@ -73,7 +73,7 @@ describe("Nip29Transport.start", () => {
     });
     expect(inbound!.author).toBe(author);
     // The tag is the fact the transport owns; the decision is addressing.ts's.
-    expect(inbound!.tagsSelf).toBe(true);
+    expect(inbound!.namesSelf).toBe(true);
   });
 
   it("marks a message that names nobody as not addressing Hex", async () => {
@@ -85,7 +85,7 @@ describe("Nip29Transport.start", () => {
     const [inbound] = await firstValueFrom(
       transportFor(relay.url).start().pipe(take(1), toArray()),
     );
-    expect(inbound!.tagsSelf).toBe(false);
+    expect(inbound!.namesSelf).toBe(false);
   });
 
   it("reports a p-tag naming Hex", async () => {
@@ -97,7 +97,7 @@ describe("Nip29Transport.start", () => {
     const [inbound] = await firstValueFrom(
       transportFor(relay.url).start().pipe(take(1), toArray()),
     );
-    expect(inbound!.tagsSelf).toBe(true);
+    expect(inbound!.namesSelf).toBe(true);
   });
 
   it("drops a message for a group that is not configured", async () => {
@@ -169,7 +169,7 @@ describe("Nip29Transport.reply", () => {
       text: event.content,
       createdAt: event.created_at,
       room: { transport: "nip-29", id: GROUP, relay: url },
-      tagsSelf: true,
+      namesSelf: true,
       addressesSelf: true,
       event,
     };
@@ -255,7 +255,7 @@ describe("Nip29Transport.reply", () => {
      */
     expect(inbound.text).not.toContain("hex");
     expect(inbound.replyToId).toBe(own);
-    expect(inbound.tagsSelf).toBe(false);
+    expect(inbound.namesSelf).toBe(false);
   });
 
   it("does not treat a reply to somebody else as addressing it", async () => {
@@ -267,7 +267,7 @@ describe("Nip29Transport.reply", () => {
     const [inbound] = await firstValueFrom(
       transportFor(relay.url).start().pipe(take(1), toArray()),
     );
-    expect(inbound!.tagsSelf).toBe(false);
+    expect(inbound!.namesSelf).toBe(false);
   });
 
   it("reacts with an h-tagged kind 7 pointing at the message", async () => {

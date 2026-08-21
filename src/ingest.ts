@@ -96,7 +96,7 @@ const PAYLOAD_FIELDS: { [K in keyof Required<MessagePayload>]: true } = {
   // resolved from it. A row that carries only the answer cannot be re-decided
   // when the rule changes, and cannot explain itself when somebody asks why a
   // message was ignored.
-  tagsSelf: true,
+  namesSelf: true,
   addressesSelf: true,
   replyToId: true,
   threadRoot: true,

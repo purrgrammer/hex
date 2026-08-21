@@ -138,7 +138,7 @@ describe("ConcordTransport.start", () => {
     expect(inbound?.text).toBe("are you there?");
     expect(inbound?.author).toBe(member);
     // The tag is the fact; `addressing.ts` turns facts into the decision.
-    expect(inbound?.tagsSelf).toBe(true);
+    expect(inbound?.namesSelf).toBe(true);
     // A channel id means nothing without its community: both travel in the id.
     expect(inbound?.room.id).toBe(`${COMMUNITY}:${PUBLIC_CHANNEL}`);
     expect(inbound?.room.label).toContain("grimoire");
@@ -158,7 +158,7 @@ describe("ConcordTransport.start", () => {
     // The `p` tag rides the ENCRYPTED rumor, so it addresses Hex without
     // telling the relay that anybody addressed anybody.
     // The tag is the fact; `addressing.ts` turns facts into the decision.
-    expect(inbound?.tagsSelf).toBe(true);
+    expect(inbound?.namesSelf).toBe(true);
   });
 
   it("reads a private channel with the key the invite granted", async () => {
@@ -280,7 +280,7 @@ describe("ConcordTransport.reply", () => {
     const stream = transport.start();
     const [inbound] = await firstValueFrom(stream.pipe(take(1), toArray()));
     // The tag is the fact; `addressing.ts` turns facts into the decision.
-    expect(inbound?.tagsSelf).toBe(true);
+    expect(inbound?.namesSelf).toBe(true);
 
     const root = inbound!.id;
     const followUp = buildRumor({
@@ -339,7 +339,7 @@ describe("ConcordTransport.reply", () => {
     expect(next?.threadRoot).toBe(root);
     expect(next?.replyToId).toBe(root);
     // Nothing here names Hex. The thread is what will.
-    expect(next?.tagsSelf).toBe(false);
+    expect(next?.namesSelf).toBe(false);
   });
 
   it("reports the message a reply quotes, wrap and restart included", async () => {
@@ -407,7 +407,7 @@ describe("ConcordTransport.reply", () => {
      * addressing it is `addressing.ts`'s call now; see addressing.test.ts.
      */
     expect(next?.replyToId).toBe(answerId);
-    expect(next?.tagsSelf).toBe(false);
+    expect(next?.namesSelf).toBe(false);
   });
 });
 

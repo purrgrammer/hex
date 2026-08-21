@@ -10,7 +10,7 @@
  * ended up owning a policy decision it could not test without a database.
  *
  * Here instead, as a pure function over a fact and a lookup. The transports
- * report `tagsSelf` and stop; the ingestor resolves this before the message
+ * report `namesSelf` and stop; the ingestor resolves this before the message
  * becomes a queue row; the policy table reads the answer.
  *
  * It is also the seam the next thing needs. Capability has to follow the
@@ -50,7 +50,7 @@ export const NOTHING_REMEMBERED: AddressingBindings = {
  * Three ways in, and every one of them is a deliberate act by the sender:
  *
  * - the room is a private conversation with Hex, so the message was sent to it
- *   and to nobody else — `tagsSelf` carries this for a DM;
+ *   and to nobody else — `namesSelf` carries this for a DM;
  * - a `p` tag names Hex, which is what a client's mention picker writes;
  * - it continues something of Hex's: a reply to a message Hex wrote, or a reply
  *   in a thread Hex is already answering in.
@@ -70,7 +70,7 @@ export function addresses(
   room: string,
   bindings: AddressingBindings,
 ): boolean {
-  if (inbound.tagsSelf) return true;
+  if (inbound.namesSelf) return true;
 
   const parent = inbound.replyToId;
   if (parent !== undefined) {
