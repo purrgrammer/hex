@@ -341,11 +341,15 @@ describe("the transcript carriage", () => {
     transport = transportFor(relay.url);
 
     const room = `${COMMUNITY}:${PUBLIC_CHANNEL}`;
-    const original = transcriptRumor();
+    // A session head already carries a `channel` tag of its own, in the
+    // agent-session NIP's notation. Two vocabularies, one tag name: the binding
+    // replaces it, because a rumor with two `channel` tags is bound to nothing.
+    const original = transcriptRumor([["channel", room]]);
     const bound = transport.bindTranscript(original, room);
 
     expect(bound.tags).toContainEqual(["channel", PUBLIC_CHANNEL]);
     expect(bound.tags).toContainEqual(["epoch", "2"]);
+    expect(bound.tags.filter((tag) => tag[0] === "channel")).toHaveLength(1);
     // Re-hashed, or the id would be a lie about the tags it names.
     expect(bound.id).not.toBe(original.id);
     expect(bound.id).toBe(getEventHash(bound as never));

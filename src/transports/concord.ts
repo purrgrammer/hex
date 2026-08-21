@@ -947,14 +947,34 @@ export class ConcordTransport implements Transport {
    * Idempotent, and it has to be: `checkChannelBinding` refuses a rumor with two
    * `channel` tags, so a retry that stamped twice would mint an event every
    * reader — this one included — is right to drop.
+   *
+   * Which is also why the session's OWN `channel` tag is replaced rather than
+   * added to. Two vocabularies collided on one tag name: the agent-session head
+   * writes `["channel", "<community>:<channel>"]` to say where the run happened,
+   * and CORD-02 writes `["channel", "<channel-id>"]` as the binding a reader
+   * verifies. A rumor carrying both is bound to nothing. The binding wins — an
+   * unreadable event says nothing at all — and the community it drops is the one
+   * fact a reader already has, since they are reading it off that community's
+   * own stream. The wrapped copy loses it too, because both copies are one
+   * event: the alternative is two ids at one `seq`, which this NIP tells a
+   * client to read as a forgery.
    */
   bindTranscript(rumor: Rumor, roomId: string): Rumor {
-    if (rumor.tags.some((tag) => tag[0] === "channel")) return rumor;
     const { channel, stream } = this.bindingFor({
       transport: "concord",
       id: roomId,
     });
-    return withTags(rumor, channelBindingTags(channel.idHex, stream.epoch));
+    const bound = channelBindingOf(rumor.tags);
+    if (bound?.channelIdHex === channel.idHex) return rumor;
+    return withTags(
+      {
+        ...rumor,
+        tags: rumor.tags.filter(
+          (tag) => tag[0] !== "channel" && tag[0] !== "epoch",
+        ),
+      },
+      channelBindingTags(channel.idHex, stream.epoch),
+    );
   }
 
   /**
