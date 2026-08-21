@@ -474,11 +474,8 @@ export class Nip17Transport implements Transport {
     const stamped = await (replyToId ? draft.replyTo(replyToId) : draft).stamp(
       this.options.signer,
     );
-    const unsigned = {
-      ...stamped,
-      kind,
-      tags: tags.length > 0 ? [...stamped.tags, ...tags] : stamped.tags,
-    };
+    const merged = tags.length > 0 ? [...stamped.tags, ...tags] : stamped.tags;
+    const unsigned = { ...stamped, kind, tags: participantsOnly(merged, peer) };
     const rumor = { ...unsigned, id: getEventHash(unsigned) } as Rumor;
 
     const theirInbox = await this.inboxOf(peer);
@@ -759,4 +756,28 @@ function union(first: string[], second: string[] = []): string[] {
     all.push(url);
   }
   return all;
+}
+
+/**
+ * The `p` tags a one-to-one message may carry: the recipient, and nobody else.
+ *
+ * NIP-17 has no participant field — the `p` tags ARE the conversation, so a
+ * client keys a thread on that set. applesauce's `setShortTextContent` pipes
+ * every message through `tagPubkeyMentions()`, which means writing
+ * "nostr:npub1…" in the text silently adds that pubkey as a participant and
+ * turns a private reply into a group thread. Worse, the wraps still go only to
+ * the peer and to us, so the thread names people who can never read it and the
+ * peer's client may address its own reply to them.
+ *
+ * Talking ABOUT someone is not talking TO them. A real group message states its
+ * participants explicitly; it does not infer them from prose.
+ */
+export function participantsOnly(
+  tags: string[][],
+  recipient: string,
+): string[][] {
+  const kept = tags.filter((tag) => tag[0] !== "p" || tag[1] === recipient);
+  return kept.some((tag) => tag[0] === "p" && tag[1] === recipient)
+    ? kept
+    : [...kept, ["p", recipient]];
 }
