@@ -100,7 +100,8 @@ function inbound(id: string, text: string): Inbound {
 function droppingEve() {
   const encoder = new TextEncoder();
   const reads: number[] = [];
-  const state = { dropped: false };
+  /** `forgotten` is the runtime having lost the session: 200, empty, tail -1. */
+  const state = { dropped: false, forgotten: false };
 
   const impl = (async (url: string | URL, init?: RequestInit) => {
     if (init?.method === "POST")
@@ -115,6 +116,14 @@ function droppingEve() {
       new URL(String(url)).searchParams.get("startIndex") ?? 0,
     );
     reads.push(from);
+    if (state.forgotten)
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers({ "x-eve-stream-tail-index": "-1" }),
+        body: (async function* () {})(),
+      };
     const serve = state.dropped ? [...CUT_OFF, ...THE_REST] : CUT_OFF;
     state.dropped = true;
 
@@ -131,7 +140,7 @@ function droppingEve() {
     };
   }) as unknown as typeof fetch;
 
-  return { impl, reads };
+  return { impl, reads, state };
 }
 
 function transport() {
@@ -203,6 +212,38 @@ describe("a follow that stops before its turn does", () => {
     expect(tag(heads.at(-1)!, "status")).not.toBe("active");
     // It read twice: once for the turn, once to settle what the drop hid.
     expect(eve.reads.length).toBeGreaterThan(1);
+  });
+
+  /**
+   * A run the runtime has forgotten.
+   *
+   * `eve dev` rebuilds its snapshot on every change under `agent/`, and a
+   * session from before one is simply not there afterwards. The endpoint does
+   * not say so: it answers 200, an empty body and a tail of -1, and holds the
+   * follow open. Left alone, the head keeps claiming whatever it last said and
+   * every restart reads the same dead stream again.
+   */
+  it("closes the head of a session the runtime no longer has", async () => {
+    const eve = droppingEve();
+    const { impl, sent } = sink();
+    const hex = server(eve, impl);
+
+    await hex.runTurn(inbound("m1", "do the long thing"));
+    const before = sent.filter((rumor) => rumor.kind === 31777).length;
+
+    // Whatever it holds now, the runtime holds nothing.
+    eve.state.forgotten = true;
+    // Back to open, as a process that died mid-turn would have left it.
+    const row = store.transcriptFor(SESSION)!;
+    store.saveTranscript({ ...row, status: "active" }, fenceFor(store));
+
+    // A restart: the next process finds the row and the runtime finds nothing.
+    await server(eve, impl).catchUp();
+
+    // invariant: I20
+    const heads = sent.filter((rumor) => rumor.kind === 31777);
+    expect(heads.length).toBeGreaterThan(before);
+    expect(tag(heads.at(-1)!, "status")).toBe("aborted");
   });
 
   it("publishes the turns the drop hid", async () => {
@@ -458,16 +499,28 @@ describe("a reader that stopped delivering", () => {
    * `heldEve`, except that only the FIRST read is held: the forced reconcile is
    * itself a read, and a fake that held every one would hang it for a minute.
    *
-   * A tail probe (`includeTailIndex=1`) is answered from `tail` in headers and
-   * counts as neither a read nor the held one — which is the endpoint's own
-   * behaviour, since the probe is a request whose body is thrown away.
+   * A probe and a read are the SAME request. The endpoint has no parameter that
+   * separates them — `includeTailIndex` is asked for on every stream, because a
+   * follow needs the header to tell a quiet session from one the runtime does
+   * not have. What separates them is what the caller does next: a probe reads
+   * the headers and throws the body away. So that is what this fake watches,
+   * and a request whose body is never pulled is a probe.
    */
   function heldOnceEve() {
     const encoder = new TextEncoder();
+    /** Every stream request, and the ones whose body somebody actually read. */
+    const asked: number[] = [];
     const reads: number[] = [];
-    const probes: number[] = [];
-    /** Where the run has actually got to, as only the runtime knows. */
-    const state = { tail: undefined as number | undefined };
+    /**
+     * How many events the session HOLDS, as only the runtime knows.
+     *
+     * The header is derived rather than set, because that derivation is the
+     * contract: Eve reports the 0-based index of the last stored event, so a
+     * session of thirty answers 29. A fake that took the header value directly
+     * let these tests state a tail no runtime would ever send, and the gap
+     * comparison was written to agree with it.
+     */
+    const state = { stored: undefined as number | undefined };
     let open!: () => void;
     const opened = new Promise<void>((resolve) => (open = resolve));
     let release!: () => void;
@@ -484,29 +537,23 @@ describe("a reader that stopped delivering", () => {
         };
       const query = new URL(String(url)).searchParams;
       const from = Number(query.get("startIndex") ?? 0);
-      if (query.get("includeTailIndex") === "1") {
-        probes.push(from);
-        return {
-          ok: true,
-          status: 200,
-          statusText: "OK",
-          headers: new Headers(
-            state.tail === undefined
-              ? {}
-              : { "x-eve-stream-tail-index": String(state.tail) },
-          ),
-          body: (async function* () {})(),
-        };
-      }
-      reads.push(from);
-      const hold = first;
-      first = false;
+      asked.push(from);
       return {
         ok: true,
         status: 200,
         statusText: "OK",
-        headers: new Headers(),
+        headers: new Headers(
+          state.stored === undefined
+            ? {}
+            : { "x-eve-stream-tail-index": String(state.stored - 1) },
+        ),
         body: (async function* () {
+          // Reaching here at all is what makes this request a read: a probe
+          // aborts before the first pull. The hold is claimed here too, so a
+          // probe cannot consume it.
+          reads.push(from);
+          const hold = first;
+          first = false;
           const all = [...CUT_OFF, ...THE_REST];
           if (!hold) {
             for (let at = from; at < all.length; at += 1)
@@ -523,7 +570,9 @@ describe("a reader that stopped delivering", () => {
       };
     }) as unknown as typeof fetch;
 
-    return { impl, reads, probes, state, opened, release };
+    /** Asked, but never read: the shape of a tail probe. */
+    const probes = () => asked.length - reads.length;
+    return { impl, reads, asked, probes, state, opened, release };
   }
 
   function server(
@@ -570,13 +619,13 @@ describe("a reader that stopped delivering", () => {
 
     // The run carried on without us. Nothing touches the stored cursor — no
     // production path does, which is why the cursor cannot be the signal.
-    eve.state.tail = 500;
+    eve.state.stored = 500;
     const rowBefore = store.transcriptFor(SESSION)?.streamIndex;
 
     const gaps = await hex.detectGaps();
     expect(gaps.length).toBe(1);
     expect(gaps[0]!.sessionId).toBe(SESSION);
-    expect(gaps[0]!.tailIndex).toBe(500);
+    expect(gaps[0]!.tailIndex).toBe(499);
     expect(gaps[0]!.deliveredIndex).toBeLessThanOrEqual(CUT_OFF.length);
     expect(gaps[0]!.sinceMs).toBeGreaterThanOrEqual(0);
     expect(store.transcriptFor(SESSION)?.streamIndex).toBe(rowBefore);
@@ -594,7 +643,7 @@ describe("a reader that stopped delivering", () => {
     ).toEqual([
       {
         sessionId: SESSION,
-        tailIndex: 500,
+        tailIndex: 499,
         deliveredIndex: gaps[0]!.deliveredIndex,
       },
     ]);
@@ -617,11 +666,11 @@ describe("a reader that stopped delivering", () => {
 
     const working = hex.runTurn(inbound("m1", "do the long thing"));
     await eve.opened;
-    eve.state.tail = 500;
+    eve.state.stored = 500;
 
     expect(await hex.detectGaps()).toEqual([]);
     // Not even asked: a mark that just moved settles it without the runtime.
-    expect(eve.probes).toEqual([]);
+    expect(eve.probes()).toBe(0);
 
     eve.release();
     await working;
@@ -634,14 +683,47 @@ describe("a reader that stopped delivering", () => {
     const working = hex.runTurn(inbound("m1", "do the long thing"));
     await eve.opened;
 
-    // What the reader has delivered, as the runtime's own tail. Equal, not
-    // ahead: the two numbers are in the same index space, and an off-by-one
-    // here would report a gap on every quiet session.
-    eve.state.tail = 500;
+    /*
+     * Caught up, in the runtime's own terms: the reader has delivered every
+     * event the session holds. The two numbers are NOT in one index space — a
+     * mark counts events delivered, a tail names the last one — so a session of
+     * `delivered` events reports `delivered - 1`, and reading them as equal
+     * would report a gap on every quiet session.
+     */
+    eve.state.stored = 500;
     const delivered = (await hex.detectGaps())[0]!.deliveredIndex;
-    eve.state.tail = delivered;
+    eve.state.stored = delivered;
 
     expect(await hex.detectGaps()).toEqual([]);
+
+    eve.release();
+    await working;
+  });
+
+  /**
+   * One event behind is the whole point of the check.
+   *
+   * The event a stream is most likely to be left alone on is the last one of a
+   * turn — `turn.completed`, which is what the follow loop ends on and what
+   * settles a head. A comparison that only fired at two events behind could
+   * never see the case that strands one, which is how a head came to claim
+   * `active` for eleven hours.
+   */
+  it("reports a session exactly one event behind its reader", async () => {
+    const eve = heldOnceEve();
+    const hex = server(eve);
+
+    const working = hex.runTurn(inbound("m1", "do the long thing"));
+    await eve.opened;
+
+    eve.state.stored = 500;
+    const delivered = (await hex.detectGaps())[0]!.deliveredIndex;
+    // One more than the reader has: tail lands exactly ON the mark.
+    eve.state.stored = delivered + 1;
+
+    // invariant: I18
+    const gaps = await hex.detectGaps();
+    expect(gaps.map((gap) => gap.tailIndex)).toEqual([delivered]);
 
     eve.release();
     await working;
@@ -654,10 +736,10 @@ describe("a reader that stopped delivering", () => {
 
     const working = hex.runTurn(inbound("m1", "do the long thing"));
     await eve.opened;
-    eve.state.tail = 500;
+    eve.state.stored = 500;
 
     expect(await hex.detectGaps()).toEqual([]);
-    expect(eve.probes).toEqual([]);
+    expect(eve.probes()).toBe(0);
 
     eve.release();
     await working;
@@ -672,7 +754,7 @@ describe("a reader that stopped delivering", () => {
     await eve.opened;
     eve.release();
     await working;
-    eve.state.tail = 500;
+    eve.state.stored = 500;
 
     expect(await hex.detectGaps()).toEqual([]);
   });

@@ -31,16 +31,53 @@ export interface StreamOptions {
    * header; so a bounded read is "stop when you reach the tail", and that is what
    * this implements. Verified against a running `eve dev`, which held a
    * `follow=0` request open for two minutes and would have held it forever.
+   *
+   * The header is always ASKED for — it costs a header and it is the only way
+   * to tell a session that is quiet from one that is gone. This flag decides
+   * only whether the read stops at it.
    */
   untilTail?: boolean;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
 }
 
+/**
+ * Two vocabularies, and they are one apart.
+ *
+ * This package's index is a COUNT — how many events have been read, which is
+ * also the `startIndex` a resume asks for next. Eve's `x-eve-stream-tail-index`
+ * is the 0-BASED INDEX of the last stored event, so a session holding thirty
+ * events reports twenty-nine. Measured against a running `eve dev`, not assumed.
+ *
+ * Every comparison between the two has to carry the offset, and each one that
+ * did not was a defect: the bounded read below dropped the last event, and the
+ * gap detector could not see a session exactly one event behind.
+ */
+
 /** One event, with the index a resume would use to ask for the next one. */
 export interface IndexedEvent {
   index: number;
   event: EveEnvelope;
+}
+
+/**
+ * The runtime has no such session — or no longer has it.
+ *
+ * Thrown rather than returned because every caller already treats a stream that
+ * ends as a stream that MIGHT come back, and this one will not. A reader that
+ * swallowed it would sit on a session id nothing will ever answer for.
+ */
+export class SessionGoneError extends Error {
+  readonly name = "SessionGoneError";
+
+  constructor(
+    readonly sessionId: string,
+    readonly from: number,
+  ) {
+    super(
+      `eve has no session ${sessionId}: a read resuming at ${from} found nothing stored`,
+    );
+  }
 }
 
 export function streamUrl(options: StreamOptions): string {
@@ -50,7 +87,9 @@ export function streamUrl(options: StreamOptions): string {
   );
   if (options.startIndex !== undefined)
     url.searchParams.set("startIndex", String(options.startIndex));
-  if (options.untilTail) url.searchParams.set("includeTailIndex", "1");
+  // Always. A follow ignores the value; it still needs to be told when there is
+  // nothing on the other end.
+  url.searchParams.set("includeTailIndex", "1");
   return url.toString();
 }
 
@@ -77,12 +116,27 @@ export async function* streamSession(
 
   // `x-eve-stream-tail-index` names the last stored event. Only meaningful when
   // it was asked for; a header that is absent or unreadable means read on.
-  const tailHeader = options.untilTail
-    ? Number(response.headers.get("x-eve-stream-tail-index"))
-    : Number.NaN;
-  const tail = Number.isSafeInteger(tailHeader) ? tailHeader : undefined;
+  const tailHeader = Number(response.headers.get("x-eve-stream-tail-index"));
+  const stored = Number.isSafeInteger(tailHeader) ? tailHeader : undefined;
+  const tail = options.untilTail ? stored : undefined;
 
   let index = options.startIndex ?? 0;
+
+  /*
+   * A session the runtime does not have looks exactly like one that is quiet.
+   *
+   * Eve answers 200 for an id it has never seen — an empty body, a tail of -1,
+   * and a follow that stays open forever. Measured, not assumed. So a reader
+   * resuming at an index the runtime cannot possibly reach is not waiting for
+   * anything, and waiting is what it would otherwise do: no event arrives, so
+   * no check runs, and the reader stays registered on a session that is gone.
+   */
+  if (stored !== undefined && index > 0 && stored < 0)
+    throw new SessionGoneError(options.sessionId, index);
+  // A read that resumed AT the tail has nothing to wait for, and the loop below
+  // would wait anyway: no line ever arrives, so no check ever runs. The request
+  // is a live follow, so waiting means forever.
+  if (tail !== undefined && index > tail) return;
   const decoder = new TextDecoder();
   let buffered = "";
 
@@ -97,15 +151,31 @@ export async function* streamSession(
       newline = buffered.indexOf("\n");
       if (!line) continue;
 
-      let event: EveEnvelope;
+      /*
+       * The index moves for the LINE, not for the parse.
+       *
+       * One nonempty line is one stored event — checked against a live runtime,
+       * thirty lines against a tail of twenty-nine — so a line this cannot read
+       * is still an event Eve counted. Skipping the increment left the cursor
+       * one behind for the rest of the session, and every resume from then on
+       * replayed an event that had already been published.
+       */
+      index += 1;
+
+      let event: EveEnvelope | undefined;
       try {
         event = JSON.parse(line) as EveEnvelope;
       } catch {
-        continue;
+        // One malformed event must not end a transcript that is otherwise
+        // arriving fine — but the tail check below still has to run, or a
+        // session whose last line is unreadable never ends the read.
+        event = undefined;
       }
-      index += 1;
-      if (typeof event.type === "string") yield { index, event };
-      if (tail !== undefined && index >= tail) return;
+      if (event && typeof event.type === "string") yield { index, event };
+
+      // `index` counts events read; `tail` names the last one. They are equal
+      // when the last event has just been read, so this stops AFTER it.
+      if (tail !== undefined && index > tail) return;
     }
   }
 }

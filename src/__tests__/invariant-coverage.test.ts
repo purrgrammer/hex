@@ -49,6 +49,9 @@ const ROOM_TOOLS = `${TESTS}/room-tools.test.ts`;
 const HIJACK = `${TESTS}/thread-hijack.test.ts`;
 const ADDRESSING = `${TESTS}/addressing.test.ts`;
 const CONFIG = `${TESTS}/config.test.ts`;
+const STREAM = `${TESTS}/eve-stream.test.ts`;
+const RESILIENCE = `${TESTS}/runtime-resilience.test.ts`;
+const CONTRACT = `${TESTS}/eve-contract.test.ts`;
 
 type Status = "covered" | "partial" | "gap";
 
@@ -202,6 +205,33 @@ const COVERAGE: Coverage[] = [
       "runner.test.ts across a restart, plus config.test.ts for the concurrency cap a config that says nothing still gets",
     ownerFiles: [RUNNER, CONFIG],
   },
+  {
+    id: "I18",
+    statement:
+      "the runtime's index and this package's cursor are one apart, and every comparison between them carries the offset",
+    status: "covered",
+    owner:
+      "eve-stream.test.ts for the reader, eve-follow-drop.test.ts for the gap detector, eve-contract.test.ts against a real runtime — the fakes agreed with the code and both were wrong",
+    ownerFiles: [STREAM, FOLLOW_DROP, CONTRACT],
+  },
+  {
+    id: "I19",
+    statement:
+      "a call to the runtime is repeated only when it cannot have landed",
+    status: "covered",
+    owner:
+      "runtime-resilience.test.ts — a refused connection is retried, a deadline never is, because a request that went unanswered may still have arrived",
+    ownerFiles: [RESILIENCE],
+  },
+  {
+    id: "I20",
+    statement:
+      "a session the runtime no longer has is closed, not followed forever",
+    status: "covered",
+    owner:
+      "eve-stream.test.ts for the signal (200, empty, tail -1) and eve-follow-drop.test.ts for the head it closes",
+    ownerFiles: [STREAM, FOLLOW_DROP],
+  },
 ];
 
 /**
@@ -219,6 +249,9 @@ const SENTINELS: Record<string, string[]> = {
   I9: [RUNNER_PBT],
   I10: [QUIESCENCE_PBT],
   I13: [POLICY_PBT],
+  I18: [STREAM, FOLLOW_DROP],
+  I19: [RESILIENCE],
+  I20: [STREAM, FOLLOW_DROP],
 };
 
 function sentinelPattern(id: string): RegExp {
@@ -238,7 +271,7 @@ describe("the invariant coverage map", () => {
 
   it("names every invariant the plan set out", () => {
     const ids = new Set(COVERAGE.map((c) => c.id));
-    for (let i = 1; i <= 17; i++) expect(ids.has(`I${i}`)).toBe(true);
+    for (let i = 1; i <= 20; i++) expect(ids.has(`I${i}`)).toBe(true);
   });
 
   it("makes every gap say why", () => {

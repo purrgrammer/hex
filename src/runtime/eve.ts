@@ -12,6 +12,12 @@
 
 import { streamSession, streamTailIndex } from "../eve/stream.js";
 import { readAgentInfo } from "../eve/info.js";
+import {
+  RuntimeHttpError,
+  RuntimeTimeoutError,
+  RuntimeUnreachableError,
+  neverLanded,
+} from "./errors.js";
 import type {
   IndexedRuntimeEvent,
   InputResponse,
@@ -25,7 +31,31 @@ export interface EveRuntimeOptions {
   fetchImpl?: typeof fetch;
   /** Shuts down every in-flight read and post at once. */
   signal?: AbortSignal;
+  /**
+   * How long a POST may go unanswered. Never applied to the stream, which is a
+   * live follow and is supposed to stay quiet.
+   */
+  postTimeoutMs?: number;
+  /** How many times a POST that never landed is repeated, the first included. */
+  attempts?: number;
+  /** The wait before the second attempt; each one after that doubles it. */
+  retryDelayMs?: number;
+  /** Test seam for that wait. */
+  wait?: (ms: number) => Promise<void>;
 }
+
+/**
+ * Long enough that a slow model call is not mistaken for a wedge, short enough
+ * that a wedge does not hold a lane for the rest of the day.
+ */
+const POST_TIMEOUT_MS = 30_000;
+
+/**
+ * Four attempts over roughly seven seconds, which covers an `eve dev` rebuild.
+ * Past that the message is better refused loudly than held.
+ */
+const ATTEMPTS = 4;
+const RETRY_DELAY_MS = 500;
 
 export class EveRuntime implements Runtime {
   readonly name = "eve";
@@ -134,22 +164,82 @@ export class EveRuntime implements Runtime {
     return `/eve/v1/session/${encodeURIComponent(session)}`;
   }
 
+  /**
+   * One POST, with a deadline, and repeated only when it cannot have happened.
+   *
+   * Three outcomes and they are not interchangeable. A status is the runtime's
+   * own answer and is handed back as one. A refused connection means nothing
+   * received the request, so it is safe to repeat — and worth repeating,
+   * because the runtime restarts itself whenever `agent/` changes and every
+   * message that arrives in that window would otherwise be lost: the queue row
+   * is settled the moment a turn is dispatched, so there is nothing left to
+   * retry it. A deadline that expires is NOT repeated, because a request that
+   * went unanswered may still have landed, and a second `send` on a session
+   * that already took the message is a turn the room reads twice.
+   */
   private async post(
     path: string,
     body: unknown,
   ): Promise<Record<string, unknown>> {
+    const attempts = Math.max(1, this.options.attempts ?? ATTEMPTS);
+    const base = this.options.retryDelayMs ?? RETRY_DELAY_MS;
+    const wait =
+      this.options.wait ??
+      ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.attempt(path, body);
+      } catch (error) {
+        // A shutdown is not an outage to wait out: once the caller has aborted,
+        // there is nobody left to hand the answer to.
+        const again =
+          attempt < attempts &&
+          neverLanded(error) &&
+          this.options.signal?.aborted !== true;
+        if (!again) throw error;
+        await wait(base * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  private async attempt(
+    path: string,
+    body: unknown,
+  ): Promise<Record<string, unknown>> {
     const doFetch = this.options.fetchImpl ?? fetch;
-    const response = await doFetch(
-      new URL(path, this.options.host).toString(),
-      {
+    const timeoutMs = this.options.postTimeoutMs ?? POST_TIMEOUT_MS;
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = this.options.signal
+      ? AbortSignal.any([this.options.signal, deadline])
+      : deadline;
+
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await doFetch(new URL(path, this.options.host).toString(), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
-        signal: this.options.signal,
-      },
-    );
-    if (!response.ok)
-      throw new Error(`eve ${path}: ${response.status} ${response.statusText}`);
+        signal,
+      });
+    } catch (error) {
+      // The caller's own shutdown is not a runtime failure; the deadline is.
+      if (deadline.aborted && !this.options.signal?.aborted)
+        throw new RuntimeTimeoutError(path, timeoutMs);
+      throw neverLanded(error)
+        ? new RuntimeUnreachableError(path, error)
+        : error;
+    }
+
+    if (!response.ok) {
+      // What the runtime SAID, not just what it returned. A 409 whose body
+      // names the session is the difference between a diagnosis and a guess.
+      const detail = await response
+        .text()
+        .then((text) => text.trim().slice(0, 300) || response.statusText)
+        .catch(() => response.statusText);
+      throw new RuntimeHttpError(response.status, path, detail);
+    }
     return (await response.json()) as Record<string, unknown>;
   }
 }

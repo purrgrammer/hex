@@ -29,6 +29,12 @@
  */
 
 import { nip19 } from "nostr-tools";
+import { SessionGoneError } from "./stream.js";
+import {
+  RuntimeHttpError,
+  RuntimeTimeoutError,
+  RuntimeUnreachableError,
+} from "../runtime/errors.js";
 import { EveTranscript, type EveTranscriptOptions } from "./transcript.js";
 import { Spool } from "../outbound.js";
 import { asRecord, payload, stringField } from "./types.js";
@@ -319,6 +325,15 @@ const SUBJECT_TAGS = new Set(["a", "e", "p", "r", "i"]);
  * what a moment's outage would have healed.
  */
 export function refusesWork(error: unknown): boolean {
+  // The status the driver kept, not a number read out of a sentence. The
+  // regular expression below is the fallback for a driver that has none, and
+  // it cannot tell a 429 in a status from one in a session id.
+  if (error instanceof RuntimeHttpError)
+    return error.status >= 400 && error.status < 500;
+  // Neither of these is a refusal: one never arrived, the other never answered.
+  // Treating them as one abandons a perfectly good session and forks the run.
+  if (error instanceof RuntimeUnreachableError) return false;
+  if (error instanceof RuntimeTimeoutError) return false;
   const text = error instanceof Error ? error.message : String(error);
   return /\b4\d\d\b/.test(text);
 }
@@ -584,7 +599,15 @@ export class EveServer {
         );
         continue;
       }
-      if (tail === undefined || tail <= mark.index) continue;
+      /*
+       * `tail` is Eve's 0-based index of the last stored event; `mark.index` is
+       * how many events this reader has delivered. Caught up means tail is one
+       * BELOW the mark, so the gap starts the moment they are equal. Comparing
+       * them as if they shared a base cost exactly one event of blindness —
+       * and the event most often left alone at the end of a stream is
+       * `turn.completed`, which is the one whose loss strands a head.
+       */
+      if (tail === undefined || tail < mark.index) continue;
       reports.push({
         sessionId,
         tailIndex: tail,
@@ -814,6 +837,26 @@ export class EveServer {
           `[hex] ${record.sessionId} caught up to ${boundary.last} (${conversation.transcript.headStatus})`,
         );
       } catch (error) {
+        /*
+         * A session the runtime does not have is not a session to try again.
+         *
+         * It cannot produce another event, so a head left claiming `active`
+         * claims it forever and every restart retries the same dead read. The
+         * runtime's own log is what went missing — a rebuild, a reset, a
+         * snapshot that rotated — so the honest close is `aborted`: this run
+         * did not finish, and nobody can say what it would have said.
+         */
+        if (error instanceof SessionGoneError) {
+          this.log(
+            `[hex] ${record.sessionId} is gone from the runtime — closing its head`,
+          );
+          await this.retire(record.sessionId).catch((closing: unknown) =>
+            this.log(
+              `[hex] could not close ${record.sessionId}: ${message(closing)}`,
+            ),
+          );
+          continue;
+        }
         // One unreachable session must not stop the others, or a single dead
         // stream keeps every stale head stale.
         this.log(
@@ -2323,6 +2366,16 @@ export class EveServer {
         }
       }
     } catch (error) {
+      /*
+       * A session that is GONE is not a stream that dropped.
+       *
+       * A drop is worth swallowing: the run is still there and the next read
+       * picks it up. A session the runtime no longer holds will answer the same
+       * empty stream forever, so swallowing it here is what left a head
+       * claiming `active` with nothing behind it. Handed to the caller, which
+       * closes the head instead of scheduling another read of nothing.
+       */
+      if (error instanceof SessionGoneError) throw error;
       // A dropped stream is not a failed turn, but it does mean this process
       // cannot report on one — so it is said out loud and the answer, if any
       // arrived before the drop, is still sent.
@@ -2540,7 +2593,15 @@ export class EveServer {
           if (turnId) finished.add(turnId);
         }
       }
-    } catch {
+    } catch (error) {
+      /*
+       * One exception is not "something went wrong on the way": a session the
+       * runtime does not have will answer this same empty stream every time it
+       * is asked. Swallowed here, the caller reads "caught up" and leaves a
+       * head claiming `active` with nothing behind it — so it is handed up,
+       * and the caller closes the head instead of scheduling another read.
+       */
+      if (error instanceof SessionGoneError) throw error;
       // The abort is how this ends. Anything else that goes wrong leaves the
       // boundary where the reading got to, which filters less rather than more:
       // an answer repeated is better than an answer never sent.

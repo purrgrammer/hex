@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The gateway half. It holds relay websockets open, so it wants a host that
+  stays awake: caffeinate runs for exactly as long as hex does and leaves no
+  assertion behind when it stops.
+
+  Replace HEX_DIR, NODE_BIN and CONFIG before loading.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>rocks.grimoire.hex.gateway</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>-s</string>
+    <string>NODE_BIN</string>
+    <string>HEX_DIR/dist/cli.js</string>
+    <string>serve</string>
+    <string>CONFIG</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart on crash, and only on crash: a clean exit is a deliberate stop,
+       and one writer at a time is enforced by a lease that a race would fight. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>WorkingDirectory</key>
+  <string>HEX_DIR</string>
+
+  <key>StandardOutPath</key>
+  <string>HEX_DIR/hex.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>HEX_DIR/hex.err.log</string>
+</dict>
+</plist>

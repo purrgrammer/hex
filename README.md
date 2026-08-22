@@ -104,6 +104,7 @@ not a safe default for anything that spends money.
 | -------- | ------------------------------------------------------ |
 | `src/`   | the gateway — transports, queue, runner, spool, tools  |
 | `agent/` | the agent itself — prompt, tool wiring, sandbox, model |
+| `ops/`   | launchd jobs for the two processes, and a detach helper |
 | `spec/`  | the NIP this implements                                |
 
 The runtime is a devDependency, so installing Hex does not install an agent
@@ -112,6 +113,7 @@ loop. `agent/` is run by that runtime, not built by this package.
 ## Docs
 
 - [Configuration](docs/configuration.md) — relay roles, sections, signer, state
+- [Operating](docs/operating.md) — the two processes, supervision, the contract suite
 - [Tools](docs/tools.md) — the bridge, publishing bounds, runtime setup
 - [Transcripts](docs/transcripts.md) — what is published, and where
 - [Agent Sessions](spec/nip-agent-sessions.md) — the NIP this implements

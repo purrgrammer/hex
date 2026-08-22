@@ -1,0 +1,14 @@
+#!/usr/bin/perl
+# Start a command in its own session, so it outlives the shell that started it.
+# macOS ships no setsid; this is the two-fork equivalent.
+#
+#   ops/detach <logfile> <command> [args...]
+use POSIX qw(setsid);
+my $log = shift @ARGV or die "usage: detach <logfile> <command> [args...]\n";
+exit 0 if fork();
+setsid();
+exit 0 if fork();
+open(STDIN,  '<', '/dev/null');
+open(STDOUT, '>>', $log) or die "cannot append to $log: $!\n";
+open(STDERR, '>&', \*STDOUT);
+exec @ARGV;
